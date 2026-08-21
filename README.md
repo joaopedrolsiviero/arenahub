@@ -9,17 +9,21 @@ segurança e roadmap) está documentada em [`docs/ARCHITECTURE.md`](docs/ARCHITE
 esse documento antes de contribuir com qualquer funcionalidade de negócio. Para colocar o sistema
 em produção, veja [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
-> **Status:** Fase 9 — Deploy e Infraestrutura, **preparada e validada localmente; deploy real
-> bloqueado por falta de acesso a infraestrutura externa neste ambiente** (sem conta Vercel/Railway/
-> Clerk produção, sem `git remote` configurado). O que dava pra validar de verdade dentro do
-> repositório foi validado: `apps/api/Dockerfile` (build de produção) foi **construído e rodado**
-> contra o Postgres local — não só escrito — o que revelou 5 bugs reais de build/runtime (inclusive
-> que `pnpm start:prod` nunca funcionou desde que foi criado, silenciosamente). `GET /v1/health`
-> (liveness) e `GET /v1/health/ready` (readiness, checagem real do Postgres) substituem o health
-> check único de antes; `app.enableShutdownHooks()` agora faz `SIGTERM` encerrar a API de forma
-> limpa. Headers de segurança novos no frontend, testados contra `next start` local real. Ver
-> [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) para o detalhamento completo de cada item — o que é
-> IMPLEMENTADO/TESTADO vs. BLOQUEADO POR INFRAESTRUTURA, sem inventar deploy que não aconteceu.
+> **Status:** Fase 9 — Deploy e Infraestrutura, **preparada e parcialmente destravada; deploy real
+> em Vercel/Railway ainda bloqueado por falta de contas provisionadas de produção neste ambiente**.
+> O repositório agora está no GitHub (`github.com/fraagelo/arenahub`) com CI (GitHub Actions) rodando
+> de verdade num runner real pela primeira vez — e a primeira execução **falhou**, revelando mais um
+> bug real: o placeholder `CLERK_WEBHOOK_SIGNING_SECRET` do workflow não era um base64 válido para a
+> lib `standardwebhooks` (só funcionava por acidente localmente, porque o `.env` real não versionado
+> usa outro valor). Corrigido e revalidado — CI verde na segunda execução. `apps/api/Dockerfile`
+> (build de produção) foi **construído e rodado** contra o Postgres local — não só escrito — o que
+> revelou 5 bugs reais de build/runtime (inclusive que `pnpm start:prod` nunca funcionou desde que
+> foi criado, silenciosamente). `GET /v1/health` (liveness) e `GET /v1/health/ready` (readiness,
+> checagem real do Postgres) substituem o health check único de antes; `app.enableShutdownHooks()`
+> agora faz `SIGTERM` encerrar a API de forma limpa. Headers de segurança novos no frontend, testados
+> contra `next start` local real. Ver [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) para o detalhamento
+> completo de cada item — o que é IMPLEMENTADO/TESTADO vs. BLOQUEADO POR INFRAESTRUTURA, sem
+> inventar deploy que não aconteceu.
 >
 > OWNER/ADMIN continuam com o painel próprio em `/dashboard` (Fase 7), separado da experiência do
 > cliente: escolher a arena administrada → resumo do dia → próximas reservas → ocupação por quadra
@@ -523,11 +527,18 @@ arenahub/
   deliberadamente não adicionado (sem como testar contra domínio real com Clerk ativo).
 - **Railway escolhido como plataforma do backend** (entre Railway/Render/Fly.io) — decisão de
   papel, registrada com justificativa em `docs/DEPLOYMENT.md`; nenhuma conta foi criada.
-- **Deploy real não foi executado por falta de acesso à infraestrutura** — sem conta
-  Vercel/Railway/Clerk produção, e este repositório nunca teve `git remote` configurado nem um
-  commit feito, então o CI do GitHub Actions nunca rodou contra um runner real (só auditado por
-  leitura). `docs/DEPLOYMENT.md` documenta exatamente o que é IMPLEMENTADO/TESTADO vs. BLOQUEADO
-  POR INFRAESTRUTURA, sem inventar deploy que não aconteceu.
+- **Repositório publicado no GitHub e CI validado contra um runner real** — primeiro commit e
+  primeiro `git push` da história do projeto (`github.com/fraagelo/arenahub`). A primeira execução
+  do CI **falhou de verdade**: o placeholder `CLERK_WEBHOOK_SIGNING_SECRET` do workflow
+  (`whsec_ci_test_...`) não é base64 válido para a lib `standardwebhooks` (que decodifica tudo após
+  `whsec_` como base64 puro) — só "funcionava" localmente porque o `.env` real não versionado usa
+  outro valor. Corrigido para `whsec_` + base64 puro; revalidado localmente contra um Postgres
+  novo (mesmos passos do CI: migrate deploy + test:e2e + build, 133/133 testes) antes do push da
+  correção. CI verde na segunda execução — ver `.github/workflows/ci.yml`.
+- **Deploy real em Vercel/Railway ainda não foi executado por falta de contas de produção
+  provisionadas neste ambiente** (Clerk produção, Vercel, Railway). `docs/DEPLOYMENT.md` documenta
+  exatamente o que é IMPLEMENTADO/TESTADO vs. BLOQUEADO POR INFRAESTRUTURA, sem inventar deploy que
+  não aconteceu.
 
 ## Git
 

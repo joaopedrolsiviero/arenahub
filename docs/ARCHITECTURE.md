@@ -54,11 +54,18 @@ O "como implantar" fica em `docs/DEPLOYMENT.md` (documento novo desta fase) — 
    justificativa registrada em `docs/DEPLOYMENT.md` — decisão de papel, nenhuma conta foi criada.
 8. **Nenhuma dependência nova, nenhuma atualizada** — inclusive reafirmando a decisão da Fase 8 de
    não atualizar o Prisma (6.19.3, major disponível é 7.x) sem necessidade real.
-9. **Deploy real, staging, Sentry/PostHog, backup/restore reais, CI rodando num runner do GitHub —
-   todos documentados como BLOQUEADOS POR INFRAESTRUTURA**, nunca declarados como feitos. Este
-   repositório nunca teve um `git remote` configurado nem um commit — o workflow de CI existe e foi
-   auditado, mas nunca executou contra um runner real. Ver Roadmap e `docs/DEPLOYMENT.md`,
-   "Regra de ouro desta fase".
+9. **Deploy real (Vercel/Railway), staging, Sentry/PostHog e backup/restore reais permanecem
+   BLOQUEADOS POR INFRAESTRUTURA**, nunca declarados como feitos — falta de contas de produção
+   provisionadas neste ambiente. Ver Roadmap e `docs/DEPLOYMENT.md`, "Regra de ouro desta fase".
+10. **Repositório publicado no GitHub e CI validado contra um runner real do GitHub Actions** —
+    primeiro commit e primeiro `git push` da história do projeto
+    (`github.com/fraagelo/arenahub`). A primeira execução real do CI **falhou**, revelando mais um
+    bug real do tipo que só aparece rodando de verdade: o placeholder
+    `CLERK_WEBHOOK_SIGNING_SECRET` do workflow não era base64 válido para a lib `standardwebhooks`
+    (decodifica tudo após `whsec_` como base64 puro) — mascarado localmente porque o `.env` real
+    não versionado usa outro valor. Corrigido e revalidado localmente (mesmos passos do CI contra
+    um Postgres novo: migrate deploy + test:e2e + build, 133/133 testes) antes do push da correção.
+    CI verde na segunda execução.
 
 1. **Cache do TanStack Query passa a ser limpo no logout/troca de conta** — `AppQueryProvider`
    ganhou um componente interno (`ClearQueryCacheOnUserChange`) que observa `useAuth().userId` do
@@ -651,7 +658,7 @@ arenahub/
 │
 ├── .dockerignore                  # raiz, não apps/api/ — o contexto de build do Docker é a raiz
 ├── .nvmrc                         # versão do Node fixada (Fase 9), igual ao CI
-├── .github/workflows/             # CI: lint, test, build (nunca rodou contra um runner real — sem git remote)
+├── .github/workflows/             # CI: lint, test, build — validado contra runner real (Fase 9)
 └── docs/
     ├── ARCHITECTURE.md            # este documento
     └── DEPLOYMENT.md              # runbook operacional de deploy (Fase 9) — "como", não "por quê"
@@ -1762,8 +1769,8 @@ testar em cada uma — mas a definição geral vale para todas.
   (`Booking`/idempotência continuam 100% PostgreSQL desde a Fase 4) — não
   provisionado pra este deploy, mesmo estando no `docker-compose.yml` desde
   a Fase 1. Ver "Decisões revisadas na v0.9".
-- **Dependências:** Fase 8 com CI 100% verde (regressão local — o CI real do
-  GitHub Actions nunca rodou, ver abaixo).
+- **Dependências:** Fase 8 com CI 100% verde (regressão local, depois confirmada também contra o
+  runner real do GitHub Actions — ver abaixo).
 - **Critério de conclusão real vs. o que foi possível validar**: o critério
   original ("uma arena real cadastrada e usada em produção; erros no
   Sentry; eventos no PostHog") **não foi atingido** — não há deploy real,
@@ -1776,10 +1783,12 @@ testar em cada uma — mas a definição geral vale para todas.
   backend, 59 no frontend) sem quebrar nada das Fases 1-8.
 - **Bloqueado por infraestrutura, documentado explicitamente** (não
   inventado como feito): deploy real na Vercel/Railway, PostgreSQL
-  gerenciado real, ambiente de produção do Clerk, domínio próprio, CI
-  rodando de verdade num runner do GitHub (este repositório nunca teve um
-  `git remote` configurado nem um commit feito), staging, backup/restore
-  reais, Sentry/PostHog.
+  gerenciado real, ambiente de produção do Clerk, domínio próprio, staging,
+  backup/restore reais, Sentry/PostHog. **Já destravado nesta fase**: o
+  repositório foi publicado no GitHub e o CI passou a rodar de verdade num
+  runner real — a primeira execução falhou (bug real no placeholder do
+  `CLERK_WEBHOOK_SIGNING_SECRET` do workflow, corrigido e revalidado), a
+  segunda ficou verde. Ver "Decisões revisadas na v0.9", item 10.
 
 ### Fase 10 — IA
 - **Objetivo:** agente capaz de responder sobre disponibilidade e criar reserva via tools controladas.

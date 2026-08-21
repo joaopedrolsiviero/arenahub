@@ -43,10 +43,15 @@
 - **Autenticação**: Clerk — só existe um ambiente de *desenvolvimento* configurado
   (chaves `sk_test_...`/`pk_test_...`). **BLOQUEADO POR INFRAESTRUTURA** criar o
   ambiente de *produção* separado (exige acesso ao dashboard.clerk.com da conta real).
-- **CI**: GitHub Actions (`.github/workflows/ci.yml`) — **IMPLEMENTADO**, mas
-  **NUNCA EXECUTOU DE VERDADE**: este repositório não tem remote (`git remote -v` vazio,
-  nenhum commit feito) — não há para onde dar push, então o workflow nunca rodou num
-  runner real do GitHub. Validado por leitura/inspeção do YAML, não por execução.
+- **CI**: GitHub Actions (`.github/workflows/ci.yml`) — **IMPLEMENTADO E TESTADO**: o
+  repositório foi publicado em `github.com/fraagelo/arenahub` e o workflow rodou num
+  runner real do GitHub. A primeira execução **falhou de verdade** — o placeholder
+  `CLERK_WEBHOOK_SIGNING_SECRET` do workflow não era base64 válido para a lib
+  `standardwebhooks`, quebrando 5 testes de `auth-flow.e2e-spec.ts` (só "funcionava"
+  localmente porque o `.env` real não versionado usa outro valor). Corrigido para
+  `whsec_` + base64 puro, revalidado localmente contra um Postgres novo com os mesmos
+  passos do CI (migrate deploy + test:e2e + build, 133/133 testes) antes do push da
+  correção. Segunda execução: **verde**.
 
 ---
 
