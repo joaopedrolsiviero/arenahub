@@ -1,0 +1,262 @@
+// Fase 2: primeiro model de domínio (User), necessário para autenticação.
+// Fase 3: domínio de Arena/Quadra (Arena, ArenaMember, Court).
+// Fase 4: núcleo de reservas (Booking, disponibilidade, idempotência).
+// Fase 5: timezone real da Arena + horário de funcionamento
+// (ArenaOperatingHours), disponibilidade deixa de ser uma grade matemática
+// e passa a respeitar quando a arena está de fato aberta.
+// Fase 6: experiência de reserva do cliente (frontend) — sem novos models,
+// só o índice por userId em Booking (consulta "minhas reservas"). O
+// restante do schema de negócio (Payment...) chega nas fases seguintes,
+// seguindo docs/ARCHITECTURE.md.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Espelha o usuário do Clerk (ARCHITECTURE.md, Parte 7). Não tem campo de
+// "papel" global — o papel é sempre relativo a uma arena, via ArenaMember.
+// `id` usa cuid() (Prisma-recomendado para IDs distribuídos, sem depender de
+// nenhuma extensão do Postgres) — decisão registrada por não estar explícita
+// na arquitetura, e reaplicada em todos os models novos para manter um único
+// padrão de identificador no projeto.
+model User {
+  id        String   @id @default(cuid())
+  clerkId   String   @unique
+  email     String   @unique
+  name      String?
+  phone     String?
+  avatarUrl String?
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  arenaMemberships   ArenaMember[]
+  bookings           Booking[]     @relation("BookingUser")
+  cancelledBookings  Booking[]     @relation("BookingCancelledBy")
+}
+
+// Papel do usuário dentro de uma arena específica (nunca um campo global).
+// STAFF fica para quando precisar de permissões mais granulares — adicionar
+// um valor de enum não exige mudança estrutural.
+enum ArenaRole {
+  OWNER
+  ADMIN
+}
+
+// Modalidade esportiva de uma quadra. Enum simples nesta fase (só
+// beach volley) em vez do catálogo `Sport` previsto na Parte 7 do
+// ARCHITECTURE.md — decisão explícita da Fase 3, documentada em
+// "Decisões revisadas na v0.3". Novas modalidades = novo valor de enum,
+// sem mudança estrutural.
+enum Sport {
+  BEACH_VOLLEYBALL
+}
+
+// Estabelecimento esportivo. Campos deliberadamente mínimos nesta fase —
+// endereço, imagens e status (previstos na Parte 7 do ARCHITECTURE.md para o
+// marketplace/disponibilidade futuros) chegam quando a fase que realmente
+// precisar deles for implementada.
+model Arena {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  description String?
+  phone       String?
+  email       String?
+  // Identificador IANA (ex: "America/Sao_Paulo") — nunca offset fixo
+  // ("-03:00") nem sigla ("GMT-3"), justamente para que DST seja resolvido
+  // corretamente pela biblioteca de timezone, não calculado à mão (Fase 5).
+  // Todas as quadras da arena seguem esse timezone — não existe
+  // Court.timezone (ver docs/ARCHITECTURE.md, Fase 5).
+  timezone    String   @default("America/Sao_Paulo")
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+
+  members        ArenaMember[]
+  courts         Court[]
+  operatingHours ArenaOperatingHours[]
+}
+
+// Dia da semana centralizado num enum — nunca um inteiro solto (0=domingo
+// vs. 1=domingo é uma fonte clássica de bug se espalhado pelo código).
+enum Weekday {
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+  SUNDAY
+}
+
+// Horário de funcionamento — pertence à Arena, não à Court (Fase 5: todas
+// as quadras de uma arena tipicamente compartilham o mesmo horário de
+// funcionamento; modelar por quadra duplicaria configuração sem necessidade
+// real hoje — ver docs/ARCHITECTURE.md). Múltiplas linhas por
+// `(arenaId, dayOfWeek)` representam múltiplos intervalos no mesmo dia (ex:
+// abre de manhã, fecha para almoço, reabre à tarde). Um dia sem nenhuma
+// linha significa "fechado" — nunca uma linha-sentinela 00:00→00:00.
+//
+// `opensAt`/`closesAt` são minutos desde a meia-noite LOCAL (0-1439), não um
+// timestamp — mesmo padrão já usado para `bufferMinutes`/
+// `slotDurationMinutes` em Court, e evita a ambiguidade de um `@db.Time` do
+// Postgres carregando uma data espúria via Prisma. Intervalos que atravessam
+// a meia-noite (overnight, ex: 22:00→02:00) não são suportados nesta fase —
+// decisão explícita pela alternativa mais simples (ver Fase 5, item 12):
+// todo intervalo deve estar contido no mesmo dia civil (`closesAt >
+// opensAt`, sempre).
+model ArenaOperatingHours {
+  id        String  @id @default(cuid())
+  arenaId   String
+  dayOfWeek Weekday
+  opensAt   Int
+  closesAt  Int
+
+  arena Arena @relation(fields: [arenaId], references: [id], onDelete: Cascade)
+
+  @@index([arenaId, dayOfWeek])
+}
+
+// Tabela de junção User<->Arena — a mesma pensada desde a Parte 7 do
+// ARCHITECTURE.md. `invitedAt`/`acceptedAt` (fluxo de convite) ficam para
+// quando existir de fato um fluxo de convite; por ora a associação nasce
+// sempre já "efetivada" (criador da arena vira OWNER direto).
+model ArenaMember {
+  id        String    @id @default(cuid())
+  arenaId   String
+  userId    String
+  role      ArenaRole
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+
+  arena Arena @relation(fields: [arenaId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([arenaId, userId])
+  @@index([userId])
+}
+
+// Quadra de uma arena. `pricePerSlot`/`slotDurationMinutes`/`bufferMinutes`
+// chegam agora (Fase 4) — são exatamente os campos que a Fase 3 disse que
+// "não fazem sentido sem o sistema que os consome" (Booking/disponibilidade).
+model Court {
+  id                  String   @id @default(cuid())
+  arenaId             String
+  name                String
+  sport               Sport
+  description         String?
+  isActive            Boolean  @default(true)
+  // Preço de um slot, congelado em Booking.total na criação da reserva —
+  // nunca recalculado depois (ARCHITECTURE.md, "Regra de preço no MVP").
+  pricePerSlot        Decimal  @default(0) @db.Decimal(10, 2)
+  // Duração fixa de toda reserva de CUSTOMER nesta quadra (minutos).
+  slotDurationMinutes Int      @default(60)
+  // Minutos de buffer obrigatório após uma reserva de CUSTOMER antes do
+  // próximo horário ficar disponível. Não se aplica a BLOCK/MAINTENANCE.
+  bufferMinutes       Int      @default(0)
+  createdAt           DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt           DateTime @updatedAt @db.Timestamptz(6)
+
+  arena    Arena     @relation(fields: [arenaId], references: [id], onDelete: Cascade)
+  bookings Booking[]
+
+  @@unique([arenaId, name])
+}
+
+// Origem da ocupação — nunca confundir com o ciclo de vida (BookingStatus).
+enum BookingType {
+  CUSTOMER
+  BLOCK
+  MAINTENANCE
+}
+
+// Ciclo de vida da ocupação nesta fase. Estados ligados a pagamento
+// (PENDING_PAYMENT, REFUNDED...) ficam fora — pagamento é fase futura e
+// Booking não depende dele.
+enum BookingStatus {
+  CONFIRMED
+  CANCELLED
+}
+
+// Representa a ocupação de uma quadra em um intervalo de tempo — nunca
+// "reserva de cliente" apenas. `type` diferencia a origem (CUSTOMER/BLOCK/
+// MAINTENANCE); todas ocupam a quadra da mesma forma para efeito de
+// conflito (ver a exclusion constraint na migration desta fase).
+//
+// Sem `arenaId` denormalizado: não está entre os campos mínimos pedidos, e
+// a cadeia arena→court já é validada via CourtsService antes de qualquer
+// operação em Booking.
+model Booking {
+  id      String        @id @default(cuid())
+  courtId String
+  // Sempre preenchido na prática (cliente que reservou, ou admin que criou
+  // o bloqueio/manutenção) — nulável no schema para não impor uma
+  // dependência rígida a User em casos futuros (ex: bloqueio programático).
+  userId  String?
+  type    BookingType
+  status  BookingStatus @default(CONFIRMED)
+
+  startsAt DateTime @db.Timestamptz(6)
+  endsAt   DateTime @db.Timestamptz(6)
+
+  // Cópia congelada de Court.bufferMinutes no momento da criação — usada
+  // pela exclusion constraint (não pode depender de uma coluna mutável de
+  // outra tabela). Sempre 0 para BLOCK/MAINTENANCE.
+  bufferMinutesSnapshot Int @default(0)
+
+  // Congelado no momento da criação (Decimal, nunca float) — 0 para
+  // BLOCK/MAINTENANCE. Nunca recalculado depois.
+  total Decimal @default(0) @db.Decimal(10, 2)
+
+  // Motivo/descrição administrativa — só relevante para BLOCK/MAINTENANCE
+  // ("campos necessários para identificar a origem administrativa").
+  reason String?
+
+  cancelledAt       DateTime? @db.Timestamptz(6)
+  cancelledByUserId String?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  // onDelete: Restrict — histórico de reservas nunca deve desaparecer junto
+  // com a quadra (diferente de ArenaMember, que é vínculo, não registro
+  // histórico). Não há endpoint de exclusão de Court ainda; a constraint
+  // fica pronta para quando existir.
+  court           Court @relation(fields: [courtId], references: [id], onDelete: Restrict)
+  user            User? @relation("BookingUser", fields: [userId], references: [id], onDelete: SetNull)
+  cancelledByUser User? @relation("BookingCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: SetNull)
+
+  @@index([courtId, startsAt])
+  // Fase 6: "minhas reservas" passou a consultar Booking por userId — sem
+  // esse índice seria table scan. Já estava anotado como índice "eventual"
+  // desde a Parte 7 do ARCHITECTURE.md (Fase 4); implementado agora que a
+  // primeira query real por userId existe.
+  @@index([userId])
+  // A proteção real contra conflito (EXCLUDE USING GIST) é adicionada via
+  // SQL manual na migration desta fase — Prisma não tem sintaxe para
+  // exclusion constraints. Ver migration `booking_availability`.
+}
+
+// Idempotência para operações que podem ser repetidas (Idempotency-Key),
+// persistida no Postgres — sobrevive a restart e múltiplas instâncias, e é
+// segura sob concorrência real via o índice único abaixo (não usa memória
+// local nem depende de Redis).
+model IdempotencyKey {
+  id             String   @id @default(cuid())
+  key            String
+  userId         String
+  // Identificador lógico da operação (ex: "bookings.customer.create") —
+  // não a URL literal, para não acoplar à forma exata da rota.
+  endpoint       String
+  // Hash determinístico do payload relevante — mesma chave com payload
+  // diferente é rejeitada (409), não silenciosamente aceita.
+  requestHash    String
+  responseStatus Int
+  responseBody   Json
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+
+  @@unique([userId, endpoint, key])
+}

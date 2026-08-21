@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NEXT_TELEMETRY_DISABLED: "1"
+  TURBO_TELEMETRY_DISABLED: "1"
+  # A Fase 2 introduziu o primeiro model de domínio (User) e os primeiros
+  # testes de integração reais (webhook -> Postgres, guard -> Postgres) —
+  # a partir daqui o CI precisa de um Postgres de verdade (ver
+  # docs/ARCHITECTURE.md / auditoria da Fase 1, item "CI e PostgreSQL").
+  DATABASE_URL: "postgresql://arenahub:arenahub@localhost:5432/arenahub?schema=public"
+  # Valor de teste, não uma credencial real do Clerk: a verificação de
+  # assinatura do webhook é uma operação HMAC simétrica offline — os testes
+  # assinam e verificam com este mesmo valor dos dois lados, sem precisar de
+  # nenhuma conta Clerk real.
+  CLERK_WEBHOOK_SIGNING_SECRET: "whsec_ci_test_MDAwMDAwMDAwMDAwMDAwMDAwMDA="
+  # Placeholder — nenhum teste automatizado chama a verificação real de JWT
+  # do Clerk (ClerkService é sobrescrito nos testes que precisam de uma
+  # "sessão válida"; ver test/auth-flow.e2e-spec.ts), mas o valor precisa
+  # existir para o app não quebrar caso algo tente construir o client.
+  CLERK_SECRET_KEY: "sk_test_ci_placeholder_not_a_real_key"
+
+jobs:
+  ci:
+    name: Lint, typecheck, test, build
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: arenahub
+          POSTGRES_PASSWORD: arenahub
+          POSTGRES_DB: arenahub
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U arenahub -d arenahub"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm turbo run lint
+
+      - name: Typecheck
+        run: pnpm turbo run typecheck
+
+      - name: Test
+        run: pnpm turbo run test
+
+      - name: Apply database migrations
+        run: pnpm --filter @arenahub/api exec prisma migrate deploy
+
+      - name: Test (API e2e)
+        run: pnpm --filter @arenahub/api test:e2e
+
+      - name: Build
+        run: pnpm turbo run build

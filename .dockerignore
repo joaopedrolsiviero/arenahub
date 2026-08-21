@@ -1,0 +1,25 @@
+# Fase 9, item 111 — o contexto de build do Docker é a RAIZ do monorepo
+# (apps/api/Dockerfile copia packages/ e apps/api/, então precisa enxergar
+# o repositório inteiro), não apps/api/ isolado. Este arquivo precisa estar
+# aqui, não dentro de apps/api/, pra realmente ser respeitado pelo Docker.
+
+**/node_modules
+**/dist
+**/.next
+**/.turbo
+**/coverage
+**/*.tsbuildinfo
+
+.env
+.env.*
+!.env.example
+
+.git
+.github
+
+**/*.spec.ts
+**/*.e2e-spec.ts
+apps/api/test
+
+apps/web
+docs

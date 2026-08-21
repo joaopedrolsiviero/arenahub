@@ -1,0 +1,23 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# pnpm blocks postinstall/build scripts of dependencies by default; each one
+# used here is explicitly allowed or denied, never left to the default prompt.
+allowBuilds:
+  # Prisma's own postinstall downloads the platform-specific query-engine
+  # binary it needs to run at all — required, not optional.
+  '@prisma/client': true
+  '@prisma/engines': true
+  prisma: true
+  # Next.js optional native deps (image optimization / faster module
+  # resolution). Disallowed until there's a concrete need for them.
+  sharp: false
+  unrs-resolver: false
+
+# pnpm's supply-chain policy blocks installing packages published too
+# recently by default; these were added automatically on install and are
+# explicitly excluded because they were pinned to a known exact version.
+minimumReleaseAgeExclude:
+  - '@clerk/backend@3.16.8'
+  - '@clerk/nextjs@7.7.8'
