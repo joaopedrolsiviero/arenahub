@@ -20,8 +20,10 @@ env:
   # Valor de teste, não uma credencial real do Clerk: a verificação de
   # assinatura do webhook é uma operação HMAC simétrica offline — os testes
   # assinam e verificam com este mesmo valor dos dois lados, sem precisar de
-  # nenhuma conta Clerk real.
-  CLERK_WEBHOOK_SIGNING_SECRET: "whsec_ci_test_MDAwMDAwMDAwMDAwMDAwMDAwMDA="
+  # nenhuma conta Clerk real. Precisa ser `whsec_` + base64 puro — a lib
+  # `standardwebhooks` decodifica tudo após o prefixo como base64, então
+  # qualquer texto extra (como o antigo "ci_test_") quebra a decodificação.
+  CLERK_WEBHOOK_SIGNING_SECRET: "whsec_MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
   # Placeholder — nenhum teste automatizado chama a verificação real de JWT
   # do Clerk (ClerkService é sobrescrito nos testes que precisam de uma
   # "sessão válida"; ver test/auth-flow.e2e-spec.ts), mas o valor precisa
