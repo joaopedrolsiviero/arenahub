@@ -9,21 +9,24 @@ segurança e roadmap) está documentada em [`docs/ARCHITECTURE.md`](docs/ARCHITE
 esse documento antes de contribuir com qualquer funcionalidade de negócio. Para colocar o sistema
 em produção, veja [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
-> **Status:** Fase 9 — Deploy e Infraestrutura, **preparada e parcialmente destravada; deploy real
-> em Vercel/Railway ainda bloqueado por falta de contas provisionadas de produção neste ambiente**.
-> O repositório agora está no GitHub (`github.com/fraagelo/arenahub`) com CI (GitHub Actions) rodando
+> **Status:** Fase 9 — Deploy e Infraestrutura, **preparada e parcialmente destravada**. O
+> repositório agora está no GitHub (`github.com/fraagelo/arenahub`) com CI (GitHub Actions) rodando
 > de verdade num runner real pela primeira vez — e a primeira execução **falhou**, revelando mais um
 > bug real: o placeholder `CLERK_WEBHOOK_SIGNING_SECRET` do workflow não era um base64 válido para a
 > lib `standardwebhooks` (só funcionava por acidente localmente, porque o `.env` real não versionado
-> usa outro valor). Corrigido e revalidado — CI verde na segunda execução. `apps/api/Dockerfile`
-> (build de produção) foi **construído e rodado** contra o Postgres local — não só escrito — o que
-> revelou 5 bugs reais de build/runtime (inclusive que `pnpm start:prod` nunca funcionou desde que
-> foi criado, silenciosamente). `GET /v1/health` (liveness) e `GET /v1/health/ready` (readiness,
-> checagem real do Postgres) substituem o health check único de antes; `app.enableShutdownHooks()`
-> agora faz `SIGTERM` encerrar a API de forma limpa. Headers de segurança novos no frontend, testados
-> contra `next start` local real. Ver [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) para o detalhamento
-> completo de cada item — o que é IMPLEMENTADO/TESTADO vs. BLOQUEADO POR INFRAESTRUTURA, sem
-> inventar deploy que não aconteceu.
+> usa outro valor). Corrigido e revalidado — CI verde na segunda execução. Ao tentar o deploy real no
+> Railway, esbarramos num bloqueio diferente dos anteriores: **custo**, não falta de acesso — o
+> Railway hoje exige o Hobby plan (US$5/mês) para qualquer deploy, e a decisão consciente (do
+> usuário) foi **pausar antes de gastar**. Vercel e Clerk produção continuam bloqueados por falta de
+> conta/ambiente criado. `apps/api/Dockerfile` (build de produção) foi **construído e rodado** contra
+> o Postgres local — não só escrito — o que revelou 5 bugs reais de build/runtime (inclusive que
+> `pnpm start:prod` nunca funcionou desde que foi criado, silenciosamente). `GET /v1/health`
+> (liveness) e `GET /v1/health/ready` (readiness, checagem real do Postgres) substituem o health
+> check único de antes; `app.enableShutdownHooks()` agora faz `SIGTERM` encerrar a API de forma
+> limpa. Headers de segurança novos no frontend, testados contra `next start` local real. Ver
+> [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) para o detalhamento completo de cada item — o que é
+> IMPLEMENTADO/TESTADO vs. BLOQUEADO POR CUSTO vs. BLOQUEADO POR INFRAESTRUTURA, sem inventar deploy
+> que não aconteceu.
 >
 > OWNER/ADMIN continuam com o painel próprio em `/dashboard` (Fase 7), separado da experiência do
 > cliente: escolher a arena administrada → resumo do dia → próximas reservas → ocupação por quadra
@@ -525,8 +528,12 @@ arenahub/
 - **Headers de segurança no frontend** (`X-Content-Type-Options`, `Referrer-Policy`,
   `X-Frame-Options`, `Strict-Transport-Security`) — testados contra `next start` local real. CSP
   deliberadamente não adicionado (sem como testar contra domínio real com Clerk ativo).
-- **Railway escolhido como plataforma do backend** (entre Railway/Render/Fly.io) — decisão de
-  papel, registrada com justificativa em `docs/DEPLOYMENT.md`; nenhuma conta foi criada.
+- **Railway escolhido como plataforma do backend** (entre Railway/Render/Fly.io) — na tentativa
+  real de criar o projeto, o Railway exigiu o **Hobby plan (US$5/mês)**, sem free tier real hoje
+  (a informação anterior neste documento, de que não exigia plano pago, estava desatualizada —
+  corrigida em `docs/DEPLOYMENT.md`). Decisão consciente de **pausar o deploy antes de gastar**;
+  Render é a alternativa mais próxima (free tier, troca mecânica) se o custo do Railway não for
+  viável no futuro.
 - **Repositório publicado no GitHub e CI validado contra um runner real** — primeiro commit e
   primeiro `git push` da história do projeto (`github.com/fraagelo/arenahub`). A primeira execução
   do CI **falhou de verdade**: o placeholder `CLERK_WEBHOOK_SIGNING_SECRET` do workflow
@@ -535,10 +542,10 @@ arenahub/
   outro valor. Corrigido para `whsec_` + base64 puro; revalidado localmente contra um Postgres
   novo (mesmos passos do CI: migrate deploy + test:e2e + build, 133/133 testes) antes do push da
   correção. CI verde na segunda execução — ver `.github/workflows/ci.yml`.
-- **Deploy real em Vercel/Railway ainda não foi executado por falta de contas de produção
-  provisionadas neste ambiente** (Clerk produção, Vercel, Railway). `docs/DEPLOYMENT.md` documenta
-  exatamente o que é IMPLEMENTADO/TESTADO vs. BLOQUEADO POR INFRAESTRUTURA, sem inventar deploy que
-  não aconteceu.
+- **Deploy real ainda não foi executado**: Railway **BLOQUEADO POR CUSTO** (acesso existe, gasto
+  recorrente não autorizado); Vercel e Clerk produção **BLOQUEADO POR INFRAESTRUTURA** (sem
+  conta/ambiente criado neste ambiente). `docs/DEPLOYMENT.md` documenta exatamente o que é
+  IMPLEMENTADO/TESTADO vs. cada tipo de bloqueio, sem inventar deploy que não aconteceu.
 
 ## Git
 

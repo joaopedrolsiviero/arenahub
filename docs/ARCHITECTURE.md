@@ -4,8 +4,9 @@
 > Fase 2 — Autenticação, Fase 3 — Arenas/Quadras, Fase 4 — Disponibilidade e Booking, Fase 5 —
 > Horários de Funcionamento e Timezone, Fase 6 — Experiência de Reserva do Cliente, Fase 7 —
 > Dashboard Operacional da Arena e Fase 8 — Hardening/Segurança/Robustez já concluídas; Fase 9 —
-> Deploy e Infraestrutura preparada e validada localmente, mas com deploy real bloqueado por falta
-> de acesso a infraestrutura externa neste ambiente — ver Roadmap e `docs/DEPLOYMENT.md`). Esta
+> Deploy e Infraestrutura preparada, GitHub/CI validados contra um runner real, deploy real no
+> Railway bloqueado por custo (Hobby plan pago) e Vercel/Clerk produção por falta de acesso — ver
+> Roadmap e `docs/DEPLOYMENT.md`). Esta
 > revisão (v0.9) registra as decisões tomadas durante a Fase 9. Este documento é a fonte de verdade
 > da arquitetura até que decisões aqui descritas sejam revisadas.
 
@@ -51,12 +52,15 @@ O "como implantar" fica em `docs/DEPLOYMENT.md` (documento novo desta fase) — 
    contra o domínio real de produção com Clerk ativo, que este ambiente não tem como fazer sem
    risco de quebrar silenciosamente o login.
 7. **`Railway` escolhido como plataforma do backend** (entre Railway/Render/Fly.io), com
-   justificativa registrada em `docs/DEPLOYMENT.md` — decisão de papel, nenhuma conta foi criada.
+   justificativa registrada em `docs/DEPLOYMENT.md`. Na tentativa real de criar o projeto, o
+   Railway exigiu o Hobby plan (US$5/mês) — sem free tier real hoje, diferente do que este
+   documento registrava antes; corrigido. Decisão consciente de pausar antes de gastar.
 8. **Nenhuma dependência nova, nenhuma atualizada** — inclusive reafirmando a decisão da Fase 8 de
    não atualizar o Prisma (6.19.3, major disponível é 7.x) sem necessidade real.
-9. **Deploy real (Vercel/Railway), staging, Sentry/PostHog e backup/restore reais permanecem
-   BLOQUEADOS POR INFRAESTRUTURA**, nunca declarados como feitos — falta de contas de produção
-   provisionadas neste ambiente. Ver Roadmap e `docs/DEPLOYMENT.md`, "Regra de ouro desta fase".
+9. **Deploy real permanece bloqueado, por dois motivos diferentes, nunca declarados como
+   feitos**: Railway por **custo** (acesso existe, gasto recorrente não autorizado); Vercel e
+   Clerk produção por **infraestrutura** (falta de conta/ambiente criado). Ver Roadmap e
+   `docs/DEPLOYMENT.md`, "Regra de ouro desta fase".
 10. **Repositório publicado no GitHub e CI validado contra um runner real do GitHub Actions** —
     primeiro commit e primeiro `git push` da história do projeto
     (`github.com/fraagelo/arenahub`). A primeira execução real do CI **falhou**, revelando mais um
@@ -1740,13 +1744,14 @@ testar em cada uma — mas a definição geral vale para todas.
   testes de concorrência/idempotência/segurança repetidos 3x sem flakiness; nenhum segredo/token em
   log ou versionado; `git status` revisado, nenhum commit feito.
 
-### Fase 9 — Deploy e Infraestrutura ⚠️ preparada, deploy real bloqueado por infraestrutura
+### Fase 9 — Deploy e Infraestrutura ⚠️ preparada, deploy real bloqueado por custo (Railway) e infraestrutura (Vercel/Clerk produção)
 - **Objetivo:** deixar o ArenaHub implantável, reproduzível e observável — sem
   adicionar funcionalidade de negócio nova. Diferente das fases anteriores,
   **não pode ser marcada como concluída da forma usual**: o critério real
-  ("uma arena de verdade usável em produção") exige contas em serviços
-  externos (Vercel, Railway/Render/Fly, Clerk produção) que não existem
-  neste ambiente. Tudo que podia ser preparado e validado *dentro do
+  ("uma arena de verdade usável em produção") exige deploy real no Railway
+  (bloqueado por custo — Hobby plan pago) e contas em Vercel/Clerk produção
+  (bloqueadas por infraestrutura, sem acesso neste ambiente). Tudo que podia
+  ser preparado e validado *dentro do
   repositório* foi — inclusive construindo e rodando a imagem Docker de
   verdade contra Postgres real (não só inspeção de código). Ver
   `docs/DEPLOYMENT.md` para o detalhamento completo, seção por seção, do que
@@ -1781,14 +1786,14 @@ testar em cada uma — mas a definição geral vale para todas.
   (duas vezes); `next start` local com os novos headers presentes na
   resposta HTTP real; regressão completa (128 unitários + 133 e2e no
   backend, 59 no frontend) sem quebrar nada das Fases 1-8.
-- **Bloqueado por infraestrutura, documentado explicitamente** (não
-  inventado como feito): deploy real na Vercel/Railway, PostgreSQL
-  gerenciado real, ambiente de produção do Clerk, domínio próprio, staging,
-  backup/restore reais, Sentry/PostHog. **Já destravado nesta fase**: o
-  repositório foi publicado no GitHub e o CI passou a rodar de verdade num
-  runner real — a primeira execução falhou (bug real no placeholder do
-  `CLERK_WEBHOOK_SIGNING_SECRET` do workflow, corrigido e revalidado), a
-  segunda ficou verde. Ver "Decisões revisadas na v0.9", item 10.
+- **Bloqueado, documentado explicitamente** (não inventado como feito), por dois motivos
+  distintos: **custo** — Railway exige Hobby plan (US$5/mês), decisão consciente de pausar antes
+  de gastar; e **infraestrutura** — Vercel, ambiente de produção do Clerk, domínio próprio,
+  staging, backup/restore reais, Sentry/PostHog seguem sem conta/acesso criado. **Já destravado
+  nesta fase**: o repositório foi publicado no GitHub e o CI passou a rodar de verdade num runner
+  real — a primeira execução falhou (bug real no placeholder do `CLERK_WEBHOOK_SIGNING_SECRET` do
+  workflow, corrigido e revalidado), a segunda ficou verde. Ver "Decisões revisadas na v0.9",
+  itens 7 e 10.
 
 ### Fase 10 — IA
 - **Objetivo:** agente capaz de responder sobre disponibilidade e criar reserva via tools controladas.

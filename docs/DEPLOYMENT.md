@@ -6,13 +6,33 @@
 > **Status honesto desta fase**: tudo que podia ser preparado e validado
 > *dentro deste repositório* foi preparado e validado de verdade (build real
 > da imagem Docker, container rodando contra Postgres real, migrations
-> aplicadas em banco limpo, health/readiness testados com requisições reais).
-> O que exige conta/credencial em serviço externo (Vercel, Railway, Clerk
-> produção, um domínio real) **não foi executado** — este ambiente não tem
-> acesso a essas plataformas. Cada seção abaixo diz explicitamente o que é
-> **IMPLEMENTADO** (existe no repo, testado localmente), **TESTADO** (rodou
-> de verdade neste ambiente) ou **BLOQUEADO POR INFRAESTRUTURA** (só pode ser
-> feito por alguém com acesso às contas).
+> aplicadas em banco limpo, health/readiness testados com requisições reais,
+> CI rodando de verdade num runner real do GitHub — ver Seção 0 abaixo). A
+> tentativa real de deploy no Railway esbarrou em um bloqueio diferente dos
+> anteriores: **custo**, não falta de acesso — o Railway exige o Hobby plan
+> (US$5/mês) para qualquer deploy, e a decisão consciente foi pausar antes de
+> gastar. Vercel e Clerk produção continuam **BLOQUEADO POR INFRAESTRUTURA**
+> de fato (sem conta/ambiente criado). Cada seção abaixo diz explicitamente o
+> que é **IMPLEMENTADO** (existe no repo, testado localmente), **TESTADO**
+> (rodou de verdade neste ambiente), **BLOQUEADO POR CUSTO** (acesso existe,
+> gasto não autorizado) ou **BLOQUEADO POR INFRAESTRUTURA** (sem
+> conta/acesso).
+
+---
+
+## 0. GitHub e CI — IMPLEMENTADO e TESTADO
+
+O repositório foi publicado em `github.com/fraagelo/arenahub` (primeiro commit e
+primeiro push da história do projeto) e o workflow de CI (`.github/workflows/ci.yml`)
+rodou de verdade contra um runner real do GitHub Actions. A primeira execução
+**falhou de verdade**, revelando um bug real que nunca tinha sido pego: o
+placeholder `CLERK_WEBHOOK_SIGNING_SECRET` do workflow não era base64 válido
+para a lib `standardwebhooks` (que decodifica tudo após `whsec_` como base64
+puro) — só "funcionava" localmente porque o `.env` real não versionado usa
+outro valor com o formato correto. Corrigido para `whsec_` + base64 puro,
+revalidado localmente contra um Postgres novo com os mesmos passos do CI
+(migrate deploy + test:e2e + build, 133/133 testes) antes de subir a correção.
+Segunda execução: verde.
 
 ---
 
@@ -36,7 +56,8 @@
   conectar), **BLOQUEADO POR INFRAESTRUTURA** (sem conta Vercel neste ambiente).
 - **Backend**: container Docker (`apps/api/Dockerfile`) — **IMPLEMENTADO e TESTADO**
   localmente (build real + container rodando contra Postgres real, ver Seção 4).
-  **BLOQUEADO POR INFRAESTRUTURA** o deploy real numa plataforma (Railway, ver Seção 3).
+  **BLOQUEADO POR CUSTO** o deploy real no Railway (Hobby plan pago exigido, ver
+  Seção 3) — decisão consciente de pausar antes de gastar.
 - **Banco**: PostgreSQL gerenciado — hoje só existe o Postgres local do
   `docker/docker-compose.yml`. **BLOQUEADO POR INFRAESTRUTURA** provisionar um
   gerenciado real.
@@ -83,17 +104,28 @@ mecanismo de fila complementar, nunca substituindo as garantias acima.
 | Migrations como release step | Sim (`Release Command`) | Sim (`Pre-Deploy Command`, planos pagos) | Precisa de `release_command` no `fly.toml` |
 | Health check configurável | Sim | Sim | Sim |
 | Rollback | 1 clique pra deploy anterior | 1 clique | `fly releases rollback` |
-| Custo mínimo razoável | Sim (free tier + Postgres barato) | Sim | Sim, mas cobra por região/VM ativa |
+| Custo mínimo razoável | Requer Hobby plan (US$5/mês) — sem free tier real hoje | Sim (free tier p/ web service, com cold start) | Sim, mas cobra por região/VM ativa |
 
 Railway venceu por ter o **release command** (rodar `prisma migrate deploy` uma
 única vez, antes de promover o novo deploy, nunca dentro de N réplicas
-simultâneas — ver Seção 6) como recurso de primeira classe na UI, sem exigir
-plano pago, e por builder de Dockerfile nativo sem `fly.toml` extra. Render é a
-alternativa mais próxima se Railway não for viável por algum motivo
-organizacional; a troca é mecânica (mesmo Dockerfile, mesmas env vars).
+simultâneas — ver Seção 6) como recurso de primeira classe na UI, e por builder
+de Dockerfile nativo sem `fly.toml` extra. Render é a alternativa mais próxima
+se o custo do Railway não for viável; a troca é mecânica (mesmo Dockerfile,
+mesmas env vars).
 
-**Status: BLOQUEADO POR INFRAESTRUTURA** — nenhuma conta Railway foi criada
-neste ambiente; a escolha acima é uma decisão registrada, não uma execução.
+> **Correção (Fase 9, tentativa real de deploy):** a linha acima dizia
+> originalmente que o Railway não exigia plano pago — informação desatualizada.
+> Ao tentar criar o projeto de verdade, o Railway exigiu o **Hobby plan
+> (US$5/mês)** para qualquer deploy, mesmo de um único serviço pequeno. Isso não
+> muda a escolha técnica (a tabela acima continua válida), só o custo mínimo
+> real.
+
+**Status: BLOQUEADO POR CUSTO** — a conta Railway existe, mas o deploy real foi
+**pausado deliberadamente** (decisão do usuário) por exigir gasto recorrente
+(US$5/mês) que não foi autorizado neste momento. Diferente de "bloqueado por
+infraestrutura" (falta de acesso/conta) — aqui o acesso existe, a decisão é de
+custo. A escolha de plataforma acima continua válida caso o deploy real seja
+retomado.
 
 ---
 
