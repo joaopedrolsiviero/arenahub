@@ -6,12 +6,12 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useDiscoverArena, useAvailability, useCreateBooking } from '@/hooks/use-api';
 import { AvailabilityGrid } from '@/components/availability-grid';
 import { BookingSummaryCard } from '@/components/booking-summary-card';
+import { DashboardDateNav } from '@/components/dashboard-date-nav';
+import { SiteHeader } from '@/components/site-header';
 import { LoadingState, ErrorState, EmptyState } from '@/components/async-state';
 import { RequireAuth } from '@/components/require-auth';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { localDayWindowToUtc, todayInZone } from '@/lib/format';
+import { formatCurrencyBRL, localDayWindowToUtc, todayInZone } from '@/lib/format';
 import { ApiError } from '@/lib/api';
 import type { AvailabilitySlot } from '@/lib/types';
 
@@ -113,22 +113,21 @@ export function CourtBooking({ arenaId, courtId }: { arenaId: string; courtId: s
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 p-6">
-      <div>
-        <h1 className="text-xl font-semibold">{court.name}</h1>
-        <p className="text-sm text-muted-foreground">{arena.name}</p>
+    <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-8 sm:px-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-sm text-muted-foreground">{arena.name}</p>
+          <h1 className="font-heading text-2xl font-bold tracking-tight">{court.name}</h1>
+        </div>
+        <div className="flex items-baseline gap-1.5 rounded-xl bg-brand/10 px-3 py-2">
+          <span className="tabular text-lg font-bold">{formatCurrencyBRL(court.pricePerSlot)}</span>
+          <span className="text-xs text-muted-foreground">/ {court.slotDurationMinutes}min</span>
+        </div>
       </div>
 
-      <div className="flex flex-col gap-1.5">
-        <Label htmlFor="booking-date">Data</Label>
-        <Input
-          id="booking-date"
-          type="date"
-          value={date ?? ''}
-          onChange={(event) => handleDateChange(event.target.value)}
-          className="w-fit"
-        />
-      </div>
+      {date ? (
+        <DashboardDateNav date={date} timezone={arena.timezone} onChange={handleDateChange} />
+      ) : null}
 
       {conflictMessage ? (
         <Alert variant="destructive" role="alert">
@@ -146,12 +145,15 @@ export function CourtBooking({ arenaId, courtId }: { arenaId: string; courtId: s
       ) : null}
 
       {availability && availability.slots.length > 0 ? (
-        <AvailabilityGrid
-          slots={availability.slots}
-          timezone={availability.timezone}
-          selectedStartsAt={selectedSlot?.startsAt ?? null}
-          onSelect={handleSelectSlot}
-        />
+        <div className="flex flex-col gap-2.5">
+          <p className="text-sm font-semibold">Horários disponíveis</p>
+          <AvailabilityGrid
+            slots={availability.slots}
+            timezone={availability.timezone}
+            selectedStartsAt={selectedSlot?.startsAt ?? null}
+            onSelect={handleSelectSlot}
+          />
+        </div>
       ) : null}
 
       {selectedSlot && availability ? (
@@ -175,6 +177,7 @@ export default function CourtBookingPage({
   const { arenaId, courtId } = use(params);
   return (
     <RequireAuth>
+      <SiteHeader />
       <Suspense fallback={<LoadingState label="Carregando quadra…" />}>
         <CourtBooking arenaId={arenaId} courtId={courtId} />
       </Suspense>

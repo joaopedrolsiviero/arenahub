@@ -5,6 +5,11 @@ import { useDiscoverArenas } from '@/hooks/use-api';
 jest.mock('@clerk/nextjs', () => ({
   Show: ({ when, children }: { when: string; children: React.ReactNode }) =>
     when === 'signed-in' ? children : null,
+  UserButton: () => null,
+}));
+
+jest.mock('next/navigation', () => ({
+  usePathname: () => '/arenas',
 }));
 
 jest.mock('../../hooks/use-api', () => ({

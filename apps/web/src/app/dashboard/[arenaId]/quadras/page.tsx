@@ -82,9 +82,9 @@ function CourtsList({ arenaId }: { arenaId: string }) {
         arenaName={dashboard?.arena.name ?? '…'}
         adminArenas={adminArenas ?? []}
       />
-      <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 p-4">
+      <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-6 sm:px-6">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">Quadras</h2>
+          <h2 className="font-heading text-xl font-bold tracking-tight">Quadras</h2>
           <Button type="button" variant="outline" onClick={() => setShowCreate((v) => !v)}>
             {showCreate ? 'Cancelar' : 'Nova quadra'}
           </Button>
@@ -111,9 +111,13 @@ function CourtsList({ arenaId }: { arenaId: string }) {
                       {!court.isActive ? <Badge variant="destructive">Inativa</Badge> : null}
                     </CardAction>
                   </CardHeader>
-                  <CardContent className="flex items-center justify-between text-sm text-muted-foreground">
-                    <span>{formatCurrencyBRL(court.pricePerSlot)} / horário</span>
-                    <span>{court.slotDurationMinutes} min</span>
+                  <CardContent className="flex items-center justify-between">
+                    <span className="tabular text-sm font-bold">
+                      {formatCurrencyBRL(court.pricePerSlot)} / horário
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {court.slotDurationMinutes} min
+                    </span>
                   </CardContent>
                 </Card>
               </Link>

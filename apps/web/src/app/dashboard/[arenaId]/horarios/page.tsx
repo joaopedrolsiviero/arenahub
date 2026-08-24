@@ -6,6 +6,7 @@ import { DashboardHeader } from '@/components/dashboard-header';
 import { LoadingState, ErrorState } from '@/components/async-state';
 import { RequireAuth } from '@/components/require-auth';
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { ApiError } from '@/lib/api';
@@ -49,18 +50,21 @@ function DayRow({
   }
 
   return (
-    <div className="flex flex-col gap-2 border-b py-3 last:border-b-0">
+    <div className="flex flex-col gap-2 border-b border-border py-3 last:border-b-0">
       <div className="flex items-center justify-between">
-        <span className="text-sm font-medium">
-          {WEEKDAYS.find((w) => w.value === day)?.label}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="w-28 text-sm font-semibold">
+            {WEEKDAYS.find((w) => w.value === day)?.label}
+          </span>
+          <Badge variant={dayIntervals.length > 0 ? 'brand' : 'outline'}>
+            {dayIntervals.length > 0 ? 'Aberto' : 'Fechado'}
+          </Badge>
+        </div>
         <Button type="button" variant="ghost" size="sm" onClick={addInterval}>
           + Intervalo
         </Button>
       </div>
-      {dayIntervals.length === 0 ? (
-        <p className="text-sm text-muted-foreground">Fechado</p>
-      ) : (
+      {dayIntervals.length === 0 ? null : (
         dayIntervals.map((interval, index) => (
           <div key={index} className="flex items-center gap-2">
             <input
@@ -181,8 +185,8 @@ export function OperatingHoursEditor({ arenaId }: { arenaId: string }) {
         arenaName={dashboard?.arena.name ?? '…'}
         adminArenas={adminArenas ?? []}
       />
-      <div className="mx-auto flex w-full max-w-2xl flex-col gap-4 p-4">
-        <h2 className="text-lg font-semibold">Horário de funcionamento</h2>
+      <div className="mx-auto flex w-full max-w-2xl flex-col gap-4 px-4 py-6 sm:px-6">
+        <h2 className="font-heading text-xl font-bold tracking-tight">Horário de funcionamento</h2>
 
         {isPending ? <LoadingState label="Carregando horários…" /> : null}
         {isError ? <ErrorState message="Não foi possível carregar o horário de funcionamento." /> : null}

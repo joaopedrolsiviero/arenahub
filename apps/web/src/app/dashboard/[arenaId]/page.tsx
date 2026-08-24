@@ -74,12 +74,14 @@ export function DashboardOverview({ arenaId }: { arenaId: string }) {
         arenaName={dashboard.arena.name}
         adminArenas={adminArenas ?? []}
       />
-      <div className="mx-auto flex w-full max-w-5xl flex-col gap-4 p-4">
-        <DashboardDateNav
-          date={dashboard.date}
-          timezone={dashboard.arena.timezone}
-          onChange={handleDateChange}
-        />
+      <div className="mx-auto flex w-full max-w-5xl flex-col gap-5 px-4 py-6 sm:px-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <DashboardDateNav
+            date={dashboard.date}
+            timezone={dashboard.arena.timezone}
+            onChange={handleDateChange}
+          />
+        </div>
 
         {isClosedToday ? (
           <Alert>
@@ -92,13 +94,23 @@ export function DashboardOverview({ arenaId }: { arenaId: string }) {
 
         <DashboardSummaryCards summary={dashboard.summary} />
 
-        <UpcomingBookings bookings={dashboard.upcomingBookings} timezone={dashboard.arena.timezone} />
-
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          {dashboard.courts.map((court) => (
-            <BookingTimelineCard key={court.id} court={court} timezone={dashboard.arena.timezone} />
-          ))}
+        {/* Ocupação por quadra é a informação prioritária (item 20-21) — vem
+            antes da lista de próximas reservas, que é só um recorte dela. */}
+        <div className="flex flex-col gap-3">
+          <p className="text-sm font-semibold">Ocupação por quadra</p>
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            {dashboard.courts.map((court) => (
+              <BookingTimelineCard
+                key={court.id}
+                court={court}
+                operatingHours={dashboard.operatingHours}
+                timezone={dashboard.arena.timezone}
+              />
+            ))}
+          </div>
         </div>
+
+        <UpcomingBookings bookings={dashboard.upcomingBookings} timezone={dashboard.arena.timezone} />
       </div>
     </>
   );

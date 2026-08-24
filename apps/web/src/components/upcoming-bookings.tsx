@@ -24,12 +24,10 @@ export function UpcomingBookings({
             {bookings.map((item) => (
               <li
                 key={item.id}
-                className="flex items-center justify-between gap-2 rounded-md border px-2.5 py-1.5 text-sm"
+                className="flex items-center justify-between gap-2 rounded-lg border border-border px-3 py-2 text-sm"
               >
-                <span className="font-medium tabular-nums">
-                  {formatTimeInZone(item.startsAt, timezone)}
-                </span>
-                <span className="flex-1 truncate">{item.courtName}</span>
+                <span className="tabular font-semibold">{formatTimeInZone(item.startsAt, timezone)}</span>
+                <span className="flex-1 truncate font-medium">{item.courtName}</span>
                 <span className="flex-1 truncate text-muted-foreground">
                   {item.type === 'CUSTOMER'
                     ? (item.user?.name ?? item.user?.email ?? 'Cliente')
@@ -37,7 +35,7 @@ export function UpcomingBookings({
                 </span>
                 <BookingTypeBadge type={item.type} />
                 {item.type === 'CUSTOMER' ? (
-                  <span className="tabular-nums">{formatCurrencyBRL(item.total)}</span>
+                  <span className="tabular text-sm font-semibold">{formatCurrencyBRL(item.total)}</span>
                 ) : null}
               </li>
             ))}

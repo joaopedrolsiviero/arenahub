@@ -1,26 +1,35 @@
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { BanIcon, WrenchIcon, XCircleIcon } from 'lucide-react';
 import type { DashboardSummary } from '@/lib/types';
 
-function SummaryCard({ label, value }: { label: string; value: number }) {
-  return (
-    <Card size="sm">
-      <CardHeader>
-        <CardTitle className="text-sm font-normal text-muted-foreground">{label}</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <span className="text-2xl font-semibold">{value}</span>
-      </CardContent>
-    </Card>
-  );
-}
-
+// Quebra deliberada do padrão "4 cards iguais" (item 53): 1 número em
+// destaque (o que o operador quer ver primeiro ao abrir o dia) + métricas
+// secundárias como chips inline, nunca competindo em peso visual.
 export function DashboardSummaryCards({ summary }: { summary: DashboardSummary }) {
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-      <SummaryCard label="Reservas confirmadas" value={summary.confirmedBookings} />
-      <SummaryCard label="Reservas canceladas" value={summary.cancelledBookings} />
-      <SummaryCard label="Bloqueios" value={summary.blocks} />
-      <SummaryCard label="Manutenções" value={summary.maintenance} />
+    <div className="flex flex-wrap items-end justify-between gap-4 rounded-2xl border border-border bg-card px-5 py-4">
+      <div>
+        <p className="text-xs font-semibold text-muted-foreground">Reservas confirmadas hoje</p>
+        <p className="tabular text-4xl font-bold tracking-tight text-foreground">
+          {summary.confirmedBookings}
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-4">
+        <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+          <XCircleIcon className="size-4" />
+          <span className="tabular font-semibold text-foreground">{summary.cancelledBookings}</span>
+          canceladas
+        </span>
+        <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+          <BanIcon className="size-4" />
+          <span className="tabular font-semibold text-foreground">{summary.blocks}</span>
+          bloqueios
+        </span>
+        <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+          <WrenchIcon className="size-4" />
+          <span className="tabular font-semibold text-foreground">{summary.maintenance}</span>
+          manutenções
+        </span>
+      </div>
     </div>
   );
 }

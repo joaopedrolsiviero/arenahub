@@ -5,7 +5,7 @@ import { useArena, useUpdateArena, useMyAdminArenas, useDashboard } from '@/hook
 import { DashboardHeader } from '@/components/dashboard-header';
 import { LoadingState, ErrorState } from '@/components/async-state';
 import { RequireAuth } from '@/components/require-auth';
-import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -52,12 +52,14 @@ function ArenaForm({ arenaId, arena }: { arenaId: string; arena: AdminArena }) {
     }
   }
 
+  // Agrupado por assunto (item 24) — mas continua sendo UM único submit
+  // para o mesmo PATCH de arena, sem inventar múltiplos endpoints.
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Informações básicas</CardTitle>
-      </CardHeader>
-      <form onSubmit={handleSubmit}>
+    <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+      <Card>
+        <CardHeader>
+          <CardTitle>Identidade</CardTitle>
+        </CardHeader>
         <CardContent className="flex flex-col gap-3">
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="arena-name">Nome</Label>
@@ -78,66 +80,78 @@ function ArenaForm({ arenaId, arena }: { arenaId: string; arena: AdminArena }) {
               maxLength={1000}
             />
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="arena-phone">Telefone</Label>
-              <Input
-                id="arena-phone"
-                value={phone}
-                onChange={(event) => setPhone(event.target.value)}
-                maxLength={30}
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="arena-email">E-mail</Label>
-              <Input
-                id="arena-email"
-                type="email"
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-                maxLength={160}
-              />
-            </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Contato</CardTitle>
+        </CardHeader>
+        <CardContent className="grid grid-cols-2 gap-3">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="arena-phone">Telefone</Label>
+            <Input
+              id="arena-phone"
+              value={phone}
+              onChange={(event) => setPhone(event.target.value)}
+              maxLength={30}
+            />
           </div>
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="arena-timezone">Timezone</Label>
-            <select
-              id="arena-timezone"
-              value={timezone}
-              onChange={(event) => setTimezone(event.target.value)}
-              className="h-8 rounded-lg border border-input bg-transparent px-2.5 text-sm"
-            >
-              {timezones.map((tz) => (
-                <option key={tz} value={tz}>
-                  {tz}
-                </option>
-              ))}
-            </select>
-            <p className="text-xs text-muted-foreground">
-              Alterar o timezone nunca modifica reservas já existentes — só passa a valer para a
-              disponibilidade futura.
-            </p>
+            <Label htmlFor="arena-email">E-mail</Label>
+            <Input
+              id="arena-email"
+              type="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              maxLength={160}
+            />
           </div>
-
-          {error ? (
-            <Alert variant="destructive" role="alert">
-              <AlertTitle>Erro</AlertTitle>
-              <AlertDescription>{error}</AlertDescription>
-            </Alert>
-          ) : null}
-          {savedMessage ? (
-            <Alert role="status">
-              <AlertTitle>Configurações salvas</AlertTitle>
-            </Alert>
-          ) : null}
         </CardContent>
-        <CardFooter className="flex justify-end">
-          <Button type="submit" disabled={updateArena.isPending}>
-            {updateArena.isPending ? 'Salvando…' : 'Salvar'}
-          </Button>
-        </CardFooter>
-      </form>
-    </Card>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Timezone</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-1.5">
+          <select
+            id="arena-timezone"
+            value={timezone}
+            onChange={(event) => setTimezone(event.target.value)}
+            className="h-8 w-fit rounded-lg border border-input bg-transparent px-2.5 text-sm"
+          >
+            {timezones.map((tz) => (
+              <option key={tz} value={tz}>
+                {tz}
+              </option>
+            ))}
+          </select>
+          <p className="text-xs text-muted-foreground">
+            Alterar o timezone nunca modifica reservas já existentes — só passa a valer para a
+            disponibilidade futura.
+          </p>
+        </CardContent>
+      </Card>
+
+      {error ? (
+        <Alert variant="destructive" role="alert">
+          <AlertTitle>Erro</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      ) : null}
+      {savedMessage ? (
+        <Alert role="status">
+          <AlertTitle>Configurações salvas</AlertTitle>
+        </Alert>
+      ) : null}
+
+      <div className="flex justify-end">
+        <Button type="submit" disabled={updateArena.isPending}>
+          {updateArena.isPending ? 'Salvando…' : 'Salvar'}
+        </Button>
+      </div>
+    </form>
   );
 }
 
@@ -153,8 +167,8 @@ function ArenaSettings({ arenaId }: { arenaId: string }) {
         arenaName={dashboard?.arena.name ?? arena?.name ?? '…'}
         adminArenas={adminArenas ?? []}
       />
-      <div className="mx-auto flex w-full max-w-lg flex-col gap-4 p-4">
-        <h2 className="text-lg font-semibold">Configurações da arena</h2>
+      <div className="mx-auto flex w-full max-w-lg flex-col gap-4 px-4 py-6 sm:px-6">
+        <h2 className="font-heading text-xl font-bold tracking-tight">Configurações da arena</h2>
 
         {isPending ? <LoadingState label="Carregando…" /> : null}
         {isError ? <ErrorState message="Não foi possível carregar os dados da arena." /> : null}

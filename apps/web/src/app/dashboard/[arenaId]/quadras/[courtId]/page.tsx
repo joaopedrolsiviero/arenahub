@@ -161,7 +161,7 @@ function CourtEditor({ arenaId, courtId }: { arenaId: string; courtId: string })
         arenaName={dashboard?.arena.name ?? '…'}
         adminArenas={adminArenas ?? []}
       />
-      <div className="mx-auto flex w-full max-w-lg flex-col gap-4 p-4">
+      <div className="mx-auto flex w-full max-w-lg flex-col gap-4 px-4 py-6 sm:px-6">
         <Button
           type="button"
           variant="ghost"

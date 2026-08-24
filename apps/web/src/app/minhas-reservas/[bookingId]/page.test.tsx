@@ -86,12 +86,16 @@ describe('BookingDetail', () => {
     expect(screen.queryByRole('button', { name: /cancelar reserva/i })).not.toBeInTheDocument();
   });
 
-  it('cancela a reserva usando arenaId/courtId da própria resposta', async () => {
+  it('exige confirmação num dialog antes de cancelar (item 64)', async () => {
     mutateAsync.mockResolvedValue({ ...booking, status: 'CANCELLED' });
     mockedUseMyBooking.mockReturnValue({ data: booking, isPending: false, isError: false });
     render(<BookingDetail bookingId="booking-1" />);
 
-    fireEvent.click(screen.getByRole('button', { name: /cancelar reserva/i }));
+    // O primeiro clique só abre o dialog — não deve cancelar direto.
+    fireEvent.click(screen.getByRole('button', { name: 'Cancelar reserva' }));
+    expect(mutateAsync).not.toHaveBeenCalled();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Sim, cancelar reserva' }));
 
     await waitFor(() =>
       expect(mutateAsync).toHaveBeenCalledWith({
@@ -107,7 +111,8 @@ describe('BookingDetail', () => {
     mockedUseMyBooking.mockReturnValue({ data: booking, isPending: false, isError: false });
     render(<BookingDetail bookingId="booking-1" />);
 
-    fireEvent.click(screen.getByRole('button', { name: /cancelar reserva/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancelar reserva' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Sim, cancelar reserva' }));
 
     expect(await screen.findByText('Reserva já cancelada.')).toBeInTheDocument();
   });

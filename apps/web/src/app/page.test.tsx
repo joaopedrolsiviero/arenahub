@@ -13,10 +13,13 @@ jest.mock('@clerk/nextjs', () => ({
 }));
 
 describe('Home', () => {
-  it('renders the ArenaHub heading', () => {
+  it('renders the ArenaHub wordmark and the value-proposition heading', () => {
     render(<Home />);
 
-    expect(screen.getByRole('heading', { name: 'ArenaHub' })).toBeInTheDocument();
+    expect(screen.getByText('ArenaHub')).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: 'Reserve sua quadra em segundos.' }),
+    ).toBeInTheDocument();
   });
 
   it('shows sign-in/sign-up actions when signed out', () => {
