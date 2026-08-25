@@ -176,3 +176,95 @@ export interface DashboardResponse {
   courts: DashboardCourt[];
   upcomingBookings: DashboardBookingItem[];
 }
+
+// Fase 10 — gestão de membros/equipe.
+export interface ArenaMember {
+  id: string;
+  userId: string;
+  role: ArenaRole;
+  createdAt: string;
+  user: { id: string; name: string | null; email: string };
+}
+
+// Fase 11 — convites e transferência de ownership.
+export type InvitationStatus = 'PENDING' | 'ACCEPTED' | 'REVOKED' | 'EXPIRED';
+
+export interface Invitation {
+  id: string;
+  email: string;
+  role: ArenaRole;
+  status: InvitationStatus;
+  createdAt: string;
+  expiresAt: string;
+  acceptedAt: string | null;
+  revokedAt: string | null;
+  invitedBy: { id: string; name: string | null; email: string } | null;
+}
+
+// GET /v1/invitations/:token — nunca inclui token/tokenHash, nunca dados de
+// membros (item 73 do prompt).
+export interface PublicInvitation {
+  arenaId: string;
+  arenaName: string;
+  role: ArenaRole;
+  email: string;
+  expiresAt: string;
+  status: InvitationStatus;
+}
+
+export interface OwnershipTransferResult {
+  arenaId: string;
+  previousOwnerUserId: string;
+  newOwnerUserId: string;
+  completedAt: string;
+}
+
+// Fase 12: assistente de IA operacional (só leitura/análise — nunca cria,
+// altera ou cancela nada). Mesmos presets mínimos do backend
+// (OperationalMetricsService) — nunca inventar um novo aqui sem adicionar
+// no backend primeiro.
+export type AiPeriodPreset = 'today' | 'yesterday' | 'last7days' | 'last30days' | 'thisWeek' | 'lastWeek';
+
+export interface AskAiPeriod {
+  preset?: AiPeriodPreset;
+  from?: string;
+  to?: string;
+}
+
+export interface AskAiResponse {
+  answer: string;
+  period: { from: string; to: string };
+  timezone: string;
+  generatedAt: string;
+}
+
+// Fase 14: visão operacional de clientes da arena — só leitura. "Cliente" é
+// uma visão derivada (User com pelo menos uma Booking type=CUSTOMER nesta
+// arena), nunca uma entidade própria no backend.
+export interface CustomerSummary {
+  userId: string;
+  name: string | null;
+  email: string;
+  totalBookings: number;
+  confirmedBookings: number;
+  cancelledBookings: number;
+  totalRevenue: number;
+  firstBookingAt: string;
+  lastBookingAt: string;
+}
+
+export interface CustomerListResult {
+  items: CustomerSummary[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+export interface CustomerBookingItem {
+  id: string;
+  status: BookingStatus;
+  startsAt: string;
+  endsAt: string;
+  total: string;
+  court: { id: string; name: string };
+}

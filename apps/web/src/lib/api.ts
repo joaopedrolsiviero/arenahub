@@ -2,13 +2,22 @@ import type {
   AdminArena,
   ArenaDiscoveryDetail,
   ArenaDiscoverySummary,
+  ArenaMember,
+  AskAiPeriod,
+  AskAiResponse,
   AvailabilityResult,
   Booking,
   Court,
+  CustomerBookingItem,
+  CustomerListResult,
+  CustomerSummary,
   DashboardResponse,
+  Invitation,
   MyBooking,
   OperatingInterval,
   OperatingIntervalInput,
+  OwnershipTransferResult,
+  PublicInvitation,
 } from './types';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001/v1';
@@ -195,4 +204,112 @@ export const api = {
     request(`/arenas/${arenaId}/dashboard${date ? `?date=${encodeURIComponent(date)}` : ''}`, {
       token,
     }),
+
+  // --- Fase 10: gestão de membros/equipe ---
+
+  getMembers: (token: string | null, arenaId: string): Promise<ArenaMember[]> =>
+    request(`/arenas/${arenaId}/members`, { token }),
+
+  // Identifica por e-mail (não userId — o OWNER nunca teria como conhecer o
+  // id interno de outra pessoa; mesma decisão do backend, ver
+  // docs/ARCHITECTURE.md Fase 10).
+  addMember: (token: string | null, arenaId: string, email: string): Promise<ArenaMember> =>
+    request(`/arenas/${arenaId}/members`, {
+      token,
+      method: 'POST',
+      body: { email, role: 'ADMIN' },
+    }),
+
+  updateMemberRole: (
+    token: string | null,
+    arenaId: string,
+    userId: string,
+  ): Promise<ArenaMember> =>
+    request(`/arenas/${arenaId}/members/${userId}`, {
+      token,
+      method: 'PATCH',
+      body: { role: 'ADMIN' },
+    }),
+
+  removeMember: (token: string | null, arenaId: string, userId: string): Promise<void> =>
+    request(`/arenas/${arenaId}/members/${userId}`, { token, method: 'DELETE' }),
+
+  // --- Fase 11: convites e transferência de ownership ---
+
+  getInvitations: (token: string | null, arenaId: string): Promise<Invitation[]> =>
+    request(`/arenas/${arenaId}/invitations`, { token }),
+
+  createInvitation: (token: string | null, arenaId: string, email: string): Promise<Invitation> =>
+    request(`/arenas/${arenaId}/invitations`, {
+      token,
+      method: 'POST',
+      body: { email, role: 'ADMIN' },
+    }),
+
+  revokeInvitation: (token: string | null, arenaId: string, invitationId: string): Promise<void> =>
+    request(`/arenas/${arenaId}/invitations/${invitationId}`, { token, method: 'DELETE' }),
+
+  resendInvitation: (
+    token: string | null,
+    arenaId: string,
+    invitationId: string,
+  ): Promise<Invitation> =>
+    request(`/arenas/${arenaId}/invitations/${invitationId}/resend`, { token, method: 'POST' }),
+
+  // Único endpoint desta fase que nunca leva token de sessão (Bearer) — o
+  // convite precisa ser visível ANTES do login (item 25).
+  getInvitationByToken: (inviteToken: string): Promise<PublicInvitation> =>
+    request(`/invitations/${inviteToken}`, { token: null }),
+
+  acceptInvitation: (token: string | null, inviteToken: string): Promise<void> =>
+    request(`/invitations/${inviteToken}/accept`, { token, method: 'POST' }),
+
+  transferOwnership: (
+    token: string | null,
+    arenaId: string,
+    newOwnerUserId: string,
+  ): Promise<OwnershipTransferResult> =>
+    request(`/arenas/${arenaId}/ownership/transfer`, {
+      token,
+      method: 'POST',
+      body: { newOwnerUserId },
+    }),
+
+  // --- Fase 12: assistente de IA operacional (só leitura/análise) ---
+
+  askAi: (
+    token: string | null,
+    arenaId: string,
+    question: string,
+    period?: AskAiPeriod,
+  ): Promise<AskAiResponse> =>
+    request(`/arenas/${arenaId}/ai/ask`, {
+      token,
+      method: 'POST',
+      body: period ? { question, period } : { question },
+    }),
+
+  // --- Fase 14: visão operacional de clientes da arena (só leitura) ---
+
+  getArenaCustomers: (
+    token: string | null,
+    arenaId: string,
+    params: { search?: string; page?: number; limit?: number } = {},
+  ): Promise<CustomerListResult> => {
+    const query = new URLSearchParams();
+    if (params.search) query.set('search', params.search);
+    if (params.page) query.set('page', String(params.page));
+    if (params.limit) query.set('limit', String(params.limit));
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    return request(`/arenas/${arenaId}/customers${suffix}`, { token });
+  },
+
+  getArenaCustomer: (token: string | null, arenaId: string, userId: string): Promise<CustomerSummary> =>
+    request(`/arenas/${arenaId}/customers/${userId}`, { token }),
+
+  getArenaCustomerBookings: (
+    token: string | null,
+    arenaId: string,
+    userId: string,
+  ): Promise<CustomerBookingItem[]> => request(`/arenas/${arenaId}/customers/${userId}/bookings`, { token }),
 };

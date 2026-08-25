@@ -3,6 +3,7 @@
 import { useAuth } from '@clerk/nextjs';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
+import type { AskAiPeriod } from '@/lib/types';
 
 /**
  * Todo hook aqui busca um token fresco do Clerk antes de cada chamada (nunca
@@ -195,6 +196,178 @@ export function useDashboard(arenaId: string | undefined, date: string | undefin
     queryKey: ['dashboard', arenaId, date],
     queryFn: async () => api.getDashboard(await getToken(), arenaId!, date),
     enabled: !!arenaId,
+  });
+}
+
+// --- Fase 10: gestão de membros/equipe ---
+
+export function useArenaMembers(arenaId: string | undefined) {
+  const getToken = useToken();
+  return useQuery({
+    queryKey: ['arena-members', arenaId],
+    queryFn: async () => api.getMembers(await getToken(), arenaId!),
+    enabled: !!arenaId,
+  });
+}
+
+export function useAddMember(arenaId: string) {
+  const getToken = useToken();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (email: string) => api.addMember(await getToken(), arenaId, email),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['arena-members', arenaId] });
+    },
+  });
+}
+
+export function useUpdateMemberRole(arenaId: string) {
+  const getToken = useToken();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (userId: string) => api.updateMemberRole(await getToken(), arenaId, userId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['arena-members', arenaId] });
+    },
+  });
+}
+
+export function useRemoveMember(arenaId: string) {
+  const getToken = useToken();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (userId: string) => api.removeMember(await getToken(), arenaId, userId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['arena-members', arenaId] });
+    },
+  });
+}
+
+// --- Fase 11: convites e transferência de ownership ---
+
+export function useArenaInvitations(arenaId: string | undefined) {
+  const getToken = useToken();
+  return useQuery({
+    queryKey: ['arena-invitations', arenaId],
+    queryFn: async () => api.getInvitations(await getToken(), arenaId!),
+    enabled: !!arenaId,
+  });
+}
+
+export function useCreateInvitation(arenaId: string) {
+  const getToken = useToken();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (email: string) => api.createInvitation(await getToken(), arenaId, email),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['arena-invitations', arenaId] });
+    },
+  });
+}
+
+export function useRevokeInvitation(arenaId: string) {
+  const getToken = useToken();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (invitationId: string) =>
+      api.revokeInvitation(await getToken(), arenaId, invitationId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['arena-invitations', arenaId] });
+    },
+  });
+}
+
+export function useResendInvitation(arenaId: string) {
+  const getToken = useToken();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (invitationId: string) =>
+      api.resendInvitation(await getToken(), arenaId, invitationId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['arena-invitations', arenaId] });
+    },
+  });
+}
+
+// Público — nunca busca token de sessão, funciona antes do login (item 25).
+export function useInvitationByToken(inviteToken: string | undefined) {
+  return useQuery({
+    queryKey: ['invitation-by-token', inviteToken],
+    queryFn: () => api.getInvitationByToken(inviteToken!),
+    enabled: !!inviteToken,
+    retry: false,
+  });
+}
+
+export function useAcceptInvitation() {
+  const getToken = useToken();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (inviteToken: string) => api.acceptInvitation(await getToken(), inviteToken),
+    onSuccess: async () => {
+      // Após aceitar, o usuário passa a administrar uma arena nova —
+      // invalida a lista de arenas administradas (item 58).
+      await queryClient.invalidateQueries({ queryKey: ['admin-arenas'] });
+    },
+  });
+}
+
+export function useTransferOwnership(arenaId: string) {
+  const getToken = useToken();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (newOwnerUserId: string) =>
+      api.transferOwnership(await getToken(), arenaId, newOwnerUserId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['arena-members', arenaId] });
+      await queryClient.invalidateQueries({ queryKey: ['admin-arenas'] });
+      await queryClient.invalidateQueries({ queryKey: ['admin-arena', arenaId] });
+    },
+  });
+}
+
+// --- Fase 12: assistente de IA operacional (só leitura/análise) ---
+
+// Mutation, não query — cada pergunta é um efeito novo, nunca uma resposta
+// "cacheável" reaproveitada por chave (item 23 do prompt da fase: os dados
+// por trás da resposta podem ter mudado entre uma pergunta e a próxima).
+export function useAskAi(arenaId: string) {
+  const getToken = useToken();
+  return useMutation({
+    mutationFn: async ({ question, period }: { question: string; period?: AskAiPeriod }) =>
+      api.askAi(await getToken(), arenaId, question, period),
+  });
+}
+
+// --- Fase 14: visão operacional de clientes da arena (só leitura) ---
+
+export function useArenaCustomers(
+  arenaId: string,
+  params: { search?: string; page?: number; limit?: number } = {},
+) {
+  const getToken = useToken();
+  return useQuery({
+    queryKey: ['arena-customers', arenaId, params.search ?? '', params.page ?? 1, params.limit ?? 20],
+    queryFn: async () => api.getArenaCustomers(await getToken(), arenaId, params),
+    enabled: !!arenaId,
+  });
+}
+
+export function useArenaCustomer(arenaId: string, userId: string | undefined) {
+  const getToken = useToken();
+  return useQuery({
+    queryKey: ['arena-customer', arenaId, userId],
+    queryFn: async () => api.getArenaCustomer(await getToken(), arenaId, userId!),
+    enabled: !!arenaId && !!userId,
+  });
+}
+
+export function useArenaCustomerBookings(arenaId: string, userId: string | undefined) {
+  const getToken = useToken();
+  return useQuery({
+    queryKey: ['arena-customer-bookings', arenaId, userId],
+    queryFn: async () => api.getArenaCustomerBookings(await getToken(), arenaId, userId!),
+    enabled: !!arenaId && !!userId,
   });
 }
 

@@ -26,7 +26,12 @@ describe('BookingsService', () => {
     arenaOperatingHours: { findMany: jest.Mock };
   };
   let prisma: {
-    booking: { findMany: jest.Mock; findFirst: jest.Mock; update: jest.Mock };
+    booking: {
+      findMany: jest.Mock;
+      findFirst: jest.Mock;
+      updateMany: jest.Mock;
+      findUniqueOrThrow: jest.Mock;
+    };
   };
   let courtsService: { findOne: jest.Mock };
   let arenaMembersService: { getRole: jest.Mock };
@@ -57,7 +62,12 @@ describe('BookingsService', () => {
       arenaOperatingHours: { findMany: jest.fn().mockResolvedValue(allDayThursday) },
     };
     prisma = {
-      booking: { findMany: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
+      booking: {
+        findMany: jest.fn(),
+        findFirst: jest.fn(),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        findUniqueOrThrow: jest.fn(),
+      },
     };
     courtsService = { findOne: jest.fn().mockResolvedValue(activeCourt) };
     arenaMembersService = { getRole: jest.fn().mockResolvedValue(null) };
@@ -377,6 +387,24 @@ describe('BookingsService', () => {
         service.findMyBookingDetail('user-1', 'booking-de-outro'),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
+
+    // Fase 13, item 5: BLOCK/MAINTENANCE nunca aparecem em "minhas reservas"
+    // de cliente, mesmo que o `userId` bata (ex: o próprio OWNER que criou o
+    // bloqueio) — o filtro `type: CUSTOMER` no WHERE (já coberto acima) faz
+    // o Prisma nunca devolver a linha; `findFirst` resolve `null` e o
+    // resultado é o mesmo 404 "não vaza existência" de qualquer outro caso.
+    it('BLOCK/MAINTENANCE nunca aparecem no detalhe de "minhas reservas", mesmo se o userId bater', async () => {
+      prisma.booking.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.findMyBookingDetail('owner-que-criou-o-block', 'block-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(prisma.booking.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'block-1', userId: 'owner-que-criou-o-block', type: BookingType.CUSTOMER },
+        }),
+      );
+    });
   });
 
   describe('cancel', () => {
@@ -389,7 +417,7 @@ describe('BookingsService', () => {
 
     it('permite que o dono da reserva cancele', async () => {
       prisma.booking.findFirst.mockResolvedValue(existingBooking);
-      prisma.booking.update.mockResolvedValue({
+      prisma.booking.findUniqueOrThrow.mockResolvedValue({
         ...existingBooking,
         status: BookingStatus.CANCELLED,
       });
@@ -397,10 +425,15 @@ describe('BookingsService', () => {
       const result = await service.cancel('arena-1', 'court-1', 'booking-1', 'user-1');
 
       expect(arenaMembersService.getRole).not.toHaveBeenCalled();
-      const [[call]] = prisma.booking.update.mock.calls as [
-        [{ where: { id: string }; data: { status: BookingStatus; cancelledByUserId: string } }],
+      const [[call]] = prisma.booking.updateMany.mock.calls as [
+        [
+          {
+            where: { id: string; status: BookingStatus };
+            data: { status: BookingStatus; cancelledByUserId: string };
+          },
+        ],
       ];
-      expect(call.where).toEqual({ id: 'booking-1' });
+      expect(call.where).toEqual({ id: 'booking-1', status: BookingStatus.CONFIRMED });
       expect(call.data.status).toBe(BookingStatus.CANCELLED);
       expect(call.data.cancelledByUserId).toBe('user-1');
       expect(result.status).toBe(BookingStatus.CANCELLED);
@@ -408,7 +441,7 @@ describe('BookingsService', () => {
 
     it('permite que ADMIN/OWNER da arena cancele reserva de outro usuário', async () => {
       prisma.booking.findFirst.mockResolvedValue(existingBooking);
-      prisma.booking.update.mockResolvedValue({
+      prisma.booking.findUniqueOrThrow.mockResolvedValue({
         ...existingBooking,
         status: BookingStatus.CANCELLED,
       });
@@ -417,7 +450,7 @@ describe('BookingsService', () => {
       await service.cancel('arena-1', 'court-1', 'booking-1', 'admin-1');
 
       expect(arenaMembersService.getRole).toHaveBeenCalledWith('admin-1', 'arena-1');
-      expect(prisma.booking.update).toHaveBeenCalled();
+      expect(prisma.booking.updateMany).toHaveBeenCalled();
     });
 
     it('lança ForbiddenException quando quem pede não é dono nem admin/owner (nem membro)', async () => {
@@ -427,7 +460,7 @@ describe('BookingsService', () => {
       await expect(
         service.cancel('arena-1', 'court-1', 'booking-1', 'outro-user'),
       ).rejects.toBeInstanceOf(ForbiddenException);
-      expect(prisma.booking.update).not.toHaveBeenCalled();
+      expect(prisma.booking.updateMany).not.toHaveBeenCalled();
     });
 
     it('lança NotFoundException quando a reserva não existe nesta quadra', async () => {
@@ -438,7 +471,7 @@ describe('BookingsService', () => {
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
-    it('é idempotente: cancelar uma reserva já cancelada só a retorna, sem novo UPDATE', async () => {
+    it('é idempotente (chamada sequencial): cancelar uma reserva já cancelada só a retorna, sem novo UPDATE', async () => {
       prisma.booking.findFirst.mockResolvedValue({
         ...existingBooking,
         status: BookingStatus.CANCELLED,
@@ -446,8 +479,27 @@ describe('BookingsService', () => {
 
       const result = await service.cancel('arena-1', 'court-1', 'booking-1', 'user-1');
 
-      expect(prisma.booking.update).not.toHaveBeenCalled();
+      expect(prisma.booking.updateMany).not.toHaveBeenCalled();
       expect(result.status).toBe(BookingStatus.CANCELLED);
+    });
+
+    // Fase 13: a proteção contra a corrida real (duas requisições passando
+    // pelo findFirst antes de qualquer uma escrever) é a condição
+    // `status: CONFIRMED` no WHERE do updateMany, não uma checagem em
+    // memória — `count: 0` é o sinal de que perdemos a corrida.
+    it('sob concorrência real, a perdedora da corrida (updateMany count=0) devolve o mesmo estado final, sem erro', async () => {
+      prisma.booking.findFirst.mockResolvedValue(existingBooking);
+      prisma.booking.updateMany.mockResolvedValue({ count: 0 });
+      prisma.booking.findUniqueOrThrow.mockResolvedValue({
+        ...existingBooking,
+        status: BookingStatus.CANCELLED,
+        cancelledByUserId: 'quem-venceu-a-corrida',
+      });
+
+      const result = await service.cancel('arena-1', 'court-1', 'booking-1', 'user-1');
+
+      expect(result.status).toBe(BookingStatus.CANCELLED);
+      expect(result.cancelledByUserId).toBe('quem-venceu-a-corrida');
     });
   });
 });

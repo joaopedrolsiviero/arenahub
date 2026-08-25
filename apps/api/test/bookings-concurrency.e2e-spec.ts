@@ -167,4 +167,46 @@ describe('Bookings — concorrência real (e2e)', () => {
     });
     expect(count).toBe(1);
   });
+
+  // Fase 13: duas requisições de cancelamento disparadas ao mesmo tempo para
+  // a MESMA reserva — a proteção é `updateMany` condicionado a
+  // `status: CONFIRMED` (Fase 13, ver BookingsService.cancel), não uma
+  // checagem em memória. As duas respostas devem refletir sucesso (200,
+  // idempotente por natureza — nunca um 409/500 pra a "perdedora"), o estado
+  // final tem que ser CANCELLED, e só pode existir UM cancelamento "real"
+  // registrado (nunca dois cancelledAt/cancelledByUserId diferentes
+  // sobrevivendo em sequência inconsistente — ambas as respostas devem
+  // refletir o MESMO cancelledByUserId, o da vencedora da corrida).
+  it('cancelamento simultâneo da mesma reserva: as duas respostas convergem pro mesmo estado final', async () => {
+    const startsAt = '2027-04-01T10:00:00-03:00';
+    const created = await createBooking(
+      courtOneId,
+      'token-a',
+      'cancel-race-create',
+      startsAt,
+    ).expect(201);
+    const bookingId = (created.body as { id: string }).id;
+
+    function cancelBooking(token: keyof typeof TOKENS) {
+      return request(app.getHttpServer())
+        .post(`/v1/arenas/${arenaId}/courts/${courtOneId}/bookings/${bookingId}/cancel`)
+        .set(...authHeader(token));
+    }
+
+    const [resA, resB] = await Promise.all([cancelBooking('token-a'), cancelBooking('token-a')]);
+
+    expect(resA.status).toBe(200);
+    expect(resB.status).toBe(200);
+    const bodyA = resA.body as { status: string; cancelledByUserId: string | null };
+    const bodyB = resB.body as { status: string; cancelledByUserId: string | null };
+    expect(bodyA.status).toBe('CANCELLED');
+    expect(bodyB.status).toBe('CANCELLED');
+    // As duas respostas refletem o MESMO cancelamento (mesmo
+    // cancelledByUserId) — nenhuma delas "ganhou" uma segunda transição de
+    // estado própria.
+    expect(bodyA.cancelledByUserId).toBe(bodyB.cancelledByUserId);
+
+    const finalBooking = await prisma.booking.findUniqueOrThrow({ where: { id: bookingId } });
+    expect(finalBooking.status).toBe('CANCELLED');
+  });
 });

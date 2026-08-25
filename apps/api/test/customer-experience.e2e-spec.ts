@@ -15,10 +15,22 @@ const USER_OWNER = { clerkId: 'user_e2e_cx_owner', email: 'cx-e2e-owner@example.
 const USER_A = { clerkId: 'user_e2e_cx_a', email: 'cx-e2e-a@example.com' };
 const USER_B = { clerkId: 'user_e2e_cx_b', email: 'cx-e2e-b@example.com' };
 
+// Fase 13 — usuários da fixture isolada de multi-tenant/timezone (ver
+// describe "Fase 13" no fim do arquivo). Precisam estar no MESMO mapa de
+// tokens que o ClerkService mockado usa, porque o TestingModule é compilado
+// uma única vez no beforeAll externo — declarados aqui em vez de dentro do
+// describe para existirem antes dessa compilação.
+const USER_F13_A1 = { clerkId: 'user_e2e_f13_a1', email: 'f13-a1@example.com' };
+const USER_F13_A2 = { clerkId: 'user_e2e_f13_a2', email: 'f13-a2@example.com' };
+const USER_F13_B1 = { clerkId: 'user_e2e_f13_b1', email: 'f13-b1@example.com' };
+
 const TOKENS: Record<string, string> = {
   'token-owner': USER_OWNER.clerkId,
   'token-a': USER_A.clerkId,
   'token-b': USER_B.clerkId,
+  'token-f13-a1': USER_F13_A1.clerkId,
+  'token-f13-a2': USER_F13_A2.clerkId,
+  'token-f13-b1': USER_F13_B1.clerkId,
 };
 
 function authHeader(token: keyof typeof TOKENS): [string, string] {
@@ -283,6 +295,182 @@ describe('Customer experience — discovery & minhas reservas (e2e)', () => {
         .set(...authHeader('token-a'))
         .expect(200);
       expect((afterCancel.body as MyBookingBody).status).toBe('CANCELLED');
+    });
+  });
+
+  // Fase 13, itens 14/18: isolamento multi-tenant com DUAS arenas (a
+  // "Arena Discovery E2E" acima só tem uma) e dois clientes na Arena A —
+  // fixture própria, isolada da suíte acima (cria e limpa os próprios
+  // dados), reaproveitando só o `app` já inicializado. Arena B usa
+  // America/New_York (com DST real) para provar que "minhas reservas" nunca
+  // confunde o timezone de uma arena com o de outra na mesma lista.
+  describe('Fase 13 — isolamento multi-tenant e timezone em "minhas reservas"', () => {
+    const F13_CLERK_IDS = [USER_F13_A1.clerkId, USER_F13_A2.clerkId, USER_F13_B1.clerkId];
+
+    let f13App: INestApplication<App>;
+    let arenaAId: string;
+    let arenaBId: string;
+    let courtAId: string;
+    let courtBId: string;
+    let bookingA1Id: string;
+    let bookingA2Id: string;
+    let bookingB1Id: string;
+
+    beforeAll(async () => {
+      await prisma.user.deleteMany({ where: { clerkId: { in: F13_CLERK_IDS } } });
+      const userA1 = await prisma.user.create({ data: USER_F13_A1 });
+      const userA2 = await prisma.user.create({ data: USER_F13_A2 });
+      const userB1 = await prisma.user.create({ data: USER_F13_B1 });
+
+      const arenaA = await prisma.arena.create({
+        data: { name: 'Arena F13 A', slug: 'arena-f13-a', timezone: 'America/Sao_Paulo' },
+      });
+      arenaAId = arenaA.id;
+      const courtA = await prisma.court.create({
+        data: {
+          arenaId: arenaAId,
+          name: 'Quadra F13 A',
+          sport: Sport.BEACH_VOLLEYBALL,
+          pricePerSlot: 50,
+        },
+      });
+      courtAId = courtA.id;
+
+      // 2026-03-08 é a data real da transição de DST em NY em 2026 (mesma
+      // usada pelos testes de disponibilidade/dashboard das fases 5/8/12).
+      const arenaB = await prisma.arena.create({
+        data: { name: 'Arena F13 B (NY, DST)', slug: 'arena-f13-b', timezone: 'America/New_York' },
+      });
+      arenaBId = arenaB.id;
+      const courtB = await prisma.court.create({
+        data: {
+          arenaId: arenaBId,
+          name: 'Quadra F13 B',
+          sport: Sport.BEACH_VOLLEYBALL,
+          pricePerSlot: 80,
+        },
+      });
+      courtBId = courtB.id;
+
+      const bookingA1 = await prisma.booking.create({
+        data: {
+          courtId: courtAId,
+          userId: userA1.id,
+          type: BookingType.CUSTOMER,
+          startsAt: new Date('2026-09-10T13:00:00-03:00'),
+          endsAt: new Date('2026-09-10T14:00:00-03:00'),
+          total: 50,
+        },
+      });
+      bookingA1Id = bookingA1.id;
+
+      const bookingA2 = await prisma.booking.create({
+        data: {
+          courtId: courtAId,
+          userId: userA2.id,
+          type: BookingType.CUSTOMER,
+          startsAt: new Date('2026-09-11T13:00:00-03:00'),
+          endsAt: new Date('2026-09-11T14:00:00-03:00'),
+          total: 50,
+        },
+      });
+      bookingA2Id = bookingA2.id;
+
+      // Do lado de depois da transição de DST (UTC-4) — prova que o
+      // instante persistido, não um offset fixo, é o que volta na resposta.
+      const bookingB1 = await prisma.booking.create({
+        data: {
+          courtId: courtBId,
+          userId: userB1.id,
+          type: BookingType.CUSTOMER,
+          startsAt: new Date('2026-03-09T14:00:00-04:00'),
+          endsAt: new Date('2026-03-09T15:00:00-04:00'),
+          total: 80,
+        },
+      });
+      bookingB1Id = bookingB1.id;
+
+      f13App = app;
+    });
+
+    afterAll(async () => {
+      await prisma.booking.deleteMany({ where: { courtId: { in: [courtAId, courtBId] } } });
+      await prisma.arena.deleteMany({ where: { id: { in: [arenaAId, arenaBId] } } });
+      await prisma.user.deleteMany({ where: { clerkId: { in: F13_CLERK_IDS } } });
+    });
+
+    function f13Auth(token: 'token-f13-a1' | 'token-f13-a2' | 'token-f13-b1'): [string, string] {
+      return ['Authorization', `Bearer ${token}`];
+    }
+
+    it('CUSTOMER A1 vê só a própria reserva — nunca a de A2 (mesma arena) nem a de B1 (outra arena)', async () => {
+      const response = await request(f13App.getHttpServer())
+        .get('/v1/users/me/bookings')
+        .set(...f13Auth('token-f13-a1'))
+        .expect(200);
+      const bookings = response.body as MyBookingBody[];
+      const ids = bookings.map((b) => b.id);
+
+      expect(ids).toContain(bookingA1Id);
+      expect(ids).not.toContain(bookingA2Id);
+      expect(ids).not.toContain(bookingB1Id);
+    });
+
+    it('CUSTOMER A1 não consegue ver o detalhe da reserva de A2 (404, mesma arena)', async () => {
+      await request(f13App.getHttpServer())
+        .get(`/v1/users/me/bookings/${bookingA2Id}`)
+        .set(...f13Auth('token-f13-a1'))
+        .expect(404);
+    });
+
+    it('CUSTOMER A1 não consegue cancelar a reserva de A2 (403, mesma arena)', async () => {
+      await request(f13App.getHttpServer())
+        .post(`/v1/arenas/${arenaAId}/courts/${courtAId}/bookings/${bookingA2Id}/cancel`)
+        .set(...f13Auth('token-f13-a1'))
+        .expect(403);
+    });
+
+    it('CUSTOMER B1 não consegue ver nem cancelar reservas da Arena A (404 / 403)', async () => {
+      await request(f13App.getHttpServer())
+        .get(`/v1/users/me/bookings/${bookingA1Id}`)
+        .set(...f13Auth('token-f13-b1'))
+        .expect(404);
+
+      await request(f13App.getHttpServer())
+        .post(`/v1/arenas/${arenaAId}/courts/${courtAId}/bookings/${bookingA1Id}/cancel`)
+        .set(...f13Auth('token-f13-b1'))
+        .expect(403);
+    });
+
+    it('"minhas reservas" nunca confunde o timezone de uma arena com o de outra na mesma consulta', async () => {
+      const resA1 = await request(f13App.getHttpServer())
+        .get(`/v1/users/me/bookings/${bookingA1Id}`)
+        .set(...f13Auth('token-f13-a1'))
+        .expect(200);
+      expect((resA1.body as MyBookingBody).court.arena.timezone).toBe('America/Sao_Paulo');
+
+      const resB1 = await request(f13App.getHttpServer())
+        .get(`/v1/users/me/bookings/${bookingB1Id}`)
+        .set(...f13Auth('token-f13-b1'))
+        .expect(200);
+      const bodyB1 = resB1.body as MyBookingBody;
+      expect(bodyB1.court.arena.timezone).toBe('America/New_York');
+      // O instante persistido (14:00 -04:00 = 18:00 UTC) volta intacto —
+      // nunca recalculado com um offset fixo de -05:00.
+      expect(new Date(bodyB1.startsAt).toISOString()).toBe('2026-03-09T18:00:00.000Z');
+    });
+
+    it('cancelamento em Arena B (DST) funciona e libera o horário, igual à Arena A', async () => {
+      await request(f13App.getHttpServer())
+        .post(`/v1/arenas/${arenaBId}/courts/${courtBId}/bookings/${bookingB1Id}/cancel`)
+        .set(...f13Auth('token-f13-b1'))
+        .expect(200);
+
+      const detail = await request(f13App.getHttpServer())
+        .get(`/v1/users/me/bookings/${bookingB1Id}`)
+        .set(...f13Auth('token-f13-b1'))
+        .expect(200);
+      expect((detail.body as MyBookingBody).status).toBe('CANCELLED');
     });
   });
 });

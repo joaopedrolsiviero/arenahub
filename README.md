@@ -30,13 +30,33 @@ em produção, veja [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 >
 > OWNER/ADMIN continuam com o painel próprio em `/dashboard` (Fase 7), separado da experiência do
 > cliente: escolher a arena administrada → resumo do dia → próximas reservas → ocupação por quadra
-> → editar horário de funcionamento, quadras e configurações. A experiência do cliente (Fase 6)
-> segue: login (Clerk) → descobrir arenas → escolher quadra → escolher data → ver disponibilidade
-> real → escolher horário → confirmar → "minhas reservas" → cancelar. Backend continua a única
-> autoridade em tudo — disponibilidade, preço, dono da reserva, acesso administrativo. Double
-> booking continua prevenido em camadas reais no Postgres (`pg_advisory_xact_lock` +
-> `EXCLUDE USING GIST`) com `Idempotency-Key` persistida — inteiramente PostgreSQL, sem depender de
-> Redis. Pagamentos ainda não foram implementados.
+> → editar horário de funcionamento, quadras, configurações e, desde a **Fase 10 (concluída)**,
+> **equipe** (`/dashboard/[arenaId]/equipe`) — o OWNER lista, adiciona, promove e remove ADMIN da
+> arena; "no máximo um OWNER por arena" agora é garantido pelo próprio Postgres (índice único
+> parcial), não só pela aplicação. Desde a **Fase 11 (concluída)**, a mesma tela ganhou uma aba
+> **Convites**: o OWNER convida alguém por e-mail (mesmo sem conta ainda) para virar ADMIN — a
+> pessoa recebe um link com token de 256 bits (só o hash é salvo no banco), autentica via Clerk em
+> `/convites/[token]` e aceita; o OWNER também pode **transferir a propriedade** da arena para um
+> ADMIN existente via um endpoint explícito e atômico (nunca implícito via `PATCH /members`) — o
+> antigo OWNER vira ADMIN, nunca é removido. Desde a **Fase 12 (concluída)**, o painel ganhou uma
+> aba **IA** (`/dashboard/[arenaId]/ia`): OWNER/ADMIN perguntam em português ("qual quadra está mais
+> ocupada?", "compare esta semana com a anterior") e recebem uma resposta baseada só em métricas
+> reais calculadas pelo backend (Postgres) — a IA nunca vê o banco direto, nunca inventa número e
+> nunca executa nenhuma ação (é só leitura/análise nesta fase). A experiência do cliente (Fase 6,
+> consolidada e testada a fundo na **Fase 13**) segue: login (Clerk) → descobrir arenas → escolher
+> quadra → escolher data → ver disponibilidade real → escolher horário → confirmar →
+> "minhas reservas" (`/minhas-reservas`, abas Próximas/Histórico/Canceladas) → cancelar com
+> confirmação (cancelamento protegido contra corrida concorrente desde a Fase 13; sem prazo mínimo
+> de antecedência — decisão explícita, não uma lacuna). Desde a **Fase 14 (concluída)**, o painel
+> ganhou uma aba **Clientes** (`/dashboard/[arenaId]/clientes`): OWNER/ADMIN listam, buscam e
+> consultam quem já reservou na arena — resumo (total/confirmadas/canceladas/receita estimada) e
+> histórico de reservas, sempre isolado por arena (o mesmo cliente em duas arenas tem números
+> completamente separados em cada uma). Não é um CRM — sem campanhas, cupons ou métricas
+> especulativas. Backend continua a única autoridade em tudo —
+> disponibilidade, preço, dono da reserva, acesso administrativo. Double booking continua prevenido
+> em camadas reais no Postgres (`pg_advisory_xact_lock` + `EXCLUDE USING GIST`) com
+> `Idempotency-Key` persistida — inteiramente PostgreSQL, sem depender de Redis. Pagamentos ainda
+> não foram implementados.
 
 ## Stack
 
@@ -114,6 +134,31 @@ O `pnpm install` já gera o Prisma Client automaticamente (hook `postinstall` em
 
 Para parar a infraestrutura local: `docker compose -f docker/docker-compose.yml down` (adicione
 `-v` para também apagar os volumes de dados).
+
+### Configurar o assistente de IA (opcional, Fase 12)
+
+Sem isso, o resto da aplicação funciona normalmente — só a aba **IA** do painel administrativo
+(`/dashboard/[arenaId]/ia`) responde 503 ("assistente indisponível").
+
+1. Crie uma chave em [platform.openai.com](https://platform.openai.com/api-keys).
+2. Em `apps/api/.env`, defina `AI_PROVIDER_API_KEY="sk-..."` (a chave real, nunca a de exemplo do
+   `.env.example`).
+3. Opcional: `AI_PROVIDER_MODEL` (default `gpt-4o-mini`) e `AI_PROVIDER_TIMEOUT_MS` (default
+   `15000`).
+4. Reinicie a API (`pnpm dev` já recarrega ao salvar o `.env`, mas confirme se não recarregar
+   sozinho).
+
+Exemplos de perguntas que o assistente responde (sempre em relação à arena selecionada, com base
+só em dados reais — nunca inventa número):
+
+- "Quantas reservas tivemos hoje?"
+- "Qual quadra está mais ocupada?"
+- "Qual foi o horário de maior demanda nos últimos 7 dias?"
+- "Compare esta semana com a semana passada."
+- "Qual foi a receita estimada dos últimos 30 dias?"
+
+A chave nunca é enviada ao frontend nem aparece em log — ver `docs/DEPLOYMENT.md`, Fase 12, para os
+detalhes de segurança e custo.
 
 ## Comandos principais
 
@@ -546,6 +591,145 @@ arenahub/
   recorrente não autorizado); Vercel e Clerk produção **BLOQUEADO POR INFRAESTRUTURA** (sem
   conta/ambiente criado neste ambiente). `docs/DEPLOYMENT.md` documenta exatamente o que é
   IMPLEMENTADO/TESTADO vs. cada tipo de bloqueio, sem inventar deploy que não aconteceu.
+
+## Decisões da Fase 10
+
+- **Gestão de membros implementada sobre o `ArenaMembersModule` já existente** — nenhum módulo
+  novo. `GET/POST/PATCH/DELETE /v1/arenas/:arenaId/members`, reaproveitando
+  `ArenaAccessGuard`/`RequireArenaRole` sem modificação.
+- **"No máximo um OWNER por arena" passou a ser garantido pelo Postgres**, via índice único parcial
+  (`ArenaMember_arenaId_single_owner`, `WHERE role = 'OWNER'` — Prisma não expressa índice parcial
+  no schema, migration SQL manual). Achado real: a migration falhou na primeira tentativa contra o
+  banco de dev, que já tinha dois OWNER na mesma arena — corrigido nos dados antes de reaplicar.
+- **Adicionar membro identifica por e-mail, não `userId`** — evita criar qualquer endpoint de
+  busca/enumeração de usuários; é um lookup exato dentro do próprio `POST`, gated pela autorização
+  de OWNER já existente.
+- **Interpretação registrada**: o prompt pedia "DELETE só OWNER" e "ADMIN remove a si mesmo"
+  simultaneamente — logicamente incompatíveis como guard único. Resolvido com guard permissivo
+  (qualquer membro) + regra fina no service (OWNER remove qualquer ADMIN; ADMIN só remove a si
+  mesmo; OWNER nunca é removível). Detalhado em `docs/ARCHITECTURE.md`, Fase 10.
+- **Nova página `/dashboard/[arenaId]/equipe`** — OWNER em destaque, ADMIN em lista com badge,
+  adicionar via dialog (e-mail), remover via `AlertDialog` de confirmação. Backend continua a
+  única autoridade: um ADMIN nunca vê os botões de gerenciar equipe, mas o backend bloquearia a
+  ação de qualquer forma.
+- **STAFF, convite por e-mail e transferência de ownership deliberadamente não implementados** —
+  fora de escopo desta fase, documentado explicitamente (não silenciado).
+- **Roadmap renumerado**: "Fase 10 — IA" do roadmap original virou Fase 11; WhatsApp e Pagamentos
+  deslocados para Fases 12 e 13. Ver `docs/ARCHITECTURE.md`.
+
+## Decisões da Fase 11
+
+- **Convites (`ArenaInvitation`) são um módulo novo** (`InvitationsModule`); **transferência de
+  ownership** foi adicionada ao `ArenaMembersModule` já existente (opera direto sobre `ArenaMember`,
+  não é uma entidade própria). `GET/POST /v1/arenas/:arenaId/invitations`,
+  `DELETE .../:invitationId`, `POST .../:invitationId/resend` (todos `OWNER`-only); rota pública
+  `GET /v1/invitations/:token` (sem guard — precisa ser vista antes do login) e
+  `POST /v1/invitations/:token/accept` (só `ClerkAuthGuard`); `POST
+  /v1/arenas/:arenaId/ownership/transfer` (`OWNER`-only, nunca implícito via `PATCH /members`).
+- **Token de convite: só o hash é persistido.** `crypto.randomBytes(32)` (256 bits, base64url) é o
+  token enviado por "e-mail"; o banco só guarda `sha256(token)`. Nenhuma resposta de API devolve o
+  token puro — a única forma de obtê-lo é o e-mail em si (em dev, o log do
+  `ConsoleInvitationEmailService`). Expira em 7 dias por padrão (`INVITATION_EXPIRES_DAYS`,
+  opcional).
+- **Status do convite é sempre derivado** (`PENDING`/`ACCEPTED`/`REVOKED`/`EXPIRED`, calculado de
+  `acceptedAt`/`revokedAt`/`expiresAt` em tempo de leitura) — nunca uma coluna de enum própria que
+  pudesse dessincronizar.
+- **Identidade de quem aceita vem do `User.email` local já sincronizado do Clerk**, nunca de um
+  campo enviado pelo cliente — fecha a porta para aceitar um convite alegando ser outro e-mail.
+- **Aceite e transferência são atômicos via `updateMany` condicional + checagem de `count`** (não
+  lock pessimista) — validado com testes reais de concorrência (`Promise.all` de duas requisições
+  HTTP simultâneas contra Postgres real): aceite duplicado do mesmo convite dá `[204, 409]` com
+  exatamente 1 `ArenaMember` criado; transferência concorrente dá `[201, 403]` com exatamente 1
+  `OWNER` no estado final.
+- **Envio de e-mail é uma abstração** (`InvitationEmailService`) com um único adapter de
+  desenvolvimento (`ConsoleInvitationEmailService`, loga o link) — **nenhum provedor real** (SendGrid/
+  Postmark/SES) foi integrado nesta fase; ver `docs/DEPLOYMENT.md`.
+- **Rate limiting em criação/reenvio de convite não foi implementado** — um contador em memória seria
+  descartado a cada redeploy (falso senso de proteção); registrado como limitação real, não fingido.
+- **STAFF, permissões granulares, Payment, WhatsApp, IA, reservas recorrentes e notificações gerais
+  continuam fora de escopo** — não implementados nesta fase.
+- **Roadmap renumerado de novo**: "Fase 11 — IA" do roadmap anterior virou Fase 12; WhatsApp e
+  Pagamentos deslocados para Fases 13 e 14. Ver `docs/ARCHITECTURE.md`.
+
+## Decisões da Fase 12
+
+- **Escopo redefinido em relação ao roadmap anterior**: a v0.11 previa um agente com tools de
+  escrita (criar/cancelar reserva). O prompt desta fase pediu, em vez disso, um assistente
+  deliberadamente **só leitura/análise** — a capacidade de agir continua só prevista (Parte 3 do
+  `ARCHITECTURE.md`), sem fase numerada até ser retomada.
+- **Novo módulo `AiModule`** — `POST /v1/arenas/:arenaId/ai/ask` (`OWNER`/`ADMIN`-only, explícito
+  via `@RequireArenaRole(ArenaRole.OWNER, ArenaRole.ADMIN)`), reaproveitando `ClerkAuthGuard`/
+  `ArenaAccessGuard` sem modificação.
+- **`OperationalMetricsService` calcula tudo no Postgres** — reservas confirmadas/canceladas,
+  BLOCK, MAINTENANCE, receita estimada (só `CUSTOMER`+`CONFIRMED`), ocupação por quadra/arena
+  (minutos ocupados ÷ minutos operacionais, `null` quando não há horário configurado), demanda por
+  hora/dia, comparação com o período anterior (deltas prontos, `null` nunca `0` forjado). A IA
+  nunca calcula essas contas sozinha a partir de texto.
+- **A IA nunca acessa o banco direto nem gera SQL** — só um contexto estruturado (JSON) sem PII
+  (nome/e-mail/telefone/ClerkId) e sem IDs internos (`cuid`) é enviado ao modelo.
+- **Provider: OpenAI (`gpt-4o-mini`)**, decidido em conjunto com o usuário durante a fase (nenhuma
+  decisão firme preexistia). `AiProvider` é uma abstração — trocar de provider é só trocar o
+  `useClass` registrado em `AiModule`. `fetch` nativo do Node 24, sem SDK novo.
+- **`AI_PROVIDER_API_KEY` nunca chega ao frontend nem é logada** — sem ela, o endpoint responde 503
+  (nunca derruba o resto da API: não está em `REQUIRED_ENV_VARS`).
+- **Prompt injection: provado estruturalmente, não semanticamente.** Testes confirmam que o
+  contexto nunca vaza dado de outra arena e que o system prompt sempre carrega as regras de defesa
+  — mas nenhuma chamada real à OpenAI foi feita neste ambiente (sem credencial), então a resistência
+  *semântica* de um modelo real não foi validada. Testes e2e usam um `AiProvider` fake (só teste,
+  nunca produção).
+- **Sem rate limiting persistente e sem histórico de conversa persistido** — mesma decisão e mesmo
+  motivo da Fase 11 (convites): implementação frágil em memória seria pior que documentar a
+  limitação. Mitigado parcialmente por limite de tamanho de pergunta (500 caracteres) e de período
+  (máximo 92 dias).
+- **Nenhuma migration nova** — todas as métricas vêm de tabelas já existentes (`Booking`, `Court`,
+  `ArenaOperatingHours`, `Arena`).
+- **STAFF, WhatsApp, agente autônomo, tools de escrita, RAG/embeddings, voz/imagem, Payment
+  continuam fora de escopo** — não implementados nesta fase.
+
+## Decisões da Fase 13
+
+- **Auditoria como entrega principal**: quase todo o ciclo de vida da reserva do CUSTOMER pedido
+  nesta fase (listar "minhas reservas", ver detalhe, cancelar quando permitido, nunca precisar ser
+  `ArenaMember`, identidade sempre do Clerk, `404` em vez de `403` pra não vazar existência) já
+  existia, correto, desde a Fase 6 — nada foi reescrito.
+- **Única correção de código**: `BookingsService.cancel` ganhou proteção real contra corrida
+  concorrente — `update` incondicional virou `updateMany` condicionado a `status: CONFIRMED` (CAS,
+  mesmo padrão da Fase 11), validado com duas requisições de cancelamento simultâneas reais.
+- **Cancelamento não usa `Idempotency-Key`** (decisão explícita) — diferente da criação, cancelar
+  já converge pro mesmo estado terminal por natureza da máquina de estados; exigir o header aqui
+  seria uma restrição nova sem proteger contra nada que o CAS já não resolvesse.
+- **Sem prazo/janela de cancelamento** — decisão já registrada na Fase 6, reafirmada aqui, não
+  inventada agora.
+- **Novo teste prova a integração real** entre o ciclo de vida da reserva e as métricas da Fase 12:
+  cancelar de verdade (pelos endpoints reais) remove a reserva da receita/ocupação vistas pela IA.
+- **Nenhuma migration nova, nenhuma alteração de frontend** — `/minhas-reservas` já cumpria 100%
+  dos requisitos desde a Fase 6.
+- **Roadmap renumerado**: "Fase 13 — WhatsApp" do roadmap anterior virou Fase 14; Pagamentos
+  deslocado para Fase 15.
+
+## Decisões da Fase 14
+
+- **"Cliente da arena" é uma visão derivada, nunca uma entidade nova** — usuário com pelo menos uma
+  `Booking` `type=CUSTOMER` numa quadra da arena. Sem migration; calculado em tempo de leitura, a
+  mesma técnica já usada para `ArenaInvitation` (Fase 11) e para as métricas da IA (Fase 12).
+- **Três endpoints novos, todos só leitura**, módulo `CustomersModule`: `GET
+  /v1/arenas/:arenaId/customers` (lista, busca por nome/e-mail, paginação `page`/`limit` com teto
+  de 50), `GET .../customers/:userId` (resumo agregado), `GET .../customers/:userId/bookings`
+  (histórico). Todos `OWNER`/`ADMIN`-only, reaproveitando os guards existentes sem modificação.
+- **Isolamento por arena absoluto**: um mesmo cliente com reservas em duas arenas tem métricas
+  calculadas de forma totalmente independente em cada uma — validado com um cliente real em duas
+  arenas diferentes.
+- **Receita segue exatamente a regra da Fase 12** — só `CUSTOMER`+`CONFIRMED`; `CANCELLED` entra no
+  total de reservas, nunca na receita.
+- **Sem N+1**: listagem via `groupBy` (agregação no Postgres) em no máximo duas chamadas, sempre
+  delimitadas pela página atual — nunca uma query por cliente.
+- **PII minimizada**: só nome/e-mail são retornados — nunca `clerkId`, nunca telefone.
+- **Primeira paginação da API** (`page`/`limit`) — decisão nova, documentada por não haver padrão
+  anterior no projeto.
+- **Nenhuma migration nova** — índices existentes de `Booking` (`courtId`, `userId`) já atendem.
+- **IA da Fase 12 permanece inalterada** — nenhuma pergunta específica de cliente foi adicionada.
+- **Marketing, campanhas, cupons, WhatsApp, notificações, pagamentos e CRM avançado continuam fora
+  de escopo** — não implementados nesta fase.
 
 ## Git
 

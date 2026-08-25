@@ -1,8 +1,10 @@
 import { DateTime } from 'luxon';
 
 // Decimal do Prisma chega como string — nunca converter para float antes de
-// formatar (item 74 da Fase 6).
-export function formatCurrencyBRL(value: string): string {
+// formatar (item 74 da Fase 6). Também aceita `number` para métricas já
+// agregadas pelo backend (ex: `CustomerSummary.totalRevenue`, Fase 14 — um
+// `Number` genuíno computado no service, não um Decimal column repassado).
+export function formatCurrencyBRL(value: string | number): string {
   return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(
     Number(value),
   );
@@ -26,6 +28,16 @@ export function formatDateInZone(iso: string, timezone: string): string {
     .setZone(timezone)
     .setLocale('pt-BR')
     .toFormat('dd/MM/yyyy');
+}
+
+// Para um rótulo de dia civil já resolvido pelo backend (ex: "2026-08-20",
+// devolvido por OperationalMetricsService) — nunca reconverte por timezone
+// (diferente de formatDateInZone, que espera um instante UTC completo):
+// tratar "2026-08-20" como um instante e depois trocar de timezone mudaria
+// o dia exibido para trás em timezones negativos. Aqui é só uma
+// data-calendário sendo formatada, não um instante sendo convertido.
+export function formatDateLabel(dateStr: string): string {
+  return DateTime.fromISO(dateStr).setLocale('pt-BR').toFormat('dd/MM/yyyy');
 }
 
 export function formatWeekdayInZone(iso: string, timezone: string): string {

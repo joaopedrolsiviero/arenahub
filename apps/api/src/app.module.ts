@@ -11,6 +11,9 @@ import { OperatingHoursModule } from './modules/operating-hours/operating-hours.
 import { BookingsModule } from './modules/bookings/bookings.module';
 import { AvailabilityModule } from './modules/availability/availability.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
+import { InvitationsModule } from './modules/invitations/invitations.module';
+import { AiModule } from './modules/ai/ai.module';
+import { CustomersModule } from './modules/customers/customers.module';
 
 @Module({
   imports: [
@@ -26,6 +29,9 @@ import { DashboardModule } from './modules/dashboard/dashboard.module';
     BookingsModule,
     AvailabilityModule,
     DashboardModule,
+    InvitationsModule,
+    AiModule,
+    CustomersModule,
   ],
 })
 export class AppModule {}

@@ -801,4 +801,113 @@ describe('Bookings & Availability (e2e)', () => {
         .expect(401);
     });
   });
+
+  // Fase 13 — consolidação do ciclo de vida da reserva do CUSTOMER. A
+  // criação/listagem/detalhe/cancelamento em si já existiam desde as Fases
+  // 4/6 (auditado, não reescrito) — os testes abaixo cobrem lacunas
+  // explicitamente pedidas pelo prompt da fase que ainda não tinham teste
+  // dedicado.
+  describe('Fase 13 — cancelamento: mass assignment, tipos, reserva inexistente', () => {
+    it('mass assignment no corpo do cancelamento é ignorado — o endpoint nem lê o body', async () => {
+      const created = await request(app.getHttpServer())
+        .post(bookingsUrl())
+        .set(...authHeader('token-customer'))
+        .set('Idempotency-Key', 'f13-mass-assignment-1')
+        .send({ startsAt: '2026-09-03T09:00:00-03:00' })
+        .expect(201);
+      const bookingId = asBookingBody(created).id;
+
+      const response = await request(app.getHttpServer())
+        .post(`${bookingsUrl()}/${bookingId}/cancel`)
+        .set(...authHeader('token-customer'))
+        .send({
+          userId: 'outro-usuario',
+          arenaId: 'outra-arena',
+          courtId: 'outra-quadra',
+          status: 'CONFIRMED',
+          type: 'BLOCK',
+          total: 999999,
+        })
+        .expect(200);
+
+      const body = asBookingBody(response);
+      expect(body.status).toBe(BookingStatus.CANCELLED);
+      expect(body.type).toBe(BookingType.CUSTOMER);
+      expect(Number(body.total)).toBe(100);
+      expect(body.courtId).toBe(courtId);
+    });
+
+    it('CUSTOMER (sem nenhum vínculo com a arena) não consegue cancelar um BLOCK — 403', async () => {
+      const block = await request(app.getHttpServer())
+        .post(`${bookingsUrl()}/blocks`)
+        .set(...authHeader('token-owner'))
+        .set('Idempotency-Key', 'f13-block-cancel-1')
+        .send({ startsAt: '2026-09-04T14:00:00-03:00', endsAt: '2026-09-04T15:00:00-03:00' })
+        .expect(201);
+      const blockId = asBookingBody(block).id;
+
+      await request(app.getHttpServer())
+        .post(`${bookingsUrl()}/${blockId}/cancel`)
+        .set(...authHeader('token-customer'))
+        .expect(403);
+
+      // Nunca aparece em "minhas reservas" do CUSTOMER, mesmo tentando o
+      // detalhe diretamente pelo ID descoberto.
+      await request(app.getHttpServer())
+        .get(`/v1/users/me/bookings/${blockId}`)
+        .set(...authHeader('token-customer'))
+        .expect(404);
+    });
+
+    it('CUSTOMER não consegue cancelar um MAINTENANCE — 403', async () => {
+      const maintenance = await request(app.getHttpServer())
+        .post(`${bookingsUrl()}/maintenance`)
+        .set(...authHeader('token-owner'))
+        .set('Idempotency-Key', 'f13-maintenance-cancel-1')
+        .send({ startsAt: '2026-09-04T16:00:00-03:00', endsAt: '2026-09-04T17:00:00-03:00' })
+        .expect(201);
+      const maintenanceId = asBookingBody(maintenance).id;
+
+      await request(app.getHttpServer())
+        .post(`${bookingsUrl()}/${maintenanceId}/cancel`)
+        .set(...authHeader('token-customer'))
+        .expect(403);
+    });
+
+    it('OWNER/ADMIN consegue cancelar o próprio BLOCK (não é uma restrição de tipo, é de dono/papel)', async () => {
+      const block = await request(app.getHttpServer())
+        .post(`${bookingsUrl()}/blocks`)
+        .set(...authHeader('token-owner'))
+        .set('Idempotency-Key', 'f13-block-cancel-2')
+        .send({ startsAt: '2026-09-05T14:00:00-03:00', endsAt: '2026-09-05T15:00:00-03:00' })
+        .expect(201);
+      const blockId = asBookingBody(block).id;
+
+      const response = await request(app.getHttpServer())
+        .post(`${bookingsUrl()}/${blockId}/cancel`)
+        .set(...authHeader('token-owner'))
+        .expect(200);
+      expect(asBookingBody(response).status).toBe(BookingStatus.CANCELLED);
+    });
+
+    it('reserva inexistente: GET detalhe e POST cancelar nunca vazam erro interno (404 limpo)', async () => {
+      const fakeId = 'booking-que-nao-existe-f13';
+
+      const detailResponse = await request(app.getHttpServer())
+        .get(`/v1/users/me/bookings/${fakeId}`)
+        .set(...authHeader('token-customer'))
+        .expect(404);
+      expect(JSON.stringify(detailResponse.body)).not.toMatch(
+        /prisma|stack|at\s+\S+\.(ts|js):\d+/i,
+      );
+
+      const cancelResponse = await request(app.getHttpServer())
+        .post(`${bookingsUrl()}/${fakeId}/cancel`)
+        .set(...authHeader('token-customer'))
+        .expect(404);
+      expect(JSON.stringify(cancelResponse.body)).not.toMatch(
+        /prisma|stack|at\s+\S+\.(ts|js):\d+/i,
+      );
+    });
+  });
 });

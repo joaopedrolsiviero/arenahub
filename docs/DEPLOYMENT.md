@@ -217,11 +217,98 @@ Conforme o item 12 do prompt — Vercel usa o mecanismo nativo dela pra Next.js
 | `NODE_ENV` | Não | `production` |
 | `REDIS_URL` | Não (não usado hoje) | Não provisionar — ver Seção 2 |
 | `APP_VERSION` | Não | SHA curto do commit, se a plataforma expuser isso automaticamente |
+| `INVITATION_EXPIRES_DAYS` | Não (default `7`) | Nova na Fase 11 — dias até um convite de equipe expirar. Não é secret; só ajuste se `7` não fizer sentido pro produto |
+| `AI_PROVIDER_API_KEY` | Não* (ver abaixo) | Secret — chave da API da OpenAI (platform.openai.com). Nova na Fase 12 |
+| `AI_PROVIDER_MODEL` | Não (default `gpt-4o-mini`) | Modelo da OpenAI usado pelo assistente |
+| `AI_PROVIDER_TIMEOUT_MS` | Não (default `15000`) | Timeout (ms) de cada chamada à OpenAI |
 
 As três primeiras são validadas no boot (`assertRequiredEnv()` em
 `apps/api/src/main.ts`, Fase 9): se qualquer uma faltar, o processo termina
 imediatamente com uma mensagem clara nos logs (nunca imprime valores, só
 nomes de variáveis ausentes) — nunca sobe parcialmente configurado.
+`INVITATION_EXPIRES_DAYS` e as três variáveis de IA não estão nessa lista —
+são opcionais, com default no próprio código, então a ausência delas nunca
+impede o boot da API (\* `AI_PROVIDER_API_KEY` é a única cuja ausência tem
+efeito visível: sem ela, só o endpoint `POST /v1/arenas/:arenaId/ai/ask`
+responde 503, o resto do produto continua 100% funcional — ver "Assistente
+de IA" abaixo).
+
+### Convites por e-mail (Fase 11) — sem provedor real configurado
+
+`WEB_APP_URL` (já existente desde a Fase 9, **reaproveitada, não é uma
+variável nova**) agora também compõe o link de aceite do convite
+(`${WEB_APP_URL}/convites/:token`) — se ela estiver errada em produção, o
+link enviado por e-mail aponta pro lugar errado, do mesmo jeito que hoje
+afeta CORS (Seção 9).
+
+O envio em si passa por uma abstração (`InvitationEmailService`) com um
+único adapter implementado, `ConsoleInvitationEmailService` — ele só loga o
+link via `Logger` do Nest, e **somente fora de produção**
+(`NODE_ENV !== 'production'`); em produção, loga um aviso genérico (nome da
+arena, nunca o link/token) e retorna sem lançar, porque a criação do convite
+nunca deve falhar por causa da notificação. **Nenhum provedor de e-mail real
+(SendGrid/Postmark/Resend/SES) foi integrado nesta fase** — em produção,
+hoje, o OWNER precisaria copiar o link manualmente dos logs do servidor
+(inviável na prática). Antes de usar convites em produção de verdade:
+implemente um novo adapter de `InvitationEmailService` para o provedor
+escolhido e troque o `provide: InvitationEmailService, useClass:
+ConsoleInvitationEmailService` em `InvitationsModule` — nenhuma outra parte
+do sistema precisa mudar, é só trocar a implementação da mesma interface.
+
+**Expiração** (`INVITATION_EXPIRES_DAYS`, default 7 dias) é avaliada em
+tempo de leitura (não há job/cron marcando convites como expirados) — um
+convite `EXPIRED` continua existindo no banco, só deixa de ser aceitável.
+Sem impacto de infraestrutura adicional.
+
+**Segurança do link**: o token no link tem 256 bits de entropia
+(`crypto.randomBytes(32)`), e só o hash SHA-256 é persistido — mesmo com
+acesso de leitura ao banco de produção, não é possível reconstruir o token
+original nem aceitar um convite em nome de outra pessoa. Isso também
+significa que **um convite perdido não pode ser recuperado** — a única
+opção é revogar e reenviar (`POST .../resend`, que gera um token novo e
+invalida o anterior implicitamente ao trocar o hash salvo).
+
+### Assistente de IA operacional (Fase 12) — segurança, custo e comportamento sem chave
+
+**Provedor**: OpenAI (Chat Completions API), chamado via `fetch` nativo do Node — sem SDK
+adicional. Decisão tomada em conjunto com o usuário durante a Fase 12 (nenhuma decisão anterior
+vinculava o projeto a um provedor específico para este escopo). Trocar de provedor no futuro é
+implementar um novo `AiProvider` (`apps/api/src/modules/ai/providers/ai-provider.ts`) e trocar o
+`useClass` registrado em `AiModule` — nenhuma outra parte do sistema muda.
+
+**Segurança da chave**: `AI_PROVIDER_API_KEY` só existe no backend, nunca no frontend — nenhuma
+variável `NEXT_PUBLIC_*` a referencia, e ela nunca é logada (nem em sucesso, nem em erro; os logs
+do `OpenAiAiProviderService` incluem só status/duração/modelo). Nunca é persistida no banco.
+
+**Comportamento sem a chave configurada**: o resto da API sobe normalmente — `AI_PROVIDER_API_KEY`
+não está em `REQUIRED_ENV_VARS` (Fase 9), porque a IA é uma funcionalidade adicional, não um
+requisito para reservar quadra/gerenciar arena. Só `POST /v1/arenas/:arenaId/ai/ask` responde `503`
+("Assistente de IA temporariamente indisponível.") até a chave ser configurada.
+
+**Timeout e erros do provedor**: cada chamada à OpenAI tem um timeout configurável
+(`AI_PROVIDER_TIMEOUT_MS`, default 15s) via `AbortController` — se a OpenAI não responder a tempo,
+o request é abortado e a API responde `503`, nunca fica pendurada. Qualquer erro do provedor
+(timeout, status de erro, resposta malformada) é mapeado para `503` com uma mensagem genérica —
+o detalhe interno (ex: mensagem de erro da OpenAI, motivo do timeout) é logado no servidor, nunca
+devolvido na resposta HTTP.
+
+**Custo**: modelo default `gpt-4o-mini` (custo por token baixo comparado aos modelos "full-size" da
+OpenAI) — variável, cobrado por uso pela OpenAI, fora do controle direto do ArenaHub. Mitigações de
+custo implementadas nesta fase: limite de 500 caracteres por pergunta, limite de 92 dias por período
+explícito consultado, e nenhum retry automático em caso de erro. **Rate limiting persistente
+(por usuário/IP/arena) não foi implementado** — um contador em memória seria descartado a cada
+redeploy (falso senso de proteção); se o volume de uso justificar, uma solução real precisa de
+estado persistente (Postgres/Redis) e fica para uma fase futura. Monitorar custo real via o próprio
+painel da OpenAI (platform.openai.com/usage) até esse controle existir no produto.
+
+**Prompt injection**: o system prompt (centralizado em `apps/api/src/modules/ai/prompts.ts`) inclui
+regras explícitas contra revelar dados de outras arenas, executar ações, ou tratar texto do usuário
+como instrução — mas isso **nunca foi validado contra uma chamada real à OpenAI neste ambiente**
+(sem credencial de produção disponível). O que É garantido estruturalmente, e testado (e2e contra
+Postgres real): o contexto enviado ao modelo é montado só a partir de queries filtradas por
+`arenaId` — não existe caminho de código pelo qual dado de outra arena chegaria ao contexto, com ou
+sem a cooperação do modelo. Antes de expor a funcionalidade a usuários reais em produção, validar a
+resistência semântica do modelo escolhido com testes manuais/automatizados contra a API real.
 
 ### `apps/web/.env.example`
 

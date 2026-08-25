@@ -37,6 +37,8 @@ model User {
   arenaMemberships   ArenaMember[]
   bookings           Booking[]     @relation("BookingUser")
   cancelledBookings  Booking[]     @relation("BookingCancelledBy")
+  sentInvitations    ArenaInvitation[] @relation("InvitationInvitedBy")
+  acceptedInvitations ArenaInvitation[] @relation("InvitationAcceptedBy")
 }
 
 // Papel do usuário dentro de uma arena específica (nunca um campo global).
@@ -79,6 +81,7 @@ model Arena {
   members        ArenaMember[]
   courts         Court[]
   operatingHours ArenaOperatingHours[]
+  invitations    ArenaInvitation[]
 }
 
 // Dia da semana centralizado num enum — nunca um inteiro solto (0=domingo
@@ -125,6 +128,12 @@ model ArenaOperatingHours {
 // ARCHITECTURE.md. `invitedAt`/`acceptedAt` (fluxo de convite) ficam para
 // quando existir de fato um fluxo de convite; por ora a associação nasce
 // sempre já "efetivada" (criador da arena vira OWNER direto).
+// Fase 10: "no máximo um OWNER por arena" é garantido por um índice único
+// PARCIAL sobre (arenaId) WHERE role = 'OWNER' — Prisma não tem sintaxe para
+// índice parcial no schema, então ele existe só na migration SQL manual
+// (`arena_member_single_owner`), mesma técnica já usada para a EXCLUDE
+// constraint de Booking. Não é um UNIQUE(arenaId) comum: isso impediria
+// múltiplos ADMIN na mesma arena, o que é permitido.
 model ArenaMember {
   id        String    @id @default(cuid())
   arenaId   String
@@ -137,6 +146,50 @@ model ArenaMember {
 
   @@unique([arenaId, userId])
   @@index([userId])
+}
+
+// Fase 11: convite pendente pra alguém virar ArenaMember(role=ADMIN) de uma
+// arena. Deliberadamente SEM FK obrigatória pra User — o convidado pode
+// ainda não ter conta no ArenaHub (item 5 do prompt da fase); `email` é o
+// identificador do convite até o aceite associá-lo a um User real via
+// `acceptedByUserId`. Nunca guarda o token em texto puro — só `tokenHash`
+// (SHA-256 de um token de 256 bits gerado por `crypto.randomBytes`, nunca
+// reversível). Estado (PENDING/ACCEPTED/REVOKED/EXPIRED) é deliberadamente
+// DERIVADO de `acceptedAt`/`revokedAt`/`expiresAt` no service, não um enum
+// próprio — evita um campo que pudesse ficar dessincronizado dos timestamps
+// que já carregam a mesma informação (item 12 do prompt).
+//
+// "No máximo um convite ainda aberto (nem aceito, nem revogado) por
+// (arenaId, email, role)" é garantido por um índice único PARCIAL — mesma
+// técnica manual já usada para o único-OWNER da Fase 10, porque Prisma não
+// tem sintaxe de schema pra índice parcial. Ver a migration desta fase.
+model ArenaInvitation {
+  id        String    @id @default(cuid())
+  arenaId   String
+  // Sempre normalizado (trim + lowercase) antes de persistir — mesma regra
+  // usada em toda consulta/comparação (item 6 do prompt).
+  email     String
+  role      ArenaRole
+  tokenHash String    @unique
+  expiresAt DateTime  @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+
+  acceptedAt DateTime? @db.Timestamptz(6)
+  revokedAt  DateTime? @db.Timestamptz(6)
+
+  // Nulável + SetNull (não Cascade): se o User que convidou for removido
+  // (ex: user.deleted do Clerk), o convite continua existindo como
+  // histórico (item 42) — mesmo padrão já usado por
+  // `Booking.cancelledByUserId`.
+  invitedByUserId  String?
+  acceptedByUserId String?
+
+  arena          Arena @relation(fields: [arenaId], references: [id], onDelete: Cascade)
+  invitedBy      User? @relation("InvitationInvitedBy", fields: [invitedByUserId], references: [id], onDelete: SetNull)
+  acceptedByUser User? @relation("InvitationAcceptedBy", fields: [acceptedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([arenaId])
+  @@index([email])
 }
 
 // Quadra de uma arena. `pricePerSlot`/`slotDurationMinutes`/`bufferMinutes`

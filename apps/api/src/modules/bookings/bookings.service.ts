@@ -267,6 +267,21 @@ export class BookingsService {
   // ser membro da arena para reservar — ver docs/ARCHITECTURE.md, Fase 4,
   // "Autorização"), por isso o papel é resolvido aqui via getRole, que
   // retorna null nesse caso em vez de lançar.
+  //
+  // Fase 13: idempotência por natureza do state machine (CONFIRMED->CANCELLED
+  // é uma transição terminal), não pelo mecanismo formal de Idempotency-Key
+  // (esse existe para proteger CRIAÇÃO — uma operação que sem proteção geraria
+  // dois registros distintos a cada retry; cancelar duas vezes já converge
+  // pro mesmo estado por construção, então o header não é necessário aqui —
+  // decisão registrada em docs/ARCHITECTURE.md, Fase 13). A chamada
+  // sequencial repetida já era coberta pelo early-return abaixo; o que
+  // faltava era a corrida real: duas requisições concorrentes podem passar
+  // pela leitura acima antes de qualquer uma escrever. Por isso a escrita em
+  // si é condicional (`updateMany` com `status: CONFIRMED` no WHERE, mesmo
+  // espírito do CAS usado no aceite de convite/transferência de ownership da
+  // Fase 11) — a perdedora da corrida nunca sobrescreve
+  // `cancelledAt`/`cancelledByUserId` da vencedora, só relê o estado final já
+  // definido por ela.
   async cancel(
     arenaId: string,
     courtId: string,
@@ -293,14 +308,20 @@ export class BookingsService {
       return booking;
     }
 
-    return this.prisma.booking.update({
-      where: { id: bookingId },
+    await this.prisma.booking.updateMany({
+      where: { id: bookingId, status: BookingStatus.CONFIRMED },
       data: {
         status: BookingStatus.CANCELLED,
         cancelledAt: new Date(),
         cancelledByUserId: requesterId,
       },
     });
+
+    // Sempre relê: se `count` foi 1, é o estado que acabamos de gravar; se
+    // foi 0, outra requisição venceu a corrida entre o findFirst acima e
+    // este updateMany — o resultado devolvido é o mesmo de qualquer forma
+    // (a reserva já está CANCELLED), nunca um erro.
+    return this.prisma.booking.findUniqueOrThrow({ where: { id: bookingId } });
   }
 
   private assertValidWindow(from: Date, to: Date): void {
