@@ -10,5 +10,10 @@ import { AvailabilityService } from './availability.service';
   imports: [AuthModule, CourtsModule, OperatingHoursModule, PrismaModule],
   controllers: [AvailabilityController],
   providers: [AvailabilityService],
+  // Fase 16: WhatsAppModule reaproveita a MESMA AvailabilityService (nunca
+  // uma segunda implementação de disponibilidade — item 15/57 do prompt da
+  // fase) para responder "tem quadra livre nesse horário?" pelo canal de
+  // WhatsApp. Mesmo padrão de CourtsModule exportando CourtsService.
+  exports: [AvailabilityService],
 })
 export class AvailabilityModule {}

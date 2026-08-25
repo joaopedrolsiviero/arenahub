@@ -32,6 +32,15 @@ function fakeMetrics(overrides: Partial<OperationalMetrics> = {}): OperationalMe
     },
     mostOccupiedCourtName: 'Quadra 1',
     leastOccupiedCourtName: 'Quadra 1',
+    dailySeries: [
+      {
+        date: '2026-08-18',
+        confirmedBookings: 3,
+        cancelledBookings: 1,
+        estimatedRevenue: 300,
+        occupancyRate: 0.4,
+      },
+    ],
     ...overrides,
   };
 }
@@ -49,6 +58,7 @@ function fakeComparison(overrides: Partial<PeriodComparison> = {}): PeriodCompar
       occupancyRate: 0.3,
     },
     confirmedBookingsDeltaPct: 33.33,
+    cancelledBookingsDeltaPct: 0,
     occupancyRateDeltaPct: 44.03,
     revenueDeltaPct: 33.33,
     ...overrides,

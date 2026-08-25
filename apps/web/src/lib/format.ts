@@ -47,6 +47,24 @@ export function formatWeekdayInZone(iso: string, timezone: string): string {
     .toFormat('cccc');
 }
 
+// Fase 15: occupancyRate é uma fração (0-1) ou `null` quando não há
+// capacidade operacional mensurável — nunca exibir "0%" nesse caso (item 8
+// do prompt da fase: disciplina null vs. zero).
+export function formatPercent(rate: number | null): string {
+  if (rate === null) return 'Não disponível';
+  return new Intl.NumberFormat('pt-BR', { style: 'percent', maximumFractionDigits: 1 }).format(
+    rate,
+  );
+}
+
+// Delta já vem pronto do backend (percentDelta), `null` quando não há base
+// de comparação (período anterior com valor 0) — nunca aproximado para 0%.
+export function formatDeltaPct(deltaPct: number | null): string {
+  if (deltaPct === null) return 'Sem base para comparação';
+  const sign = deltaPct > 0 ? '+' : '';
+  return `${sign}${deltaPct.toFixed(1)}% vs. período anterior`;
+}
+
 /** Data de "hoje" no timezone da arena, no formato yyyy-MM-dd (para <input type="date">). */
 export function todayInZone(timezone: string): string {
   return DateTime.now().setZone(timezone).toFormat('yyyy-MM-dd');

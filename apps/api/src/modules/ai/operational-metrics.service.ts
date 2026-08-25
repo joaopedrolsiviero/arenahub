@@ -8,9 +8,20 @@ import { OperatingInterval, weekdayFromIso } from '../operating-hours/operating-
 
 // Fase 12: presets mínimos pedidos pelo prompt da fase (item 10) — período
 // explícito (from/to) é tratado à parte, nunca misturado com um preset na
-// mesma requisição (ver AskAiDto).
+// mesma requisição (ver AskAiDto). `thisMonth`/`lastMonth` adicionados na
+// Fase 15 (Relatórios) — extensão aditiva, centralizada aqui: os presets
+// anteriores continuam com o mesmo comportamento, e a IA (que valida contra
+// sua própria lista fixa em AskAiPeriodDto) nem precisa saber que eles
+// existem.
 export type PeriodPreset =
-  'today' | 'yesterday' | 'last7days' | 'last30days' | 'thisWeek' | 'lastWeek';
+  | 'today'
+  | 'yesterday'
+  | 'last7days'
+  | 'last30days'
+  | 'thisWeek'
+  | 'lastWeek'
+  | 'thisMonth'
+  | 'lastMonth';
 
 const MAX_EXPLICIT_RANGE_DAYS = 92;
 
@@ -65,6 +76,19 @@ export interface DemandMetrics {
   busiestDay: string | null;
 }
 
+// Fase 15 (Relatórios): um ponto da série temporal — mesmas definições da
+// Fase 12 (receita só CUSTOMER+CONFIRMED, ocupação null quando não há
+// capacidade mensurável naquele dia específico), nunca uma fórmula nova.
+export interface DailyMetric {
+  /** YYYY-MM-DD local da arena. */
+  date: string;
+  confirmedBookings: number;
+  cancelledBookings: number;
+  estimatedRevenue: number;
+  /** 0-1, ou null se não há horário de funcionamento configurado NESTE dia. */
+  occupancyRate: number | null;
+}
+
 export interface OperationalMetrics {
   period: ResolvedPeriod;
   summary: MetricsSummary;
@@ -72,6 +96,8 @@ export interface OperationalMetrics {
   demand: DemandMetrics;
   mostOccupiedCourtName: string | null;
   leastOccupiedCourtName: string | null;
+  /** Fase 15: evolução dia a dia dentro do período — mesmos números do `summary`, quebrados por data. */
+  dailySeries: DailyMetric[];
 }
 
 export interface PeriodComparison {
@@ -79,6 +105,8 @@ export interface PeriodComparison {
   previousSummary: MetricsSummary;
   /** Delta percentual current→previous, null quando previous é 0 (divisão indefinida — nunca inventado). */
   confirmedBookingsDeltaPct: number | null;
+  /** Fase 15: mesma regra — null quando não há base de comparação. */
+  cancelledBookingsDeltaPct: number | null;
   occupancyRateDeltaPct: number | null;
   revenueDeltaPct: number | null;
 }
@@ -183,6 +211,14 @@ export class OperationalMetricsService {
         const start = now.startOf('week').minus({ weeks: 1 });
         return this.toResolvedPeriod(start, start.plus({ weeks: 1 }));
       }
+      case 'thisMonth': {
+        const start = now.startOf('month');
+        return this.toResolvedPeriod(start, start.plus({ months: 1 }));
+      }
+      case 'lastMonth': {
+        const start = now.startOf('month').minus({ months: 1 });
+        return this.toResolvedPeriod(start, start.plus({ months: 1 }));
+      }
       default:
         throw new BadRequestException(`period.preset inválido: ${String(preset)}`);
     }
@@ -236,6 +272,13 @@ export class OperationalMetricsService {
 
     const summary = this.buildSummary(bookings, activeCourtIds, operationalMinutesPerCourt);
     const demand = this.buildDemand(arena.timezone, bookings, intervals, period);
+    const dailySeries = this.buildDailySeries(
+      arena.timezone,
+      bookings,
+      activeCourtIds,
+      intervals,
+      period,
+    );
 
     const rankable = courtMetrics.filter((c) => c.occupancyRate !== null);
     const mostOccupied = rankable.length
@@ -252,6 +295,7 @@ export class OperationalMetricsService {
       demand,
       mostOccupiedCourtName: mostOccupied?.courtName ?? null,
       leastOccupiedCourtName: leastOccupied?.courtName ?? null,
+      dailySeries,
     };
   }
 
@@ -267,6 +311,10 @@ export class OperationalMetricsService {
       confirmedBookingsDeltaPct: percentDelta(
         previous.summary.confirmedBookings,
         current.summary.confirmedBookings,
+      ),
+      cancelledBookingsDeltaPct: percentDelta(
+        previous.summary.cancelledBookings,
+        current.summary.cancelledBookings,
       ),
       occupancyRateDeltaPct: percentDelta(
         previous.summary.occupancyRate,
@@ -293,26 +341,48 @@ export class OperationalMetricsService {
    * funcionamento é da Arena, não da Court (Fase 5), então o total é igual
    * para todas as quadras ativas. Soma a duração dos intervalos configurados
    * para cada dia da semana que aparece no período (item 26 do prompt da
-   * fase: nunca aproximar silenciosamente).
+   * fase: nunca aproximar silenciosamente). Implementado como a soma do mapa
+   * por-dia (Fase 15) — mesmo cálculo de sempre, só reaproveitado em vez de
+   * duplicado.
    */
   private operationalMinutes(
     timezone: string,
     intervals: OperatingInterval[],
     period: ResolvedPeriod,
   ): number {
-    let totalMinutes = 0;
+    let total = 0;
+    for (const minutes of this.operationalMinutesByDay(timezone, intervals, period).values()) {
+      total += minutes;
+    }
+    return total;
+  }
+
+  /**
+   * Fase 15: o mesmo cálculo acima, mas por dia — necessário pra série
+   * temporal (`dailySeries`), onde a ocupação de CADA dia precisa do próprio
+   * denominador (dias sem nenhum intervalo configurado têm 0 minutos, o que
+   * vira `occupancyRate: null` naquele ponto da série, nunca `0%` forjado).
+   */
+  private operationalMinutesByDay(
+    timezone: string,
+    intervals: OperatingInterval[],
+    period: ResolvedPeriod,
+  ): Map<string, number> {
+    const result = new Map<string, number>();
     let day = DateTime.fromJSDate(period.from, { zone: timezone }).startOf('day');
     const end = DateTime.fromJSDate(period.to, { zone: timezone });
     while (day < end) {
       const weekday = weekdayFromIso(day.weekday);
+      let minutes = 0;
       for (const interval of intervals) {
         if (interval.dayOfWeek === weekday) {
-          totalMinutes += interval.closesAt - interval.opensAt;
+          minutes += interval.closesAt - interval.opensAt;
         }
       }
+      result.set(day.toFormat('yyyy-MM-dd'), minutes);
       day = day.plus({ days: 1 });
     }
-    return totalMinutes;
+    return result;
   }
 
   private buildCourtMetric(
@@ -463,5 +533,73 @@ export class OperationalMetricsService {
       : null;
 
     return { bookingsByHour, peakHour, lowestHour, bookingsByDay, busiestDay };
+  }
+
+  /**
+   * Fase 15 (Relatórios): evolução dia a dia dentro do período — as MESMAS
+   * regras de `buildSummary`/`buildCourtMetric` (receita só CUSTOMER+
+   * CONFIRMED, ocupação = minutos ocupados ÷ minutos operacionais só de
+   * quadras ativas, `null` — nunca `0` — quando não há horário configurado
+   * naquele dia específico), só que uma linha por dia em vez de agregado no
+   * período inteiro.
+   */
+  private buildDailySeries(
+    timezone: string,
+    bookings: BookingRow[],
+    activeCourtIds: Set<string>,
+    intervals: OperatingInterval[],
+    period: ResolvedPeriod,
+  ): DailyMetric[] {
+    const minutesByDay = this.operationalMinutesByDay(timezone, intervals, period);
+
+    type DayAccumulator = {
+      confirmed: number;
+      cancelled: number;
+      revenue: number;
+      occupiedMinutes: number;
+    };
+    const byDay = new Map<string, DayAccumulator>();
+    for (const date of minutesByDay.keys()) {
+      byDay.set(date, { confirmed: 0, cancelled: 0, revenue: 0, occupiedMinutes: 0 });
+    }
+
+    for (const booking of bookings) {
+      if (booking.type !== BookingType.CUSTOMER || !activeCourtIds.has(booking.courtId)) {
+        continue;
+      }
+      // Sem overnight (Fase 5) — startsAt/endsAt sempre no mesmo dia civil,
+      // então o dia local de startsAt já identifica a linha certa.
+      const dateLabel = DateTime.fromJSDate(booking.startsAt, { zone: timezone }).toFormat(
+        'yyyy-MM-dd',
+      );
+      const accumulator = byDay.get(dateLabel);
+      if (!accumulator) continue;
+
+      if (booking.status === BookingStatus.CONFIRMED) {
+        accumulator.confirmed += 1;
+        accumulator.revenue += Number(booking.total);
+        accumulator.occupiedMinutes +=
+          (booking.endsAt.getTime() - booking.startsAt.getTime()) / 60_000;
+      } else if (booking.status === BookingStatus.CANCELLED) {
+        accumulator.cancelled += 1;
+      }
+    }
+
+    return [...minutesByDay.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, operationalMinutesThatDay]) => {
+        const accumulator = byDay.get(date)!;
+        const operationalMinutesAllCourts = operationalMinutesThatDay * activeCourtIds.size;
+        return {
+          date,
+          confirmedBookings: accumulator.confirmed,
+          cancelledBookings: accumulator.cancelled,
+          estimatedRevenue: accumulator.revenue,
+          occupancyRate:
+            operationalMinutesAllCourts > 0
+              ? accumulator.occupiedMinutes / operationalMinutesAllCourts
+              : null,
+        };
+      });
   }
 }

@@ -34,6 +34,7 @@ function fakeMetrics(): OperationalMetrics {
     },
     mostOccupiedCourtName: null,
     leastOccupiedCourtName: null,
+    dailySeries: [],
   };
 }
 
@@ -42,6 +43,7 @@ function fakeComparison(): PeriodComparison {
     previous: { from: new Date(), to: new Date(), fromLabel: '2026-08-07', toLabel: '2026-08-13' },
     previousSummary: fakeMetrics().summary,
     confirmedBookingsDeltaPct: null,
+    cancelledBookingsDeltaPct: null,
     occupancyRateDeltaPct: null,
     revenueDeltaPct: null,
   };

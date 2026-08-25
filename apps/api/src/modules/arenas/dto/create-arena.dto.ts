@@ -43,4 +43,15 @@ export class CreateArenaDto {
   @IsEmail()
   @MaxLength(160)
   email?: string;
+
+  // Fase 16: `phone_number_id` estável da Meta Cloud API (dígitos puros,
+  // nunca o número de telefone em si — ver docs/ARCHITECTURE.md, Fase 16,
+  // "Identidade da arena"). Opcional: a maioria das arenas não tem WhatsApp
+  // configurado. Reaproveita a autorização já existente de
+  // `PATCH /arenas/:arenaId` (OWNER/ADMIN) — nenhum endpoint novo só para
+  // isso.
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{1,32}$/, { message: 'whatsappPhoneNumberId deve conter apenas dígitos' })
+  whatsappPhoneNumberId?: string;
 }

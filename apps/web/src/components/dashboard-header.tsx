@@ -12,6 +12,7 @@ const NAV_ITEMS = [
   { href: '/horarios', label: 'Horários' },
   { href: '/equipe', label: 'Equipe' },
   { href: '/clientes', label: 'Clientes' },
+  { href: '/relatorios', label: 'Relatórios' },
   { href: '/ia', label: 'IA' },
   { href: '/configuracoes', label: 'Configurações' },
 ];

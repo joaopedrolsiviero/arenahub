@@ -18,6 +18,11 @@ export interface ArenaFields {
   // declarado aqui — corrigido agora que a Fase 6 passa a depender disso no
   // frontend.
   timezone: string;
+  // Fase 16 — nunca exposto pelos endpoints de descoberta pública
+  // (`ArenaDiscoveryDetail` abaixo é um tipo deliberadamente separado, sem
+  // este campo), só nas respostas administrativas (OWNER/ADMIN) já
+  // protegidas por `ArenaAccessGuard`.
+  whatsappPhoneNumberId: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -56,7 +61,10 @@ export interface CourtPublic {
   bufferMinutes: number;
 }
 
-export interface ArenaDiscoveryDetail extends ArenaFields {
+// Omit<..., 'whatsappPhoneNumberId'>: descoberta pública nunca expõe esse
+// campo (Fase 16) — `discoverOne` nem o seleciona no Prisma, então o tipo
+// precisa refletir isso, não só a intenção em prosa.
+export interface ArenaDiscoveryDetail extends Omit<ArenaFields, 'whatsappPhoneNumberId'> {
   courts: CourtPublic[];
 }
 

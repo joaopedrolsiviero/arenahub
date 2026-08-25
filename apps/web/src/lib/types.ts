@@ -110,6 +110,9 @@ export interface AdminArena {
   phone: string | null;
   email: string | null;
   timezone: string;
+  // Fase 16 — phone_number_id da Meta Cloud API, nunca o número de telefone
+  // em si. `null` = arena ainda sem WhatsApp configurado.
+  whatsappPhoneNumberId: string | null;
   role: ArenaRole;
 }
 
@@ -267,4 +270,74 @@ export interface CustomerBookingItem {
   endsAt: string;
   total: string;
   court: { id: string; name: string };
+}
+
+// Fase 15: relatórios operacionais — só leitura, camada de apresentação
+// sobre a MESMA OperationalMetricsService da IA (Fase 12). Presets incluem
+// thisMonth/lastMonth (novos nesta fase) além dos já usados pela IA — nunca
+// inventar um preset aqui sem existir no backend primeiro.
+export type ReportPeriodPreset =
+  | 'today'
+  | 'yesterday'
+  | 'last7days'
+  | 'last30days'
+  | 'thisWeek'
+  | 'lastWeek'
+  | 'thisMonth'
+  | 'lastMonth';
+
+export interface ReportQuery {
+  preset?: ReportPeriodPreset;
+  from?: string;
+  to?: string;
+}
+
+export interface ReportSummary {
+  revenue: number;
+  bookings: number;
+  confirmedBookings: number;
+  cancelledBookings: number;
+  occupancyRate: number | null;
+}
+
+export interface ReportComparison {
+  revenueDeltaPct: number | null;
+  confirmedBookingsDeltaPct: number | null;
+  cancelledBookingsDeltaPct: number | null;
+  occupancyRateDeltaPct: number | null;
+}
+
+export interface ReportSeriesPoint {
+  date: string;
+  revenue: number;
+  confirmedBookings: number;
+  cancelledBookings: number;
+  occupancyRate: number | null;
+}
+
+export interface ReportCourtPerformance {
+  name: string;
+  confirmedBookings: number;
+  cancelledBookings: number;
+  revenue: number;
+  occupancyRate: number | null;
+}
+
+export interface ReportDemand {
+  bookingsByHour: { hour: number; count: number }[];
+  peakHour: number | null;
+  lowestHour: number | null;
+}
+
+export interface ReportResponse {
+  period: { from: string; to: string };
+  previousPeriod: { from: string; to: string };
+  summary: ReportSummary;
+  comparison: ReportComparison;
+  series: ReportSeriesPoint[];
+  courts: ReportCourtPerformance[];
+  mostOccupiedCourtName: string | null;
+  leastOccupiedCourtName: string | null;
+  demand: ReportDemand;
+  busiestDays: { date: string; count: number }[];
 }

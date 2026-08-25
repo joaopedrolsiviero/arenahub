@@ -52,9 +52,19 @@ em produção, veja [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 > consultam quem já reservou na arena — resumo (total/confirmadas/canceladas/receita estimada) e
 > histórico de reservas, sempre isolado por arena (o mesmo cliente em duas arenas tem números
 > completamente separados em cada uma). Não é um CRM — sem campanhas, cupons ou métricas
-> especulativas. Backend continua a única autoridade em tudo —
-> disponibilidade, preço, dono da reserva, acesso administrativo. Double booking continua prevenido
-> em camadas reais no Postgres (`pg_advisory_xact_lock` + `EXCLUDE USING GIST`) com
+> especulativas. Desde a **Fase 15 (concluída)**, o painel ganhou uma aba **Relatórios**
+> (`/dashboard/[arenaId]/relatorios`): receita, ocupação, reservas confirmadas/canceladas,
+> desempenho por quadra e demanda por horário, com comparação ao período anterior — construída
+> inteiramente sobre a mesma `OperationalMetricsService` que já alimenta a IA (Fase 12), nunca uma
+> segunda fórmula. Desde a **Fase 16 (concluída)**, o cliente pode conversar pelo **WhatsApp** com a
+> arena: consultar disponibilidade/quadras/preços, ver e criar reservas, cancelar — tudo em
+> linguagem natural, com confirmação explícita antes de qualquer ação. A IA só classifica a
+> intenção da mensagem (nunca responde ao cliente diretamente nem decide arena/usuário/preço); quem
+> executa é o mesmo `BookingsService`/`AvailabilityService` do resto do produto, com o mesmo
+> lock/EXCLUDE constraint/Idempotency-Key da Fase 4. Sem credenciais reais da Meta neste ambiente —
+> testado com um provider fake (ver `docs/DEPLOYMENT.md`). Backend continua a única autoridade em
+> tudo — disponibilidade, preço, dono da reserva, acesso administrativo. Double booking continua
+> prevenido em camadas reais no Postgres (`pg_advisory_xact_lock` + `EXCLUDE USING GIST`) com
 > `Idempotency-Key` persistida — inteiramente PostgreSQL, sem depender de Redis. Pagamentos ainda
 > não foram implementados.
 
@@ -730,6 +740,63 @@ arenahub/
 - **IA da Fase 12 permanece inalterada** — nenhuma pergunta específica de cliente foi adicionada.
 - **Marketing, campanhas, cupons, WhatsApp, notificações, pagamentos e CRM avançado continuam fora
   de escopo** — não implementados nesta fase.
+
+## Decisões da Fase 15
+
+- **Fonte única de verdade, literal**: `ReportsModule` importa `AiModule` e reaproveita a MESMA
+  instância de `OperationalMetricsService` (exportada de lá especificamente para isso) — não uma
+  segunda implementação de receita/ocupação/demanda/comparação. `ReportsService` só resolve o
+  período, chama `getMetrics()`/`buildComparison()` e reformata o resultado.
+- **Uma capacidade nova em `OperationalMetricsService`, não duplicada**: série diária
+  (`dailySeries`) — os mesmos números do resumo, quebrados por dia civil da arena.
+  `operationalMinutes()` da Fase 12 foi refatorado pra reaproveitar um novo
+  `operationalMinutesByDay()`, nunca um segundo cálculo coexistindo com o original.
+- **Dois presets de período novos**: `thisMonth`/`lastMonth`, no mesmo `resolvePeriod` central da
+  Fase 12 — os presets existentes mantêm o mesmo comportamento.
+- **Novo delta de comparação**: `cancelledBookingsDeltaPct`, mesma função `percentDelta` dos
+  outros três (`null`, nunca `0` ou `Infinity`, quando o período anterior teve zero cancelamentos).
+- **Disciplina null vs. zero estendida à série diária** — um dia sem horário de funcionamento
+  configurado tem `occupancyRate: null` só naquele ponto, nunca `0%` forjado.
+- **Um endpoint novo, só leitura**: `GET /v1/arenas/:arenaId/reports`, `OWNER`/`ADMIN`-only,
+  reaproveitando os guards existentes sem modificação.
+- **Nenhuma migration nova** — a fase não introduz nenhuma query nova, reaproveita literalmente a
+  mesma `getMetrics()` já auditada nas Fases 12-14.
+- **Sem lib de gráficos nova**: visualizações em SVG/CSS simples e decorativas (`aria-hidden`),
+  sempre com uma tabela textual equivalente ao lado — justificado pelo baixo volume de dados (no
+  máximo 92 pontos por série) e por evitar uma dependência nova só para poucas barras.
+- **Exportação, agendamento de envio, dashboards customizáveis, BI avançado, forecasting e
+  comparação entre arenas continuam fora de escopo** — não implementados nesta fase.
+- **Roadmap renumerado**: "Fase 15 — WhatsApp" do roadmap anterior virou Fase 16; Pagamentos
+  deslocado para Fase 17.
+
+## Decisões da Fase 16
+
+- **WhatsApp é só mais um canal de entrada, nunca uma segunda implementação do domínio** —
+  `WhatsAppModule` reaproveita literalmente `BookingsService` (mesmo lock/EXCLUDE constraint/CAS da
+  Fase 4/13), `AvailabilityService`, `ArenasService.discoverOne` e `AiProvider` (exportado de
+  `AiModule`, Fase 12).
+- **A IA só classifica intenção, nunca responde ao cliente** — a única saída do modelo é um JSON
+  fechado, validado contra um schema fixo. Todo texto que o cliente recebe vem de templates
+  centralizados. Mesmo um modelo manipulado por prompt injection só produz `UNKNOWN`; `arenaId`/
+  `userId`/preço nunca são enviados ao nem lidos do modelo.
+- **Datas/horários nunca calculados pelo modelo** — o LLM extrai só a frase bruta; a aritmética é
+  determinística (`nlp.util.ts`). A maior parte da conversa (seleção numérica, confirmação) nunca
+  chama o modelo.
+- **Identidade do cliente reaproveita `User.phone`** (já sincronizado do Clerk desde a Fase 2, agora
+  `@unique`) — nenhuma identidade paralela. Identidade da arena via `Arena.whatsappPhoneNumberId`
+  (novo campo, `phone_number_id` estável da Meta, nunca comparação de telefone).
+- **Estado da conversa é autoridade do backend** (`WhatsAppConversation`, nova model) — confirmação
+  explícita e exata (nunca match parcial), com TTL de 15 minutos.
+- **Idempotência em duas camadas**: dedup de evento do webhook (`WhatsAppEvent`, nova model) +
+  `Idempotency-Key` já existente na criação de reserva.
+- **Concorrência real validada**: dois clientes confirmando o mesmo horário simultaneamente —
+  exatamente uma reserva é criada, protegida pela mesma EXCLUDE constraint da Fase 4.
+- **Duas migrations novas**: `WhatsAppConversation`/`WhatsAppEvent` + `Arena.whatsappPhoneNumberId` +
+  `User.phone` (`@unique`).
+- **Nenhuma integração real validada** — sem credenciais de produção da Meta neste ambiente,
+  testado com providers fake. Ver `docs/DEPLOYMENT.md`.
+- **Pagamentos, PIX, cartão, marketplace, campanhas, CRM, voz, imagem e comandos administrativos
+  pelo WhatsApp continuam fora de escopo** — não implementados nesta fase.
 
 ## Git
 

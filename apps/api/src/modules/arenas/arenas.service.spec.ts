@@ -171,6 +171,28 @@ describe('ArenasService', () => {
       ];
       expect(call.select.courts.where).toEqual({ isActive: true });
     });
+
+    it('nunca seleciona whatsappPhoneNumberId (Fase 16 — descoberta pública nunca expõe esse campo)', async () => {
+      prisma.arena.findUnique.mockResolvedValue({
+        id: 'arena-1',
+        name: 'Arena Central',
+        slug: 'arena-central',
+        description: null,
+        phone: null,
+        email: null,
+        timezone: 'America/Sao_Paulo',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        courts: [],
+      });
+
+      await service.discoverOne('arena-1');
+
+      const [[call]] = prisma.arena.findUnique.mock.calls as [
+        [{ select: Record<string, unknown> }],
+      ];
+      expect(call.select).not.toHaveProperty('whatsappPhoneNumberId');
+    });
   });
 
   describe('update', () => {

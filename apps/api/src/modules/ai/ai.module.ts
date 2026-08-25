@@ -21,5 +21,12 @@ import { OpenAiAiProviderService } from './providers/openai-ai-provider.service'
     // produção.
     { provide: AiProvider, useClass: OpenAiAiProviderService },
   ],
+  // Fase 15: exportado para que ReportsModule reaproveite a MESMA instância
+  // (não uma reimplementação) — "fonte única de verdade" das métricas,
+  // nunca uma segunda fórmula de receita/ocupação/demanda em outro módulo.
+  // Fase 16: `AiProvider` também exportado — WhatsAppModule reaproveita o
+  // MESMO adapter de LLM (nunca um segundo cliente OpenAI, nunca uma
+  // segunda API key — item 42 do prompt da fase).
+  exports: [OperationalMetricsService, AiProvider],
 })
 export class AiModule {}

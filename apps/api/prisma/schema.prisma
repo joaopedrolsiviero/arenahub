@@ -29,16 +29,25 @@ model User {
   clerkId   String   @unique
   email     String   @unique
   name      String?
-  phone     String?
+  // Sincronizado do Clerk (UsersService.syncFromClerkEvent), sempre em E.164
+  // (Clerk já entrega nesse formato; normalizado de novo na sincronização
+  // por defesa em profundidade). Fase 16: é o único identificador de
+  // vínculo entre um número de WhatsApp e um User — nenhuma identidade
+  // paralela foi criada. `@unique` porque a resolução de identidade do
+  // WhatsApp (`UsersService.findByPhone`) precisa de um match exato e
+  // inequívoco; nulo continua permitido (múltiplos usuários sem telefone
+  // cadastrado no Clerk), Postgres trata cada NULL como distinto sob UNIQUE.
+  phone     String?  @unique
   avatarUrl String?
   createdAt DateTime @default(now()) @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @db.Timestamptz(6)
 
-  arenaMemberships   ArenaMember[]
-  bookings           Booking[]     @relation("BookingUser")
-  cancelledBookings  Booking[]     @relation("BookingCancelledBy")
-  sentInvitations    ArenaInvitation[] @relation("InvitationInvitedBy")
-  acceptedInvitations ArenaInvitation[] @relation("InvitationAcceptedBy")
+  arenaMemberships      ArenaMember[]
+  bookings              Booking[]              @relation("BookingUser")
+  cancelledBookings     Booking[]              @relation("BookingCancelledBy")
+  sentInvitations       ArenaInvitation[]      @relation("InvitationInvitedBy")
+  acceptedInvitations   ArenaInvitation[]      @relation("InvitationAcceptedBy")
+  whatsappConversations WhatsAppConversation[]
 }
 
 // Papel do usuário dentro de uma arena específica (nunca um campo global).
@@ -63,25 +72,37 @@ enum Sport {
 // marketplace/disponibilidade futuros) chegam quando a fase que realmente
 // precisar deles for implementada.
 model Arena {
-  id          String   @id @default(cuid())
-  name        String
-  slug        String   @unique
-  description String?
-  phone       String?
-  email       String?
+  id                    String   @id @default(cuid())
+  name                  String
+  slug                  String   @unique
+  description           String?
+  phone                 String?
+  email                 String?
   // Identificador IANA (ex: "America/Sao_Paulo") — nunca offset fixo
   // ("-03:00") nem sigla ("GMT-3"), justamente para que DST seja resolvido
   // corretamente pela biblioteca de timezone, não calculado à mão (Fase 5).
   // Todas as quadras da arena seguem esse timezone — não existe
   // Court.timezone (ver docs/ARCHITECTURE.md, Fase 5).
-  timezone    String   @default("America/Sao_Paulo")
-  createdAt   DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+  timezone              String   @default("America/Sao_Paulo")
+  // Fase 16: identificador ESTÁVEL do número de WhatsApp Business desta
+  // arena, fornecido pela Meta Cloud API (`entry[].changes[].value.metadata.
+  // phone_number_id` em todo evento de webhook) — nunca o número de telefone
+  // em si, que pode ser reformatado/portado; o `phone_number_id` é a chave
+  // que a própria Meta usa para identificar a conta de origem. É assim que o
+  // webhook (compartilhado por todas as arenas) resolve qual arena está
+  // recebendo cada mensagem, sem jamais comparar strings de telefone (item 8
+  // do prompt da fase). Nulo = esta arena ainda não tem WhatsApp configurado
+  // (a maioria, nesta fase — configurar é uma ação explícita do OWNER via
+  // `PATCH /arenas/:arenaId`, reaproveitando a autorização já existente).
+  whatsappPhoneNumberId String?  @unique
+  createdAt             DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime @updatedAt @db.Timestamptz(6)
 
-  members        ArenaMember[]
-  courts         Court[]
-  operatingHours ArenaOperatingHours[]
-  invitations    ArenaInvitation[]
+  members               ArenaMember[]
+  courts                Court[]
+  operatingHours        ArenaOperatingHours[]
+  invitations           ArenaInvitation[]
+  whatsappConversations WhatsAppConversation[]
 }
 
 // Dia da semana centralizado num enum — nunca um inteiro solto (0=domingo
@@ -281,6 +302,9 @@ model Booking {
   court           Court @relation(fields: [courtId], references: [id], onDelete: Restrict)
   user            User? @relation("BookingUser", fields: [userId], references: [id], onDelete: SetNull)
   cancelledByUser User? @relation("BookingCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: SetNull)
+  // A proteção real contra conflito (EXCLUDE USING GIST) é adicionada via
+  // SQL manual na migration desta fase — Prisma não tem sintaxe para
+  // exclusion constraints. Ver migration `booking_availability`.
 
   @@index([courtId, startsAt])
   // Fase 6: "minhas reservas" passou a consultar Booking por userId — sem
@@ -288,9 +312,6 @@ model Booking {
   // desde a Parte 7 do ARCHITECTURE.md (Fase 4); implementado agora que a
   // primeira query real por userId existe.
   @@index([userId])
-  // A proteção real contra conflito (EXCLUDE USING GIST) é adicionada via
-  // SQL manual na migration desta fase — Prisma não tem sintaxe para
-  // exclusion constraints. Ver migration `booking_availability`.
 }
 
 // Idempotência para operações que podem ser repetidas (Idempotency-Key),
@@ -312,4 +333,87 @@ model IdempotencyKey {
   createdAt      DateTime @default(now()) @db.Timestamptz(6)
 
   @@unique([userId, endpoint, key])
+}
+
+// Fase 16: estado explícito da conversa de um cliente com UMA arena pelo
+// WhatsApp — o backend é a autoridade sobre esse estado, nunca o LLM (item
+// 11/34 do prompt). Estados ligados a pagamento não existem aqui (Fase 17).
+enum WhatsAppConversationState {
+  IDLE
+  SELECTING_DATE
+  SELECTING_TIME
+  SELECTING_COURT
+  CONFIRMING_BOOKING
+  PROCESSING_BOOKING
+  BOOKING_CONFIRMED
+  CANCEL_SELECTING
+  CANCEL_CONFIRMATION
+  PROCESSING_CANCELLATION
+}
+
+// Uma linha por (arena, cliente) — não por "sessão"/"thread": um mesmo
+// cliente conversando com a MESMA arena sempre continua a mesma conversa
+// lógica; conversar com OUTRA arena (outro número de WhatsApp) é uma linha
+// separada, o que já garante isolamento multi-tenant estrutural (nunca
+// existe uma linha compartilhada entre arenas — item 9 do prompt).
+//
+// Campos "pending*" guardam só o MÍNIMO necessário para retomar o fluxo
+// (item 12 — nunca a conversa inteira, nunca o texto das mensagens em si).
+// Tudo aqui é sempre REVALIDADO contra o domínio antes de qualquer escrita
+// (item 33 — "never trust the model", e o mesmo vale pro próprio estado
+// persistido: ele é conveniência de retomada, nunca autoridade final).
+model WhatsAppConversation {
+  id      String @id @default(cuid())
+  arenaId String
+  userId  String
+
+  state WhatsAppConversationState @default(IDLE)
+
+  // Opções numeradas apresentadas na última mensagem (courtId+nome+preço
+  // para SELECTING_COURT, ou bookingId+resumo para CANCEL_SELECTING) — só
+  // pra resolver "2" na resposta seguinte sem uma segunda pergunta ao
+  // cliente; o backend SEMPRE revalida o item escolhido contra o banco
+  // antes de agir (nunca confia que a opção ainda é válida só porque foi
+  // oferecida há pouco — item 64/68).
+  pendingOptions Json?
+
+  // Slots coletados durante a coleta de data/hora de uma criação de reserva.
+  pendingDate    String? // YYYY-MM-DD, já resolvido deterministicamente (nunca pelo LLM — item 27)
+  pendingTime    String? // HH:mm
+  pendingCourtId String?
+
+  // Reserva alvo de um cancelamento em andamento.
+  pendingBookingId String?
+
+  // Idempotency-Key persistente da AÇÃO lógica atual (item 19) — gerada uma
+  // vez ao entrar em CONFIRMING_BOOKING, nunca regenerada por retry do
+  // webhook (a mesma intenção de reserva sempre usa a mesma chave).
+  pendingActionId String?
+
+  // TTL de uma confirmação pendente (item 35) — 15 minutos desde que o
+  // estado entrou em CONFIRMING_BOOKING/CANCEL_CONFIRMATION. Expirado =
+  // tratado como se o cliente tivesse que recomeçar, nunca uma confirmação
+  // "ainda válida" por tempo indefinido.
+  expiresAt DateTime? @db.Timestamptz(6)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  arena Arena @relation(fields: [arenaId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([arenaId, userId])
+}
+
+// Deduplicação de eventos do webhook do WhatsApp (item 6 do prompt) — o
+// provider pode entregar o mesmo evento mais de uma vez; processar duas
+// vezes o mesmo `providerEventId` (o `id` da mensagem, "wamid...") nunca
+// pode gerar uma segunda reserva/cancelamento nem uma segunda resposta.
+// Mesma técnica "claim-first" do IdempotencyKey (Fase 4): o INSERT com
+// `providerEventId` único é o primeiro passo — se já existir, o evento é
+// ignorado sem reprocessar nada.
+model WhatsAppEvent {
+  id              String   @id @default(cuid())
+  providerEventId String   @unique
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
 }

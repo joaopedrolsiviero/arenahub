@@ -14,5 +14,10 @@ import { BookingsService } from './bookings.service';
   imports: [AuthModule, ArenaMembersModule, CourtsModule, IdempotencyModule, PrismaModule],
   controllers: [BookingsController, MyBookingsController],
   providers: [BookingsService],
+  // Fase 16: WhatsAppModule reaproveita a MESMA BookingsService — nenhuma
+  // segunda implementação de criação/cancelamento de reserva (item 18/57 do
+  // prompt da fase). Continua sendo a única autoridade sobre preço
+  // congelado, Idempotency-Key, lock por quadra e EXCLUDE constraint.
+  exports: [BookingsService],
 })
 export class BookingsModule {}

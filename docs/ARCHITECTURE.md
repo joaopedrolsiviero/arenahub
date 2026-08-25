@@ -1,18 +1,103 @@
-# ArenaHub — Documento de Arquitetura Inicial (v0.14)
+# ArenaHub — Documento de Arquitetura Inicial (v0.16)
 
 > Status: **arquitetura geral aprovada**, em implementação incremental por fases (Fase 1 — Setup,
 > Fase 2 — Autenticação, Fase 3 — Arenas/Quadras, Fase 4 — Disponibilidade e Booking, Fase 5 —
 > Horários de Funcionamento e Timezone, Fase 6 — Experiência de Reserva do Cliente, Fase 7 —
 > Dashboard Operacional da Arena, Fase 8 — Hardening/Segurança/Robustez, Fase 10 — Gestão de
 > Membros/RBAC Operacional, Fase 11 — Convites de Equipe e Transferência Segura de Ownership,
-> Fase 12 — Assistente de IA Operacional, Fase 13 — Customer Booking Lifecycle e Fase 14 —
-> Customer & Arena Client Management já concluídas; Fase 9 — Deploy e Infraestrutura preparada,
-> GitHub/CI validados contra um runner real, deploy real no Railway bloqueado por custo (Hobby
-> plan pago) e Vercel/Clerk produção por falta de acesso — ver Roadmap e `docs/DEPLOYMENT.md`).
-> Esta revisão (v0.14) registra as decisões tomadas durante a Fase 14 — visão operacional de
-> clientes da arena para OWNER/ADMIN, derivada inteiramente de `User`+`Booking` já existentes,
-> sem nenhuma entidade nova no schema. Este documento é a fonte de verdade da arquitetura até que
-> decisões aqui descritas sejam revisadas.
+> Fase 12 — Assistente de IA Operacional, Fase 13 — Customer Booking Lifecycle, Fase 14 —
+> Customer & Arena Client Management, Fase 15 — Operational Reports & Analytics e Fase 16 —
+> WhatsApp + Assistente de Reservas Controlado já concluídas; Fase 9 — Deploy e Infraestrutura
+> preparada, GitHub/CI validados contra um runner real, deploy real no Railway bloqueado por custo
+> (Hobby plan pago) e Vercel/Clerk produção por falta de acesso — ver Roadmap e
+> `docs/DEPLOYMENT.md`).
+> Esta revisão (v0.16) registra as decisões tomadas durante a Fase 16 — WhatsApp como novo canal de
+> atendimento pro cliente (disponibilidade, reservas, cancelamento, informações da arena), com a IA
+> usada estritamente para classificar intenção (nunca para responder ao cliente ou decidir
+> `arenaId`/`userId`/preço) e toda escrita reaproveitando `BookingsService`/`AvailabilityService` já
+> existentes — nenhuma segunda implementação do domínio. Este documento é a fonte de verdade da
+> arquitetura até que decisões aqui descritas sejam revisadas.
+
+---
+
+## Decisões revisadas na v0.16
+
+Resumo das mudanças desta revisão (Fase 16 — WhatsApp + Assistente de Reservas Controlado). Detalhe
+completo na seção "Fase 16" do Roadmap abaixo.
+
+1. **WhatsApp é só mais um canal de entrada, nunca uma segunda implementação do domínio**:
+   `WhatsAppModule` reaproveita literalmente `BookingsService` (criação/cancelamento, mesmo lock/
+   EXCLUDE constraint/CAS), `AvailabilityService`, `ArenasService.discoverOne` e `AiProvider`
+   (exportado de `AiModule`) — nunca uma query, um cálculo de preço/disponibilidade ou uma chamada
+   de LLM duplicados.
+2. **A IA só classifica intenção — nunca responde ao cliente diretamente**: a única saída do modelo
+   é um JSON fechado (`WhatsAppIntentService`), validado contra um schema fixo. Todo texto que o
+   cliente recebe vem de templates centralizados (`messages.ts`). Principal defesa contra prompt
+   injection: mesmo um modelo manipulado só produz `UNKNOWN`, nunca alcança o cliente como prosa
+   livre nem influencia `arenaId`/`userId`/preço (nunca enviados ao nem lidos do modelo).
+3. **Datas/horários nunca calculados pelo modelo** — o LLM extrai só a frase bruta; toda a
+   aritmética é determinística (`nlp.util.ts`), e a maior parte da conversa (seleção numérica,
+   confirmação) nunca chama o modelo.
+4. **Identidade do cliente reaproveita `User.phone`** (já sincronizado do Clerk desde a Fase 2,
+   agora `@unique`) — nenhuma tabela de identidade paralela. Identidade da arena via novo campo
+   `Arena.whatsappPhoneNumberId` (identificador estável da Meta, nunca comparação de telefone).
+5. **Estado da conversa é autoridade do backend** (`WhatsAppConversation`, nova model — um estado
+   explícito por par arena+cliente) — o LLM nunca decide nem lembra o que está sendo confirmado.
+6. **Confirmação explícita com TTL de 15 minutos** — resposta precisa ser EXATA ("sim", "confirmo"),
+   nunca um match parcial; confirmação expirada exige recomeçar.
+7. **Idempotência em duas camadas**: dedup de evento do webhook (`WhatsAppEvent`, nova model) +
+   `Idempotency-Key` já existente na criação de reserva (chave gerada uma vez, nunca por retry).
+8. **Duas migrations novas**: `WhatsAppConversation`/`WhatsAppEvent` (novas tabelas),
+   `Arena.whatsappPhoneNumberId` e `User.phone` (`@unique`) — nenhum dado existente violava as
+   novas constraints.
+9. **Nenhuma integração real validada** — sem credenciais de produção da Meta neste ambiente,
+   testado com `FakeWhatsAppProvider`/`FakeAiProvider`. Ver `docs/DEPLOYMENT.md`.
+10. **Roadmap não precisou ser renumerado** — "Fase 16 — WhatsApp" já ocupava esse número desde a
+    v0.15 (como placeholder); esta revisão só substitui o placeholder pela implementação real.
+
+---
+
+## Decisões revisadas na v0.15
+
+Resumo das mudanças desta revisão (Fase 15 — Operational Reports & Analytics). Detalhe completo na
+seção "Fase 15" do Roadmap abaixo.
+
+1. **Fonte única de verdade, literal, não só conceitual**: `ReportsModule` importa `AiModule` e
+   reaproveita a MESMA instância de `OperationalMetricsService` (exportada de lá) — não uma segunda
+   cópia da lógica de receita/ocupação/demanda/comparação. `ReportsService` é uma camada fina de
+   orquestração/apresentação: resolve o período, chama `getMetrics()` (atual e anterior) e
+   `buildComparison()`, e só reformata o resultado — nunca recalcula nada.
+2. **Uma capacidade genuinamente nova foi adicionada a `OperationalMetricsService` (não duplicada
+   em outro lugar)**: série diária (`dailySeries`) — os mesmos números do `summary`, quebrados por
+   dia civil da arena. Implementada reaproveitando um novo `operationalMinutesByDay()` (do qual o
+   `operationalMinutes()` da Fase 12 passou a ser só a soma), nunca um segundo cálculo de minutos
+   operacionais.
+3. **Dois presets novos no período**: `thisMonth`/`lastMonth`, adicionados a `PeriodPreset` no
+   mesmo método central (`resolvePeriod`) — os presets já existentes desde a Fase 12 mantêm o
+   mesmo comportamento; a IA nem precisa saber que os novos existem (ela valida contra sua própria
+   lista fixa em `AskAiPeriodDto`).
+4. **Novo campo de comparação**: `cancelledBookingsDeltaPct` em `PeriodComparison` — mesma função
+   `percentDelta` já usada pelos outros três deltas (`null`, nunca `0` ou `Infinity`, quando a base
+   do período anterior é zero).
+5. **Disciplina null vs. zero estendida à série diária**: um dia sem nenhum horário de
+   funcionamento configurado tem `occupancyRate: null` nesse ponto específico da série — nunca `0%`
+   forjado, mesmo que outros dias do mesmo período tenham capacidade real.
+6. **Um endpoint novo, só leitura**: `GET /v1/arenas/:arenaId/reports` (`ReportsModule`), aceitando
+   `preset` OU `from`/`to` via query string (nunca os dois juntos, mesma regra de
+   `resolvePeriod`), `OWNER`/`ADMIN`-only via `@RequireArenaRole` — reaproveitando
+   `ClerkAuthGuard`/`ArenaAccessGuard` sem nenhuma modificação.
+7. **Nenhuma migration nova** — a fase não introduz nenhuma query nova: `ReportsService` chama
+   literalmente a mesma `OperationalMetricsService.getMetrics()` já auditada nas Fases 12-14 (índice
+   único parcial em `Court(arenaId, name)` cobre o filtro por arena; `Booking(courtId, startsAt)`
+   cobre o restante). Nenhum índice novo foi necessário.
+8. **Sem lib de gráficos nova**: visualizações (evolução diária, demanda por horário) construídas
+   com SVG/CSS simples, decorativas (`aria-hidden`), sempre acompanhadas de uma tabela textual
+   equivalente com os mesmos dados — decisão justificada pelo baixo volume de dados (no máximo 92
+   pontos por série, período máximo já limitado desde a Fase 12) e por evitar uma dependência nova
+   só para poucas barras.
+9. **Roadmap renumerado**: "Fase 15 — WhatsApp" do roadmap anterior virou Fase 16; Pagamentos
+   deslocado para Fase 17. Esta fase (Operational Reports & Analytics) não existia no roadmap
+   original.
 
 ---
 
@@ -721,13 +806,23 @@ Construir isso agora seria abstração prematura.
                                    └───────────────┘
 ```
 
-### Visão futura (IA / WhatsApp) — não implementada agora, apenas prevista
+### Visão futura (IA / WhatsApp) — histórico da previsão original (implementada nas Fases 12 e 16)
 
 > **Atualização Fase 12**: a metade "só leitura" desta visão (a IA nunca acessa o banco direto, só
 > um contexto/tools controlados) foi implementada de verdade em `AiModule` — ver seção "Fase 12" do
-> Roadmap. A metade que falta aqui é especificamente a camada de **tools de escrita**
-> (`create_booking`/`cancel_booking`/etc.) e o canal WhatsApp em si, que continuam só previstos,
-> sem fase numerada até serem retomados.
+> Roadmap.
+>
+> **Atualização Fase 16**: a metade que faltava — canal WhatsApp e ações de escrita
+> (criar/cancelar reserva) — também foi implementada, mas com uma diferença deliberada em relação
+> ao diagrama original abaixo: em vez de a IA "chamar tools" que internamente batem na API REST, o
+> desenho real (`WhatsAppModule`) usa a IA SÓ para classificar a intenção da mensagem num JSON
+> fechado (`WhatsAppIntentService`) — quem decide QUANDO e COMO chamar `BookingsService`/
+> `AvailabilityService` é código determinístico (`ConversationService`), nunca o modelo escolhendo
+> livremente qual tool invocar com quais argumentos. A garantia de fundo é a mesma da previsão
+> original ("a IA nunca causa uma reserva inválida porque a camada de negócio é a mesma para todos
+> os canais"), só que reforçada: o modelo nem tem a opção de "chamar a tool errada com o argumento
+> errado", porque ele não chama tools nenhuma — só classifica. Ver seção "Fase 16" do Roadmap para o
+> desenho real implementado.
 
 ```
 WhatsApp Cloud API
@@ -791,7 +886,7 @@ Redis e BullMQ continuam na stack aprovada, mas com um escopo mais estreito do q
   depois como otimização — não como pré-requisito de correção.
 - **BullMQ é o mecanismo de trabalho assíncrono** (fila sobre Redis), reservado para tarefas que são
   naturalmente assíncronas e não fazem parte do caminho crítico de escrita de uma reserva: envio de
-  notificações e, a partir da Fase 16, expiração de holds de pagamento (`PENDING` vencido). No MVP,
+  notificações e, a partir da Fase 17, expiração de holds de pagamento (`PENDING` vencido). No MVP,
   como a reserva é criada direto como `CONFIRMED` (sem hold), a fila fica provisionada na infra
   (Docker Compose, Fase 1) mas só passa a ser exercitada de fato quando notificações assíncronas ou
   o fluxo de pagamento entrarem.
@@ -1076,7 +1171,7 @@ Diferenças deliberadas em relação à visão completa:
   saber se um `Booking` será de fato criado (ver "claim-first" na Parte 8) — uma coluna em
   `Booking` não serviria para isso.
 - **`BookingStatus` só `CONFIRMED`/`CANCELLED`**: `PENDING`/`EXPIRED`/`COMPLETED` dependem de um
-  fluxo de pagamento que não existe nesta fase (Fase 16 do roadmap) — `Booking` nunca depende de
+  fluxo de pagamento que não existe nesta fase (Fase 17 do roadmap) — `Booking` nunca depende de
   `Payment` (item 2 do prompt da Fase 4).
 - **`total` congelado na criação, sem `PricingService`**: para `CUSTOMER`, é uma cópia direta de
   `Court.pricePerSlot` no momento da criação (não recalculado depois, mesmo mudanças futuras no
@@ -2307,20 +2402,161 @@ testar em cada uma — mas a definição geral vale para todas.
   MAINTENANCE, receita/total corretos com reservas canceladas, busca, paginação, timezone/DST,
   IDOR e ausência de PII indevida. Ver relatório da fase para a lista completa.
 
-### Fase 15 — WhatsApp
-- **Objetivo:** um agente conversacional acessível via WhatsApp Business Cloud API.
-- **Funcionalidades:** webhook do WhatsApp, verificação de assinatura, roteamento de mensagem para o
-  módulo `ai`, envio de resposta.
-- **Dependências:** Fase 12 — mas note que o `ai` atual (Fase 12) só responde perguntas de
-  análise; um agente que também *age* via WhatsApp (criar/cancelar reserva) precisa primeiro da
-  capacidade de tools de escrita descrita na "Visão futura (IA/WhatsApp)" da Parte 3, que continua
-  sem fase numerada — avaliar se essa capacidade nasce dentro desta fase ou numa fase própria antes
-  de iniciar.
-- **Critério de conclusão:** um número de teste do WhatsApp Business consegue completar o fluxo de
-  reserva de ponta a ponta. Teste automatizado confirmando que um webhook com assinatura inválida é
-  rejeitado.
+### Fase 15 — Operational Reports & Analytics ✅ concluída
+- **Objetivo:** dar ao OWNER/ADMIN uma área de Relatórios/Analytics no dashboard — responder
+  perguntas operacionais (receita, ocupação, reservas confirmadas/canceladas, desempenho por
+  quadra, demanda por horário, dias mais movimentados, comparação com o período anterior) sem
+  depender de perguntar em linguagem natural à IA (Fase 12), que continua existindo em paralelo,
+  não substituída.
+- **Fonte única de verdade, literal**: `ReportsModule` importa `AiModule` e reaproveita a MESMA
+  instância de `OperationalMetricsService` (exportada de lá especificamente para isso) — não uma
+  segunda implementação da fórmula de receita/ocupação/demanda/comparação. `ReportsService` nunca
+  recalcula nada: resolve o período, chama `getMetrics()` (atual e anterior) e `buildComparison()`,
+  e só reformata o resultado pro formato de resposta da API.
+- **Uma capacidade nova em `OperationalMetricsService`, não duplicada em outro lugar**: série
+  diária (`dailySeries`) — os mesmos números do `summary` (receita, confirmadas, canceladas,
+  ocupação), quebrados por dia civil da arena. `operationalMinutes()` da Fase 12 foi refatorado pra
+  reaproveitar um novo `operationalMinutesByDay()` (a soma de por-dia), nunca um segundo cálculo de
+  minutos operacionais coexistindo com o original.
+- **Dois presets de período novos**: `thisMonth`/`lastMonth`, adicionados ao mesmo `PeriodPreset`/
+  `resolvePeriod` central da Fase 12 — os presets já existentes mantêm o mesmo comportamento; a IA
+  nem precisa saber que os novos existem (valida contra sua própria lista fixa).
+- **Novo campo de comparação**: `cancelledBookingsDeltaPct`, mesma função `percentDelta` dos outros
+  três deltas — `null` (nunca `0` ou `Infinity`) quando o período anterior teve zero cancelamentos.
+- **Disciplina null vs. zero estendida à série diária**: um dia sem nenhum horário de funcionamento
+  configurado tem `occupancyRate: null` só naquele ponto da série — nunca `0%` forjado, mesmo que
+  outros dias do mesmo período tenham capacidade real (validado com uma arena aberta só às
+  quintas-feiras: 1 dia com ocupação numérica, 6 dias `null` no mesmo período de 7 dias).
+- **Um endpoint novo, só leitura**: `GET /v1/arenas/:arenaId/reports` — `preset` OU `from`/`to` via
+  query string (nunca os dois juntos), `OWNER`/`ADMIN`-only via `@RequireArenaRole`, reaproveitando
+  `ClerkAuthGuard`/`ArenaAccessGuard` sem nenhuma modificação. Resposta inclui período atual e
+  anterior, resumo, comparação, série diária, desempenho por quadra (com quadra mais/menos
+  ocupada), demanda por horário (com pico e menor demanda) e os 5 dias mais movimentados.
+- **Nenhuma migration nova** — a fase não introduz nenhuma query nova: `ReportsService` chama
+  literalmente a mesma `OperationalMetricsService.getMetrics()` já auditada nas Fases 12-14 (o
+  índice único em `Court(arenaId, name)` cobre o filtro por arena; `Booking(courtId, startsAt)`
+  cobre o restante).
+- **Frontend**: `/dashboard/[arenaId]/relatorios` — seletor de período (mesmos 8 presets + período
+  personalizado, convenção idêntica à página de IA), cards de resumo com delta em relação ao
+  período anterior (`null` exibido como "Sem base para comparação", ocupação `null` como "Não
+  disponível" — nunca inventando 0%), evolução diária (receita/confirmadas/canceladas/ocupação),
+  desempenho por quadra, demanda por horário com pico/menor demanda, dias mais movimentados. Sem lib
+  de gráficos nova: visualizações em SVG/CSS simples e decorativas (`aria-hidden`), sempre
+  acompanhadas de uma tabela textual equivalente com os mesmos dados — decisão justificada pelo
+  baixo volume (no máximo 92 pontos por série, o mesmo teto de 92 dias já existente desde a
+  Fase 12) e por evitar uma dependência nova só para poucas barras.
+- **Explicitamente fora de escopo** (conforme o prompt): exportação (PDF/CSV/Excel), agendamento de
+  envio recorrente, dashboards customizáveis pelo usuário, BI avançado, forecasting/previsão,
+  comparação entre arenas diferentes, alertas/notificações automáticas.
+- **Dependências:** Fase 12 (`OperationalMetricsService`, reaproveitada por inteiro), Fase 10
+  (`ArenaAccessGuard`/`RequireArenaRole`).
+- **Critério de conclusão:** 8 novos testes unitários em `operational-metrics.service.spec.ts`
+  (presets novos, `dailySeries`, `cancelledBookingsDeltaPct`) + 10 novos testes unitários em
+  `reports.service.spec.ts` (reshape correto de cada seção, incluindo uma prova explícita de que a
+  comparação usa exatamente os deltas de `OperationalMetricsService.buildComparison`) + 28 novos
+  testes e2e (`reports.e2e-spec.ts`) contra Postgres real — autorização (OWNER/ADMIN/sem vínculo/
+  cross-tenant/arena inexistente), validação de período (teto de 92 dias, preset+from/to juntos,
+  preset inválido, whitelist de query), receita/reservas/ocupação corretas com exclusão de
+  CANCELLED/BLOCK/MAINTENANCE, série diária com null vs. zero, comparação com período anterior
+  (incluindo base zero → `null`), desempenho por quadra, demanda por horário (incluindo hora de
+  menor demanda como um `0` válido), dias mais movimentados, isolamento multi-tenant com duas
+  arenas, timezone/DST (`America/New_York`, transição real de 2026), integração real
+  criar-reserva→relatório-reflete→cancelar→relatório-reflete (prova que o GET nunca muta
+  `Booking`), e duas requisições GET concorrentes devolvendo exatamente o mesmo resultado
+  (read-only). Frontend: 11 novos testes (`relatorios/page.test.tsx`) cobrindo carregamento, erro,
+  período personalizado incompleto, resumo com comparação e ocupação `null`, nota de "nenhuma
+  reserva", desempenho por quadra, dias mais movimentados e troca de período. Nenhum teste
+  pré-existente foi removido ou reescrito. Ver relatório da fase para a lista completa.
 
-### Fase 16 — Pagamentos
+### Fase 16 — WhatsApp + Assistente de Reservas Controlado ✅ concluída
+- **Objetivo:** WhatsApp como novo canal de atendimento pro cliente — consultar disponibilidade,
+  quadras, preços e reservas próprias, criar e cancelar reserva, tudo em linguagem natural. A "Visão
+  futura (IA/WhatsApp)" da Parte 3, que previa exatamente essa capacidade de tools de escrita, foi
+  implementada nesta fase — a metade que falta agora é só a integração real com credenciais de
+  produção da Meta/OpenAI (ver `docs/DEPLOYMENT.md`, "Canal de WhatsApp").
+- **Princípio arquitetural**: WhatsApp é só mais um canal de ENTRADA pro domínio já existente —
+  nunca uma segunda implementação. `WhatsAppModule` reaproveita literalmente `BookingsService`
+  (criação e cancelamento, com o mesmo lock por quadra/EXCLUDE constraint/CAS da Fase 4/13),
+  `AvailabilityService` (mesma grade de horários da Fase 5/6), `ArenasService.discoverOne` (mesma
+  informação pública da Fase 6), e `AiProvider` (mesmo adapter de LLM da Fase 12, exportado de
+  `AiModule` especificamente para isso). O fluxo é: webhook → identidade → conversa → (IA só pra
+  classificar intenção) → ferramentas de domínio já existentes → Postgres — nunca
+  `WhatsApp → LLM → Prisma` direto.
+- **IA usada só para classificar intenção, nunca para responder ao cliente**: a única saída do
+  modelo (`WhatsAppIntentService`) é um JSON fechado (`{"intent": "..."}`), validado campo a campo
+  contra um schema fixo antes de qualquer uso — nunca prosa livre interpolada numa resposta. Todo
+  texto que o cliente recebe vem de templates centralizados (`whatsapp/messages.ts`), parametrizados
+  só com dados já validados. Isso é a principal defesa contra prompt injection: mesmo um modelo
+  totalmente manipulado só consegue produzir `UNKNOWN` (resposta de ajuda genérica) — não existe
+  caminho pelo qual a saída do LLM alcance o cliente como texto não filtrado, nem influencie
+  `arenaId`/`userId`/preço de qualquer escrita (esses nunca são enviados ao modelo nem lidos da
+  resposta dele — o LLM nunca vê nem decide esses três valores).
+- **Datas/horários nunca calculados pelo modelo** (item 27 do prompt da fase): o LLM só extrai a
+  frase bruta ("amanhã", "19h") — toda a aritmética de data relativa e validação de horário é
+  determinística (`nlp.util.ts`), testada sem nenhum mock de IA. Item 40 (evitar chamada de IA
+  quando não agrega valor) foi levado a sério: seleção numérica, "sim"/"não" e mensagens de
+  confirmação nunca chamam o modelo — só a primeira mensagem de cada intenção nova (estado `IDLE`)
+  passa pelo classificador.
+- **Identidade do cliente**: reaproveita `User.phone`, já sincronizado do Clerk desde a Fase 2 —
+  nenhuma tabela de identidade paralela. Ganhou `@unique` (nova migration) porque a resolução de
+  identidade do WhatsApp precisa de um match exato. Um cliente sem telefone vinculado no Clerk
+  recebe uma explicação amigável, nunca uma conta "fantasma" criada silenciosamente.
+- **Identidade da arena**: `Arena.whatsappPhoneNumberId` (novo campo, único, nova migration) —
+  identificador ESTÁVEL da Meta (`phone_number_id`), nunca uma comparação de string de telefone.
+  Configurável via `PATCH /v1/arenas/:arenaId` (reaproveita a autorização OWNER/ADMIN já existente)
+  e pelo frontend em `/dashboard/[arenaId]/configuracoes`.
+- **Estado da conversa é autoridade do backend, nunca do LLM** (item 34): `WhatsAppConversation`
+  (nova model, uma linha por par arena+cliente) guarda um estado explícito
+  (`IDLE`/`SELECTING_DATE`/`SELECTING_TIME`/`SELECTING_COURT`/`CONFIRMING_BOOKING`/
+  `CANCEL_SELECTING`/`CANCEL_CONFIRMATION`/...) e os campos mínimos pra retomar o fluxo — nunca o
+  texto das mensagens em si. Toda opção numerada oferecida (`pendingOptions`) é revalidada contra o
+  banco antes de qualquer escrita, nunca confiada só por ter sido oferecida há pouco.
+- **Confirmação explícita, com TTL** (itens 17, 35): reserva e cancelamento só acontecem depois de
+  uma resposta EXATA (`"sim"`, `"confirmo"`, etc. — nunca substring, então `"acho que sim"` ou
+  `"19h então"` nunca confirmam), com uma janela de 15 minutos; expirada, o cliente precisa
+  recomeçar.
+- **Idempotência em duas camadas**: (1) o próprio evento do webhook é deduplicado por
+  `providerEventId` (`WhatsAppEvent`, nova model, técnica "claim-first" igual ao `IdempotencyKey` da
+  Fase 4); (2) a criação de reserva usa o mecanismo formal de `Idempotency-Key` já existente
+  (`IdempotencyService.execute`), com a chave (`pendingActionId`) gerada uma única vez ao entrar em
+  `CONFIRMING_BOOKING` — nunca regenerada por retry do webhook.
+- **Concorrência real**: nenhum mecanismo de lock novo — a mesma `pg_advisory_xact_lock` +
+  `EXCLUDE USING GIST` da Fase 4 protege reservas criadas via WhatsApp. Validado com dois clientes
+  confirmando o MESMO horário simultaneamente (`Promise.all` de dois webhooks reais contra Postgres
+  real): exatamente uma reserva é confirmada, o outro cliente recebe uma mensagem amigável de
+  conflito.
+- **Cancelamento reaproveita o CAS da Fase 13** sem modificação — `BookingsService.cancel` já
+  garante ownership (dono da reserva OU OWNER/ADMIN) e proteção contra corrida; o cliente via
+  WhatsApp só consegue listar e selecionar as PRÓPRIAS reservas confirmadas futuras desta arena,
+  então a checagem de ownership de outro cliente nem chega a ser necessária no fluxo (é impossível
+  selecionar uma reserva que nunca aparece na lista).
+- **PII minimizada no que chega ao LLM**: o modelo nunca recebe telefone, e-mail, nome de cliente,
+  ID interno (`cuid`) ou dado de outra arena — só o texto livre da mensagem atual. Logs nunca
+  incluem o telefone completo (máscara `***XXXX`) nem o corpo da mensagem.
+- **Sem lib de WhatsApp SDK nova**: `fetch` nativo pra chamar a Graph API, mesma filosofia de
+  dependências mínimas da Fase 12 (OpenAI também via `fetch`).
+- **Nenhuma integração real validada** (sem credenciais de produção da Meta neste ambiente) — ver
+  `docs/DEPLOYMENT.md`, "Canal de WhatsApp", para o que falta antes de ativar em produção de
+  verdade. Testado com `FakeWhatsAppProvider`/`FakeAiProvider` (nunca fazem requisição HTTP real).
+- **Explicitamente fora de escopo** (conforme o prompt): pagamentos, PIX, cartão, marketplace,
+  campanhas, CRM, voz, imagem, WhatsApp Group, comandos administrativos pelo WhatsApp (bloqueio de
+  quadra, alteração de preço, gestão de equipe — continuam exclusivos do dashboard), rate limiting
+  persistente.
+- **Dependências:** Fase 2 (`User.phone`, sincronizado do Clerk), Fase 4 (`BookingsService`, lock,
+  EXCLUDE constraint, `Idempotency-Key`), Fase 5/6 (`AvailabilityService`, disponibilidade pública),
+  Fase 9 (webhook raw body), Fase 12 (`AiProvider`, reaproveitado por inteiro), Fase 13 (CAS do
+  cancelamento).
+- **Critério de conclusão:** 95 novos testes unitários (`phone.util`, `users.service`,
+  `arenas.service`, `nlp.util`, `intent.service`, `conversation.service`, `whatsapp.service`) + 19
+  novos testes e2e (`whatsapp.e2e-spec.ts`) contra Postgres real — verificação/assinatura do
+  webhook, identidade, criação de reserva ponta a ponta (com preço/idempotência/retry-sem-duplicar),
+  confirmação ambígua nunca confirmando, concorrência real (dois clientes, mesmo horário,
+  simultâneo), cancelamento real reaproveitando o CAS da Fase 13, isolamento multi-tenant (arena,
+  preços, reservas), resistência a prompt injection, e prova de que consultas informativas nunca
+  mutam o banco. Nenhum teste pré-existente foi removido ou reescrito. Ver relatório da fase para a
+  lista completa.
+
+### Fase 17 — Pagamentos
 - **Objetivo:** cobrar pela reserva (PIX/cartão) via Asaas ou Mercado Pago.
 - **Funcionalidades:** ativar um fluxo `PENDING` com hold + expiração (`BookingStatus` ganha
   `PENDING`/`EXPIRED` — ver Parte 7), integração de checkout, webhook de confirmação de pagamento
@@ -2354,19 +2590,32 @@ testar em cada uma — mas a definição geral vale para todas.
   hora local", usada por `isWithinOperatingHours`) sempre esteve correta. O risco de regressão
   futura permanece o mesmo (reutilizar sempre Luxon com `.set()`, nunca `.plus()` de unidades
   sub-diárias para construir um instante a partir de um horário de parede).
-- **Escopo da IA crescendo demais** — risco sobre a "visão futura" ainda não implementada (agente com
-  tools de escrita, Parte 3): quando essa capacidade nascer, mitigar com tools restritas e
-  confirmação obrigatória antes de qualquer ação crítica; revisar esse contrato sempre que uma nova
-  tool for adicionada. A Fase 12 (assistente só leitura, hoje implementado) não tem esse risco, por
-  não ter nenhuma tool de escrita.
+- **Escopo da IA crescendo demais** — a capacidade de escrita via IA (agente com "tools", Parte 3)
+  nasceu na Fase 16, mitigada exatamente como este risco previa: confirmação explícita obrigatória
+  antes de criar/cancelar qualquer reserva (com TTL), e — reforço além do previsto originalmente —
+  o modelo nem escolhe qual tool chamar; ele só classifica intenção num JSON fechado, e código
+  determinístico decide toda chamada ao domínio. Revisar esse contrato sempre que uma nova
+  intenção/ação for adicionada ao WhatsApp. A Fase 12 (assistente administrativo, só leitura)
+  continua sem esse risco, por não ter nenhuma tool de escrita.
 - **Contexto da IA vazando dado de outra arena ou PII** — mitigado desde a Fase 12 por construção: o
   contexto (`AiContext`) só é montado a partir de queries já filtradas por `arenaId`, nunca contém
   `cuid` interno nem campo de cliente (nome/e-mail/telefone/ClerkId). Validado por teste estrutural
   (unitário e e2e) — **não** validado semanticamente contra um modelo real (sem credencial de
   produção neste ambiente); resistência real a prompt injection fica como validação pendente antes
   de expor a funcionalidade a usuários reais em produção.
+- **WhatsApp: mensagem manipulada tentando prompt injection/vazamento de dado de outra arena** —
+  mitigado estruturalmente desde a Fase 16 por construção, não por confiança no modelo: a IA no
+  canal de WhatsApp só produz um JSON fechado de classificação de intenção (nunca prosa mostrada ao
+  cliente), validado campo a campo contra um schema fixo — mesmo que o modelo fosse completamente
+  manipulado, o pior resultado possível é `UNKNOWN`. `arenaId`/`userId`/preço nunca são enviados ao
+  nem lidos do modelo. Testado (unitário e e2e) simulando uma resposta de modelo "sequestrado" —
+  **não** validado contra uma chamada real à OpenAI (mesma ressalva do risco acima).
+- **WhatsApp real (Meta) nunca foi exercitado neste ambiente** — toda a integração foi validada com
+  `FakeWhatsAppProvider` (unitário e e2e); antes de produção, validar manualmente o handshake do
+  webhook, o envio real de mensagens e o formato exato do payload contra a Cloud API real (ver
+  `docs/DEPLOYMENT.md`, "Canal de WhatsApp").
 - **Acoplamento prematuro a um gateway de pagamento** — mitigado por manter `Payment` no schema mas
-  fora do fluxo até a Fase 16, evitando reescrever o fluxo de reserva quando o pagamento chegar.
+  fora do fluxo até a Fase 17, evitando reescrever o fluxo de reserva quando o pagamento chegar.
 - **Listagem de clientes virando N+1 conforme a arena cresce** — mitigado desde a Fase 14 por
   agregação via `groupBy` (Postgres), sempre delimitada pela página atual, nunca uma query por
   cliente nem o histórico inteiro de reservas da arena carregado em memória.

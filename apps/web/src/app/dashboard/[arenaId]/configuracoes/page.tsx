@@ -31,6 +31,9 @@ function ArenaForm({ arenaId, arena }: { arenaId: string; arena: AdminArena }) {
   const [phone, setPhone] = useState(arena.phone ?? '');
   const [email, setEmail] = useState(arena.email ?? '');
   const [timezone, setTimezone] = useState(arena.timezone);
+  const [whatsappPhoneNumberId, setWhatsappPhoneNumberId] = useState(
+    arena.whatsappPhoneNumberId ?? '',
+  );
   const [error, setError] = useState<string | null>(null);
   const [savedMessage, setSavedMessage] = useState(false);
 
@@ -45,6 +48,8 @@ function ArenaForm({ arenaId, arena }: { arenaId: string; arena: AdminArena }) {
         phone: phone.trim().length > 0 ? phone : undefined,
         email: email.trim().length > 0 ? email : undefined,
         timezone,
+        whatsappPhoneNumberId:
+          whatsappPhoneNumberId.trim().length > 0 ? whatsappPhoneNumberId.trim() : undefined,
       });
       setSavedMessage(true);
     } catch (submitError) {
@@ -134,6 +139,27 @@ function ArenaForm({ arenaId, arena }: { arenaId: string; arena: AdminArena }) {
         </CardContent>
       </Card>
 
+      <Card>
+        <CardHeader>
+          <CardTitle>WhatsApp</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-1.5">
+          <Label htmlFor="arena-whatsapp">ID do número (Meta Cloud API)</Label>
+          <Input
+            id="arena-whatsapp"
+            value={whatsappPhoneNumberId}
+            onChange={(event) => setWhatsappPhoneNumberId(event.target.value)}
+            placeholder="Ex: 109876543210123"
+            inputMode="numeric"
+          />
+          <p className="text-xs text-muted-foreground">
+            O &quot;phone_number_id&quot; do seu número de WhatsApp Business, disponível no painel
+            da Meta for Developers — nunca o número de telefone em si. Deixe em branco se esta
+            arena ainda não atende clientes pelo WhatsApp.
+          </p>
+        </CardContent>
+      </Card>
+
       {error ? (
         <Alert variant="destructive" role="alert">
           <AlertTitle>Erro</AlertTitle>
@@ -155,7 +181,7 @@ function ArenaForm({ arenaId, arena }: { arenaId: string; arena: AdminArena }) {
   );
 }
 
-function ArenaSettings({ arenaId }: { arenaId: string }) {
+export function ArenaSettings({ arenaId }: { arenaId: string }) {
   const { data: adminArenas } = useMyAdminArenas();
   const { data: dashboard } = useDashboard(arenaId, undefined);
   const { data: arena, isPending, isError } = useArena(arenaId);

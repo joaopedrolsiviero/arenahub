@@ -157,6 +157,31 @@ describe('OperationalMetricsService', () => {
       });
       expect(after.from.toISOString()).toBe('2026-03-15T04:00:00.000Z'); // UTC-4, não UTC-5 fixo
     });
+
+    // Fase 15 (Relatórios): dois presets novos, extensão aditiva do mesmo
+    // método central — os presets já existentes (testados acima) continuam
+    // com o mesmo comportamento.
+    it('"thisMonth" resolve do dia 1 até o fim do mês corrente', () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-08-20T15:00:00.000Z'));
+      try {
+        const period = service.resolvePeriod('America/Sao_Paulo', { preset: 'thisMonth' });
+        expect(period.fromLabel).toBe('2026-08-01');
+        expect(period.toLabel).toBe('2026-08-31');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('"lastMonth" resolve o mês civil anterior inteiro', () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-08-20T15:00:00.000Z'));
+      try {
+        const period = service.resolvePeriod('America/Sao_Paulo', { preset: 'lastMonth' });
+        expect(period.fromLabel).toBe('2026-07-01');
+        expect(period.toLabel).toBe('2026-07-31');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
   });
 
   describe('previousPeriod', () => {
@@ -365,6 +390,90 @@ describe('OperationalMetricsService', () => {
     });
   });
 
+  // Fase 15 (Relatórios): série temporal — mesmas regras de receita/ocupação
+  // do `summary`, só quebradas por dia.
+  describe('getMetrics — dailySeries (Fase 15)', () => {
+    it('um ponto por dia do período, mesmo sem nenhuma reserva naquele dia', async () => {
+      const twoDayPeriod = {
+        from: new Date('2026-08-20T03:00:00.000Z'),
+        to: new Date('2026-08-22T03:00:00.000Z'),
+        fromLabel: '2026-08-20',
+        toLabel: '2026-08-21',
+      };
+      prisma.booking.findMany.mockResolvedValue([]);
+
+      const result = await service.getMetrics('arena-1', twoDayPeriod);
+
+      expect(result.dailySeries.map((d) => d.date)).toEqual(['2026-08-20', '2026-08-21']);
+      expect(result.dailySeries.every((d) => d.confirmedBookings === 0)).toBe(true);
+    });
+
+    it('receita/confirmadas/canceladas do dia certo — nunca vazam pro dia vizinho', async () => {
+      const twoDayPeriod = {
+        from: new Date('2026-08-20T03:00:00.000Z'),
+        to: new Date('2026-08-22T03:00:00.000Z'),
+        fromLabel: '2026-08-20',
+        toLabel: '2026-08-21',
+      };
+      prisma.booking.findMany.mockResolvedValue([
+        booking({
+          id: 'b1',
+          startsAt: new Date('2026-08-20T13:00:00.000Z'),
+          endsAt: new Date('2026-08-20T14:00:00.000Z'),
+          total: 100,
+        }),
+        booking({
+          id: 'b2',
+          status: BookingStatus.CANCELLED,
+          startsAt: new Date('2026-08-21T13:00:00.000Z'),
+          endsAt: new Date('2026-08-21T14:00:00.000Z'),
+          total: 100,
+        }),
+      ]);
+
+      const result = await service.getMetrics('arena-1', twoDayPeriod);
+
+      const day20 = result.dailySeries.find((d) => d.date === '2026-08-20')!;
+      const day21 = result.dailySeries.find((d) => d.date === '2026-08-21')!;
+      expect(day20.confirmedBookings).toBe(1);
+      expect(day20.estimatedRevenue).toBe(100);
+      expect(day20.cancelledBookings).toBe(0);
+      expect(day21.confirmedBookings).toBe(0);
+      expect(day21.cancelledBookings).toBe(1);
+      expect(day21.estimatedRevenue).toBe(0); // cancelada nunca entra na receita
+    });
+
+    it('occupancyRate por dia — 60min ocupados / 840min operacionais', async () => {
+      prisma.booking.findMany.mockResolvedValue([booking({ id: 'b1' })]);
+
+      const result = await service.getMetrics('arena-1', singleDaySP);
+
+      expect(result.dailySeries).toHaveLength(1);
+      expect(result.dailySeries[0]!.occupancyRate).toBeCloseTo(60 / (840 * 2), 5); // 2 quadras ativas
+    });
+
+    it('occupancyRate é null (nunca 0) num dia sem horário de funcionamento configurado', async () => {
+      operatingHoursService.getRawIntervalsForArena.mockResolvedValue([]);
+      prisma.booking.findMany.mockResolvedValue([]);
+
+      const result = await service.getMetrics('arena-1', singleDaySP);
+
+      expect(result.dailySeries[0]!.occupancyRate).toBeNull();
+    });
+
+    it('BLOCK/MAINTENANCE nunca contam na série (nem em confirmedBookings nem em receita)', async () => {
+      prisma.booking.findMany.mockResolvedValue([
+        booking({ id: 'b1', type: BookingType.BLOCK, total: 0 }),
+        booking({ id: 'b2', type: BookingType.MAINTENANCE, total: 0 }),
+      ]);
+
+      const result = await service.getMetrics('arena-1', singleDaySP);
+
+      expect(result.dailySeries[0]!.confirmedBookings).toBe(0);
+      expect(result.dailySeries[0]!.estimatedRevenue).toBe(0);
+    });
+  });
+
   describe('buildComparison', () => {
     it('calcula deltas percentuais current vs. previous', async () => {
       const period = singleDaySP;
@@ -388,6 +497,28 @@ describe('OperationalMetricsService', () => {
 
       const comparison = service.buildComparison(current, previous);
       expect(comparison.confirmedBookingsDeltaPct).toBeNull();
+    });
+
+    it('calcula delta de cancelamentos (Fase 15) com o mesmo padrão null-quando-base-zero', async () => {
+      const period = singleDaySP;
+      prisma.booking.findMany.mockResolvedValueOnce([
+        booking({ id: 'b1', status: BookingStatus.CANCELLED }),
+        booking({ id: 'b2', status: BookingStatus.CANCELLED }),
+      ]);
+      const current = await service.getMetrics('arena-1', period);
+
+      prisma.booking.findMany.mockResolvedValueOnce([]);
+      const previousZero = await service.getMetrics('arena-1', period);
+      expect(service.buildComparison(current, previousZero).cancelledBookingsDeltaPct).toBeNull();
+
+      prisma.booking.findMany.mockResolvedValueOnce([
+        booking({ id: 'b3', status: BookingStatus.CANCELLED }),
+      ]);
+      const previousOne = await service.getMetrics('arena-1', period);
+      expect(service.buildComparison(current, previousOne).cancelledBookingsDeltaPct).toBeCloseTo(
+        100,
+        5,
+      );
     });
   });
 });

@@ -221,17 +221,28 @@ Conforme o item 12 do prompt — Vercel usa o mecanismo nativo dela pra Next.js
 | `AI_PROVIDER_API_KEY` | Não* (ver abaixo) | Secret — chave da API da OpenAI (platform.openai.com). Nova na Fase 12 |
 | `AI_PROVIDER_MODEL` | Não (default `gpt-4o-mini`) | Modelo da OpenAI usado pelo assistente |
 | `AI_PROVIDER_TIMEOUT_MS` | Não (default `15000`) | Timeout (ms) de cada chamada à OpenAI |
+| `WHATSAPP_VERIFY_TOKEN` | Não* (ver abaixo) | Secret — token arbitrário cadastrado no painel da Meta para o handshake do webhook. Novo na Fase 16 |
+| `WHATSAPP_APP_SECRET` | Não* (ver abaixo) | Secret — App Secret da Meta, usado para verificar `X-Hub-Signature-256`. Novo na Fase 16 |
+| `WHATSAPP_ACCESS_TOKEN` | Não* (ver abaixo) | Secret — token de acesso (System User) da WhatsApp Business Platform, usado para ENVIAR mensagens. Novo na Fase 16 |
 
 As três primeiras são validadas no boot (`assertRequiredEnv()` em
 `apps/api/src/main.ts`, Fase 9): se qualquer uma faltar, o processo termina
 imediatamente com uma mensagem clara nos logs (nunca imprime valores, só
 nomes de variáveis ausentes) — nunca sobe parcialmente configurado.
-`INVITATION_EXPIRES_DAYS` e as três variáveis de IA não estão nessa lista —
-são opcionais, com default no próprio código, então a ausência delas nunca
-impede o boot da API (\* `AI_PROVIDER_API_KEY` é a única cuja ausência tem
-efeito visível: sem ela, só o endpoint `POST /v1/arenas/:arenaId/ai/ask`
-responde 503, o resto do produto continua 100% funcional — ver "Assistente
-de IA" abaixo).
+`INVITATION_EXPIRES_DAYS`, as três variáveis de IA e as três variáveis de
+WhatsApp não estão nessa lista — são opcionais, com default (ou
+comportamento degradado) no próprio código, então a ausência delas nunca
+impede o boot da API (\* `AI_PROVIDER_API_KEY` é a única das de IA cuja
+ausência tem efeito visível: sem ela, só o endpoint
+`POST /v1/arenas/:arenaId/ai/ask` responde 503, o resto do produto continua
+100% funcional — ver "Assistente de IA" abaixo. Das três de WhatsApp,
+`WHATSAPP_VERIFY_TOKEN` ausente faz o handshake `GET /v1/webhooks/whatsapp`
+sempre rejeitar com 403; `WHATSAPP_APP_SECRET` ausente faz TODO
+`POST /v1/webhooks/whatsapp` ser rejeitado com 403 — nunca aceita um evento
+sem conseguir verificar a assinatura; `WHATSAPP_ACCESS_TOKEN` ausente só
+impede o ENVIO da resposta — o processamento da mensagem e a escrita no
+banco continuam acontecendo normalmente, só a entrega ao cliente falha, e
+fica logada — ver "Canal de WhatsApp" abaixo).
 
 ### Convites por e-mail (Fase 11) — sem provedor real configurado
 
@@ -309,6 +320,83 @@ Postgres real): o contexto enviado ao modelo é montado só a partir de queries 
 `arenaId` — não existe caminho de código pelo qual dado de outra arena chegaria ao contexto, com ou
 sem a cooperação do modelo. Antes de expor a funcionalidade a usuários reais em produção, validar a
 resistência semântica do modelo escolhido com testes manuais/automatizados contra a API real.
+
+### Canal de WhatsApp (Fase 16) — provider, identidade, segurança e limitações
+
+**Provedor**: WhatsApp Business Platform / Cloud API oficial da Meta, chamada via `fetch` nativo
+(`MetaWhatsAppProviderService`) — nunca uma solução não oficial baseada em QR Code/scraping/sessão
+de WhatsApp Web. Abstraído atrás de `WhatsAppProvider`
+(`apps/api/src/modules/whatsapp/providers/whatsapp-provider.ts`); trocar de provider é implementar
+uma nova classe e trocar o `useClass` em `WhatsAppModule`, igual ao padrão já usado pelo `AiProvider`
+(Fase 12).
+
+**Identidade do cliente**: reaproveita `User.phone`, já sincronizado do Clerk desde a Fase 2 —
+nenhuma conta/tabela de identidade paralela foi criada. Um cliente só consegue usar o WhatsApp
+depois de ter uma conta ArenaHub (via Clerk) **com um número de telefone verificado cadastrado no
+próprio Clerk** (recurso do Clerk, habilitado no painel do projeto — não é código deste
+repositório). Sem isso, a mensagem recebida é respondida com uma explicação amigável
+("Não encontramos uma conta ArenaHub vinculada a este número...") e nada mais acontece — nenhuma
+conversa é criada, nenhum dado é tocado.
+
+**Identidade da arena**: cada arena configura o próprio `phone_number_id` da Meta via
+`PATCH /v1/arenas/:arenaId` (campo `whatsappPhoneNumberId`, OWNER/ADMIN, também editável em
+`/dashboard/[arenaId]/configuracoes`) — o webhook (uma única URL compartilhada por todas as arenas)
+resolve a arena de destino por esse identificador estável, nunca comparando strings de telefone.
+Uma arena sem esse campo configurado nunca recebe mensagens processadas (o evento chega, mas é
+ignorado e logado — a Meta não é notificada de erro, porque tecnicamente não há erro nenhum do lado
+dela).
+
+**Segurança do webhook**: `GET /v1/webhooks/whatsapp` (handshake de verificação, exigido ao
+configurar o endpoint no painel da Meta) só responde com sucesso se `hub.verify_token` bater com
+`WHATSAPP_VERIFY_TOKEN`. `POST /v1/webhooks/whatsapp` (eventos reais) exige `X-Hub-Signature-256`
+válido — HMAC-SHA256 do corpo cru com `WHATSAPP_APP_SECRET`, comparado com `timingSafeEqual` (mesma
+disciplina do webhook do Clerk desde a Fase 2/9). Sem esse secret configurado, **todo** POST é
+rejeitado com 403 — nunca um fallback "aceita mesmo assim".
+
+**Idempotência em duas camadas**: (1) o próprio evento do webhook é deduplicado por
+`providerEventId` (`WhatsAppEvent`, técnica "claim-first" igual ao `IdempotencyKey` da Fase 4) — a
+Meta pode entregar a mesma mensagem mais de uma vez, e só a primeira é processada; (2) a criação de
+reserva em si usa o mecanismo formal de `Idempotency-Key` já existente
+(`IdempotencyService.execute`), com a chave (`pendingActionId`) gerada uma única vez ao entrar no
+estado de confirmação e nunca regenerada por retry — a mesma proteção da Fase 4/13, não uma segunda
+implementação.
+
+**IA usada só para classificar intenção, nunca para responder ao cliente**: a única saída do LLM
+(`WhatsAppIntentService`) é um JSON fechado de intenção (`{"intent": "..."}`), validado
+rigorosamente contra um schema fixo antes de qualquer uso — nunca texto livre interpolado numa
+resposta. Todo texto que o cliente efetivamente recebe vem de templates centralizados
+(`apps/api/src/modules/whatsapp/messages.ts`), parametrizados só com dados já validados pelo
+domínio. Isso significa que, mesmo que o modelo fosse completamente manipulado por uma tentativa de
+prompt injection na mensagem do cliente, o pior resultado possível é a intenção cair em `UNKNOWN`
+(resposta de ajuda genérica) — não existe caminho de código pelo qual a saída do modelo alcance o
+cliente como prosa não filtrada, nem pelo qual influencie `arenaId`/`userId`/preço de qualquer
+escrita (esses três nunca são enviados ao modelo, nunca lidos da resposta dele). Reaproveita o MESMO
+`AiProvider` da Fase 12 (exportado de `AiModule`) — nenhuma segunda chave de API, nenhum segundo
+cliente OpenAI.
+
+**Datas/horários nunca calculados pelo modelo**: o LLM só extrai a frase bruta ("amanhã", "19h") —
+toda a aritmética de data relativa e validação de horário é determinística
+(`apps/api/src/modules/whatsapp/nlp.util.ts`), testada sem nenhum mock de IA. A maioria das
+mensagens de uma conversa completa (seleção numérica, "sim"/"não", data/hora já em formato
+reconhecido) nunca chama o modelo — só a primeira mensagem de cada nova intenção (estado `IDLE`)
+passa pelo classificador.
+
+**Rate limiting**: não implementado nesta fase (mesma decisão e mesmo motivo da Fase 12 — um
+contador em memória seria uma falsa sensação de proteção, descartada a cada redeploy; uma solução
+persistente real fica para quando o volume de uso justificar). A superfície pública é protegida por
+verificação de assinatura (só a Meta consegue produzir um POST aceito) e pela deduplicação de
+eventos — não por limite de taxa.
+
+**Sem integração real validada nesta fase**: não há credenciais reais da Meta neste ambiente
+(`WHATSAPP_ACCESS_TOKEN`/`WHATSAPP_APP_SECRET`/`WHATSAPP_VERIFY_TOKEN` de produção). Toda a
+implementação foi desenvolvida e testada (unitário e e2e contra Postgres real) usando
+`FakeWhatsAppProvider` (nunca chega a fazer uma requisição HTTP real) e o mesmo `FakeAiProvider` já
+usado pela Fase 12 — o formato das chamadas ao Graph API segue a documentação pública da Cloud API,
+mas **não foi exercitado contra a Meta de verdade**. Antes de ativar o canal em produção: criar um
+app WhatsApp Business no Meta for Developers, configurar o webhook apontando pra
+`https://<sua-api>/v1/webhooks/whatsapp`, gerar um token de acesso permanente (System User), e
+validar manualmente o fluxo completo com um número de teste — não fingir que essa validação já
+aconteceu.
 
 ### `apps/web/.env.example`
 

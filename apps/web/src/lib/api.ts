@@ -18,6 +18,8 @@ import type {
   OperatingIntervalInput,
   OwnershipTransferResult,
   PublicInvitation,
+  ReportQuery,
+  ReportResponse,
 } from './types';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001/v1';
@@ -144,7 +146,12 @@ export const api = {
   updateArena: (
     token: string | null,
     arenaId: string,
-    dto: Partial<Pick<AdminArena, 'name' | 'description' | 'phone' | 'email' | 'timezone'>>,
+    dto: Partial<
+      Pick<
+        AdminArena,
+        'name' | 'description' | 'phone' | 'email' | 'timezone' | 'whatsappPhoneNumberId'
+      >
+    >,
   ): Promise<AdminArena> =>
     request(`/arenas/${arenaId}`, { token, method: 'PATCH', body: dto }),
 
@@ -312,4 +319,19 @@ export const api = {
     arenaId: string,
     userId: string,
   ): Promise<CustomerBookingItem[]> => request(`/arenas/${arenaId}/customers/${userId}/bookings`, { token }),
+
+  // --- Fase 15: relatórios operacionais (só leitura) ---
+
+  getArenaReport: (
+    token: string | null,
+    arenaId: string,
+    params: ReportQuery = {},
+  ): Promise<ReportResponse> => {
+    const query = new URLSearchParams();
+    if (params.preset) query.set('preset', params.preset);
+    if (params.from) query.set('from', params.from);
+    if (params.to) query.set('to', params.to);
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    return request(`/arenas/${arenaId}/reports${suffix}`, { token });
+  },
 };

@@ -3,7 +3,7 @@
 import { useAuth } from '@clerk/nextjs';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
-import type { AskAiPeriod } from '@/lib/types';
+import type { AskAiPeriod, ReportQuery } from '@/lib/types';
 
 /**
  * Todo hook aqui busca um token fresco do Clerk antes de cada chamada (nunca
@@ -390,5 +390,16 @@ export function useCancelBooking() {
         queryKey: ['availability', variables.arenaId, variables.courtId],
       });
     },
+  });
+}
+
+// --- Fase 15: relatórios operacionais (só leitura) ---
+
+export function useArenaReport(arenaId: string | undefined, params: ReportQuery) {
+  const getToken = useToken();
+  return useQuery({
+    queryKey: ['arena-report', arenaId, params.preset ?? '', params.from ?? '', params.to ?? ''],
+    queryFn: async () => api.getArenaReport(await getToken(), arenaId!, params),
+    enabled: !!arenaId,
   });
 }
