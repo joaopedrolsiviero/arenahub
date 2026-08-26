@@ -48,6 +48,7 @@ model User {
   sentInvitations       ArenaInvitation[]      @relation("InvitationInvitedBy")
   acceptedInvitations   ArenaInvitation[]      @relation("InvitationAcceptedBy")
   whatsappConversations WhatsAppConversation[]
+  payments              Payment[]
 }
 
 // Papel do usuário dentro de uma arena específica (nunca um campo global).
@@ -103,6 +104,7 @@ model Arena {
   operatingHours        ArenaOperatingHours[]
   invitations           ArenaInvitation[]
   whatsappConversations WhatsAppConversation[]
+  payments              Payment[]
 }
 
 // Dia da semana centralizado num enum — nunca um inteiro solto (0=domingo
@@ -299,9 +301,10 @@ model Booking {
   // com a quadra (diferente de ArenaMember, que é vínculo, não registro
   // histórico). Não há endpoint de exclusão de Court ainda; a constraint
   // fica pronta para quando existir.
-  court           Court @relation(fields: [courtId], references: [id], onDelete: Restrict)
-  user            User? @relation("BookingUser", fields: [userId], references: [id], onDelete: SetNull)
-  cancelledByUser User? @relation("BookingCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: SetNull)
+  court           Court     @relation(fields: [courtId], references: [id], onDelete: Restrict)
+  user            User?     @relation("BookingUser", fields: [userId], references: [id], onDelete: SetNull)
+  cancelledByUser User?     @relation("BookingCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: SetNull)
+  payments        Payment[]
   // A proteção real contra conflito (EXCLUDE USING GIST) é adicionada via
   // SQL manual na migration desta fase — Prisma não tem sintaxe para
   // exclusion constraints. Ver migration `booking_availability`.
@@ -416,4 +419,137 @@ model WhatsAppEvent {
   id              String   @id @default(cuid())
   providerEventId String   @unique
   createdAt       DateTime @default(now()) @db.Timestamptz(6)
+}
+
+// Fase 17 — gateway de pagamento. Só Mercado Pago é suportado nesta fase
+// (item 8 da auditoria: PIX nativo, sandbox sem CNPJ, webhook assinado —
+// ver docs/ARCHITECTURE.md, "Fase 17", pra justificativa completa). Enum
+// (não uma string livre) porque `Payment.provider` precisa ser um valor
+// fechado — igual ao padrão já usado em `WhatsAppConversationState`.
+enum PaymentProvider {
+  MERCADO_PAGO
+}
+
+// Ciclo de vida FINANCEIRO — nunca confundido com BookingStatus (item 2 do
+// prompt da fase: Booking continua representando só a ocupação da quadra).
+// Desenho deliberado: PENDING é o ÚNICO estado não-terminal. Todos os
+// outros (PAID/FAILED/EXPIRED/CANCELLED) são terminais e IMUTÁVEIS — uma
+// vez alcançados, nenhum evento posterior (nem um webhook "atrasado") pode
+// mudar o Payment de novo (ver PaymentService.applyTerminalStatus, CAS
+// condicionado a `status: PENDING`). Isso resolve de uma vez os dois
+// exemplos de webhook fora de ordem do prompt (item 9): PAID nunca volta
+// pra FAILED; EXPIRED nunca vira PAID mesmo que o provider confirme depois.
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  EXPIRED
+  // Alcançado só quando a Booking subjacente é cancelada ENQUANTO um
+  // Payment ainda está PENDING (nunca por ação direta do cliente — não
+  // existe endpoint para "desistir" de um pagamento nesta fase, decisão
+  // deliberada de escopo mínimo).
+  CANCELLED
+}
+
+// Fase 17: ciclo financeiro de uma Booking CUSTOMER, deliberadamente
+// separado do ciclo operacional (Booking.status). Uma Booking pode ter
+// VÁRIOS Payment (tentativas — permite retry após FAILED/EXPIRED sem
+// duplicar cobrança efetiva), mas no máximo UM pode estar PAID por vez —
+// garantido pelo índice único parcial `Payment_bookingId_single_paid` (SQL
+// manual na migration desta fase, mesma técnica já usada para "no máximo um
+// OWNER por arena", Fase 10). Isso evolui deliberadamente a cardinalidade
+// 1–1 sugerida na Parte 7 original do ARCHITECTURE.md (escrita antes de
+// qualquer implementação real) para 1–N tentativas / 1 liquidação — ver
+// "Decisões revisadas na v0.17" para o registro completo dessa mudança.
+//
+// `arenaId`/`userId` são denormalizados DELIBERADAMENTE (nunca só
+// deriváveis via `booking.court.arenaId`/`booking.userId`): é assim que o
+// webhook do provider e as consultas administrativas conseguem filtrar por
+// arena/cliente sem um JOIN até Booking→Court em toda query financeira, e
+// principalmente porque é isso que garante isolamento multi-tenant
+// verificável diretamente na tabela de pagamentos (auditoria/reconciliação
+// financeira nunca deveria depender de uma cadeia de joins pra provar que
+// um Payment pertence à arena certa). Risco de inconsistência é nulo na
+// prática: os dois valores são copiados da MESMA Booking no momento da
+// criação do Payment e nunca mudam depois (Booking.userId/court.arenaId
+// também são efetivamente imutáveis após a criação).
+model Payment {
+  id        String  @id @default(cuid())
+  bookingId String
+  userId    String
+  arenaId   String
+  // Nunca float (item 3 do prompt) — mesmo padrão de `Booking.total`.
+  // Congelado a partir de `Booking.total` no momento da criação do
+  // Payment, nunca aceito do cliente (item 4).
+  amount    Decimal @db.Decimal(10, 2)
+  currency  String  @default("BRL")
+
+  status   PaymentStatus   @default(PENDING)
+  provider PaymentProvider
+
+  // Preenchido só DEPOIS da chamada ao provider (fora de qualquer
+  // transação Prisma — item 24 do prompt: nunca finja que uma transação
+  // Postgres torna uma chamada HTTP externa atomicamente transacional).
+  // `@unique` quando não nulo: nunca dois Payment locais apontando pro
+  // mesmo pagamento no provider.
+  providerPaymentId String? @unique
+
+  // Idempotência da CRIAÇÃO (item 10 do prompt) — mesma técnica
+  // "claim-first" já estabelecida em IdempotencyKey/WhatsAppEvent, aplicada
+  // diretamente aqui (não uma segunda tabela): duas requisições com a MESMA
+  // chave pra mesma Booking sempre resolvem pro mesmo Payment, nunca criam
+  // duas tentativas nem duas cobranças no provider. Chaves DIFERENTES para
+  // a mesma Booking são tentativas genuinamente distintas — permitido, mas
+  // resolvido por um lock consultivo por bookingId no momento da criação
+  // (ver PaymentsService), nunca duas tentativas ATIVAS simultâneas.
+  idempotencyKey String
+
+  failureReason String?
+
+  paidAt    DateTime? @db.Timestamptz(6)
+  // Prazo da tentativa atual (PIX expira) — avaliado em tempo de leitura
+  // (mesmo padrão de `ArenaInvitation.expiresAt`, Fase 11: nunca um job/cron
+  // marcando expiração; a transição PENDING->EXPIRED acontece lazily, no
+  // primeiro acesso após o prazo vencer).
+  expiresAt DateTime? @db.Timestamptz(6)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  // onDelete: Restrict em todas as três relações — um registro financeiro
+  // nunca pode desaparecer como efeito colateral de excluir a Booking/User/
+  // Arena relacionados (mesmo espírito de `Booking.court`, Fase 4).
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Restrict)
+  arena   Arena   @relation(fields: [arenaId], references: [id], onDelete: Restrict)
+  // O índice único parcial "no máximo um PAID por bookingId" é adicionado
+  // via SQL manual na migration desta fase (Prisma não tem sintaxe pra
+  // índice parcial — mesma situação já registrada para a EXCLUDE constraint
+  // de Booking e o único-OWNER de ArenaMember).
+
+  @@unique([bookingId, idempotencyKey])
+  @@index([bookingId])
+  @@index([arenaId])
+  @@index([userId])
+}
+
+// Deduplicação de eventos do webhook de pagamento (item 8 do prompt) —
+// mesma técnica "claim-first" do WhatsAppEvent (Fase 16): o provider pode
+// reenviar a mesma notificação mais de uma vez, e processá-la duas vezes
+// nunca pode aplicar o mesmo efeito duas vezes (a máquina de estados do
+// Payment já é idempotente por si via CAS, mas isso evita até reprocessar
+// — nunca chamar `getPaymentStatus` no provider duas vezes à toa pro mesmo
+// evento).
+model PaymentWebhookEvent {
+  id              String          @id @default(cuid())
+  provider        PaymentProvider
+  providerEventId String
+  receivedAt      DateTime        @default(now()) @db.Timestamptz(6)
+  processedAt     DateTime?       @db.Timestamptz(6)
+  // Metadado seguro só ("processed"/"ignored"/"error" + um motivo curto) —
+  // NUNCA o payload bruto do webhook (item 8 do prompt: "não armazene
+  // payloads contendo secrets desnecessariamente").
+  resultSummary   String?
+
+  @@unique([provider, providerEventId])
 }

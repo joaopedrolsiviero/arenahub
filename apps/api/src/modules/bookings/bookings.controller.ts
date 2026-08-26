@@ -11,6 +11,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { ArenaRole } from '@prisma/client';
 import type { Booking } from '@prisma/client';
 import { type AuthenticatedUser, ClerkAuthGuard } from '../auth/clerk-auth.guard';
@@ -45,6 +46,12 @@ export class BookingsController {
     private readonly idempotencyService: IdempotencyService,
   ) {}
 
+  // Fase 18 (item 4): criação de reserva é o endpoint de maior valor de
+  // negócio para abusar (scripts tentando "grudar" em todo horário que
+  // abrir) — limite dedicado. 100/min por IP é bem acima de qualquer uso
+  // humano legítimo (inclusive rajadas de retry do frontend) mas barra um
+  // script varrendo agendas.
+  @Throttle({ default: { limit: 100, ttl: 60_000 } })
   @Post()
   @HttpCode(HttpStatus.CREATED)
   async createCustomer(
@@ -79,6 +86,7 @@ export class BookingsController {
     return result.body;
   }
 
+  @Throttle({ default: { limit: 100, ttl: 60_000 } })
   @Post('blocks')
   @UseGuards(ArenaAccessGuard)
   @RequireArenaRole(ArenaRole.OWNER, ArenaRole.ADMIN)
@@ -109,6 +117,7 @@ export class BookingsController {
     return result.body;
   }
 
+  @Throttle({ default: { limit: 100, ttl: 60_000 } })
   @Post('maintenance')
   @UseGuards(ArenaAccessGuard)
   @RequireArenaRole(ArenaRole.OWNER, ArenaRole.ADMIN)
@@ -181,6 +190,7 @@ export class BookingsController {
   // Sem ArenaAccessGuard: autorização é por recurso (dono da reserva OU
   // OWNER/ADMIN), resolvida dentro de BookingsService.cancel — o mesmo
   // motivo pelo qual a criação de CUSTOMER também não usa esse guard.
+  @Throttle({ default: { limit: 100, ttl: 60_000 } })
   @Post(':bookingId/cancel')
   @HttpCode(HttpStatus.OK)
   async cancel(

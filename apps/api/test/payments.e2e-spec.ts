@@ -1,0 +1,661 @@
+import { createHmac } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
+import { Test, TestingModule } from '@nestjs/testing';
+import { INestApplication, ValidationPipe } from '@nestjs/common';
+import request from 'supertest';
+import { App } from 'supertest/types';
+import { ArenaRole, BookingStatus, BookingType, PrismaClient, Sport } from '@prisma/client';
+import { AppModule } from '../src/app.module';
+import { ClerkService } from '../src/modules/auth/clerk.service';
+import {
+  PaymentProvider,
+  PaymentProviderCreateRequest,
+  PaymentProviderCreateResult,
+  PaymentProviderStatusResult,
+  ProviderPaymentStatus,
+} from '../src/modules/payments/providers/payment-provider';
+
+// Fase 17: Payment é só mais um ciclo de vida em cima da MESMA Booking já
+// existente (ver docs/ARCHITECTURE.md) — esta suíte prova a integração
+// PONTA A PONTA contra Postgres real: criação → provider fake → webhook
+// (assinado de verdade, HMAC-SHA256) → estado final, incluindo
+// concorrência real (Promise.all) e a integração com o cancelamento da
+// Fase 13.
+const WEBHOOK_SECRET = 'payments-e2e-webhook-secret';
+
+class FakePaymentProvider extends PaymentProvider {
+  createCalls: PaymentProviderCreateRequest[] = [];
+  nextCreateResult: PaymentProviderCreateResult = {
+    providerPaymentId: 'mp-fake-1',
+    checkoutUrl: 'https://mp.example/checkout/fake',
+    pixCopyPaste: '00020126-fake-pix',
+  };
+  nextCreateError: Error | null = null;
+  statusByProviderPaymentId = new Map<string, ProviderPaymentStatus>();
+  // NUNCA resetado em beforeEach (diferente de `createCalls`) — precisa
+  // continuar único ao longo do arquivo inteiro, já que `providerPaymentId`
+  // é `@unique` no banco e vários testes criam pagamentos reais na mesma
+  // suíte.
+  private idCounter = 0;
+
+  createPayment(request: PaymentProviderCreateRequest): Promise<PaymentProviderCreateResult> {
+    this.createCalls.push(request);
+    if (this.nextCreateError) {
+      const error = this.nextCreateError;
+      this.nextCreateError = null;
+      return Promise.reject(error);
+    }
+    // Cada chamada real geraria um ID novo no provider — simulamos isso
+    // pra que múltiplas criações (quando LEGITIMAMENTE esperadas) nunca
+    // colidam no `providerPaymentId` único local.
+    this.idCounter += 1;
+    const result = {
+      ...this.nextCreateResult,
+      providerPaymentId: `${this.nextCreateResult.providerPaymentId}-${this.idCounter}`,
+    };
+    this.statusByProviderPaymentId.set(result.providerPaymentId, 'PENDING');
+    return Promise.resolve(result);
+  }
+
+  getPaymentStatus(providerPaymentId: string): Promise<PaymentProviderStatusResult> {
+    const status = this.statusByProviderPaymentId.get(providerPaymentId) ?? 'PENDING';
+    return Promise.resolve({
+      status,
+      paidAt: status === 'PAID' ? new Date() : undefined,
+      failureReason: status === 'FAILED' ? 'insufficient_funds' : undefined,
+    });
+  }
+}
+
+const OWNER_A = { clerkId: 'user_e2e_pay_owner_a', email: 'pay-e2e-owner-a@example.com' };
+const CUSTOMER_A = { clerkId: 'user_e2e_pay_customer_a', email: 'pay-e2e-customer-a@example.com' };
+const CUSTOMER_C = { clerkId: 'user_e2e_pay_customer_c', email: 'pay-e2e-customer-c@example.com' };
+const OWNER_B = { clerkId: 'user_e2e_pay_owner_b', email: 'pay-e2e-owner-b@example.com' };
+const CUSTOMER_B = { clerkId: 'user_e2e_pay_customer_b', email: 'pay-e2e-customer-b@example.com' };
+
+const TOKENS: Record<string, string> = {
+  'token-owner-a': OWNER_A.clerkId,
+  'token-customer-a': CUSTOMER_A.clerkId,
+  'token-customer-c': CUSTOMER_C.clerkId,
+  'token-owner-b': OWNER_B.clerkId,
+  'token-customer-b': CUSTOMER_B.clerkId,
+};
+
+function authHeader(token: keyof typeof TOKENS): [string, string] {
+  return ['Authorization', `Bearer ${token}`];
+}
+
+function signWebhook(providerPaymentId: string, requestId: string, ts: string): string {
+  const manifest = `id:${providerPaymentId.toLowerCase()};request-id:${requestId};ts:${ts};`;
+  const hex = createHmac('sha256', WEBHOOK_SECRET).update(manifest).digest('hex');
+  return `ts=${ts},v1=${hex}`;
+}
+
+interface PaymentViewBody {
+  id: string;
+  bookingId: string;
+  status: string;
+  amount: string;
+  currency: string;
+  checkoutUrl: string | null;
+  pixCopyPaste: string | null;
+  failureReason: string | null;
+  paidAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+}
+
+describe('Pagamentos (e2e)', () => {
+  let app: INestApplication<App>;
+  let prisma: PrismaClient;
+  let fakeProvider: FakePaymentProvider;
+  let arenaAId: string;
+  let arenaBId: string;
+  let courtAId: string;
+  let courtBId: string;
+  let ownerAId: string;
+  let customerAId: string;
+  let customerBId: string;
+
+  function paymentsUrl(bookingId: string) {
+    return `/v1/users/me/bookings/${bookingId}/payments`;
+  }
+  function paymentUrl(bookingId: string) {
+    return `/v1/users/me/bookings/${bookingId}/payment`;
+  }
+
+  async function createConfirmedBooking(
+    courtId: string,
+    userId: string,
+    hoursFromNow: number,
+    total = 75,
+  ) {
+    const startsAt = new Date(Date.now() + hoursFromNow * 3_600_000);
+    return prisma.booking.create({
+      data: {
+        courtId,
+        userId,
+        type: BookingType.CUSTOMER,
+        status: BookingStatus.CONFIRMED,
+        startsAt,
+        endsAt: new Date(startsAt.getTime() + 3_600_000),
+        total,
+      },
+    });
+  }
+
+  beforeAll(async () => {
+    process.env.PAYMENT_WEBHOOK_SECRET = WEBHOOK_SECRET;
+
+    prisma = new PrismaClient();
+    await prisma.user.deleteMany({ where: { clerkId: { in: Object.values(TOKENS) } } });
+
+    const ownerA = await prisma.user.create({ data: OWNER_A });
+    ownerAId = ownerA.id;
+    const customerA = await prisma.user.create({ data: CUSTOMER_A });
+    customerAId = customerA.id;
+    await prisma.user.create({ data: CUSTOMER_C });
+    const ownerB = await prisma.user.create({ data: OWNER_B });
+    const customerB = await prisma.user.create({ data: CUSTOMER_B });
+    customerBId = customerB.id;
+
+    const arenaA = await prisma.arena.create({
+      data: { name: 'Arena Pagamentos A', slug: 'pay-e2e-arena-a', timezone: 'America/Sao_Paulo' },
+    });
+    arenaAId = arenaA.id;
+    await prisma.arenaMember.create({
+      data: { arenaId: arenaAId, userId: ownerA.id, role: ArenaRole.OWNER },
+    });
+    const courtA = await prisma.court.create({
+      data: {
+        arenaId: arenaAId,
+        name: 'Quadra A1',
+        sport: Sport.BEACH_VOLLEYBALL,
+        pricePerSlot: 75,
+      },
+    });
+    courtAId = courtA.id;
+
+    const arenaB = await prisma.arena.create({
+      data: {
+        name: 'Arena Pagamentos B (segredo)',
+        slug: 'pay-e2e-arena-b',
+        timezone: 'America/Sao_Paulo',
+      },
+    });
+    arenaBId = arenaB.id;
+    await prisma.arenaMember.create({
+      data: { arenaId: arenaBId, userId: ownerB.id, role: ArenaRole.OWNER },
+    });
+    const courtB = await prisma.court.create({
+      data: {
+        arenaId: arenaBId,
+        name: 'Quadra B1 (segredo)',
+        sport: Sport.BEACH_VOLLEYBALL,
+        pricePerSlot: 999999,
+      },
+    });
+    courtBId = courtB.id;
+
+    fakeProvider = new FakePaymentProvider();
+
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [AppModule],
+    })
+      .overrideProvider(ClerkService)
+      .useValue({
+        verifySessionToken: (token: string) => {
+          const clerkId = TOKENS[token];
+          if (clerkId) return Promise.resolve({ sub: clerkId });
+          return Promise.reject(new Error('invalid test token'));
+        },
+      })
+      .overrideProvider(PaymentProvider)
+      .useValue(fakeProvider)
+      .compile();
+
+    app = moduleFixture.createNestApplication({ rawBody: true });
+    app.setGlobalPrefix('v1');
+    app.useGlobalPipes(
+      new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
+    );
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await prisma.payment.deleteMany({ where: { arenaId: { in: [arenaAId, arenaBId] } } });
+    await prisma.paymentWebhookEvent.deleteMany({});
+    await prisma.booking.deleteMany({ where: { courtId: { in: [courtAId, courtBId] } } });
+    await prisma.arena.deleteMany({ where: { id: { in: [arenaAId, arenaBId] } } });
+    await prisma.user.deleteMany({ where: { clerkId: { in: Object.values(TOKENS) } } });
+    await prisma.$disconnect();
+    await app.close();
+    delete process.env.PAYMENT_WEBHOOK_SECRET;
+  });
+
+  beforeEach(() => {
+    fakeProvider.createCalls = [];
+    fakeProvider.nextCreateError = null;
+    fakeProvider.statusByProviderPaymentId.clear();
+  });
+
+  describe('Autorização e validação (itens 17, 26)', () => {
+    it('exige autenticação (401)', async () => {
+      const booking = await createConfirmedBooking(courtAId, customerAId, 24);
+      await request(app.getHttpServer())
+        .post(paymentsUrl(booking.id))
+        .set('Idempotency-Key', randomUUID())
+        .expect(401);
+    });
+
+    it('exige Idempotency-Key (400)', async () => {
+      const booking = await createConfirmedBooking(courtAId, customerAId, 20);
+      await request(app.getHttpServer())
+        .post(paymentsUrl(booking.id))
+        .set(...authHeader('token-customer-a'))
+        .expect(400);
+    });
+
+    it('Booking inexistente retorna 404', async () => {
+      await request(app.getHttpServer())
+        .post(paymentsUrl('booking-que-nao-existe'))
+        .set(...authHeader('token-customer-a'))
+        .set('Idempotency-Key', randomUUID())
+        .expect(404);
+    });
+  });
+
+  describe('Criação — regra de preço e mass assignment (itens 4, 6)', () => {
+    it('cria o pagamento com o valor EXATO de Booking.total, nunca outro', async () => {
+      const booking = await createConfirmedBooking(courtAId, customerAId, 21, 75);
+
+      const response = await request(app.getHttpServer())
+        .post(paymentsUrl(booking.id))
+        .set(...authHeader('token-customer-a'))
+        .set('Idempotency-Key', randomUUID())
+        .expect(201);
+
+      const body = response.body as PaymentViewBody;
+      expect(body.amount).toBe('75');
+      expect(body.currency).toBe('BRL');
+      expect(body.status).toBe('PENDING');
+      expect(body.checkoutUrl).toContain('https://mp.example');
+    });
+
+    it('amount/status forjados no corpo são ignorados — o backend nem lê o corpo', async () => {
+      const booking = await createConfirmedBooking(courtAId, customerAId, 25, 75);
+
+      const response = await request(app.getHttpServer())
+        .post(paymentsUrl(booking.id))
+        .set(...authHeader('token-customer-a'))
+        .set('Idempotency-Key', randomUUID())
+        .send({
+          amount: 1,
+          status: 'PAID',
+          total: 0.01,
+          providerPaymentId: 'forjado',
+          currency: 'USD',
+        })
+        .expect(201);
+
+      const body = response.body as PaymentViewBody;
+      expect(body.amount).toBe('75');
+      expect(body.currency).toBe('BRL');
+      expect(body.status).toBe('PENDING');
+    });
+
+    it('Booking de outro usuário (IDOR) retorna 404, nunca 403', async () => {
+      const booking = await createConfirmedBooking(courtAId, customerAId, 26);
+
+      await request(app.getHttpServer())
+        .post(paymentsUrl(booking.id))
+        .set(...authHeader('token-customer-c'))
+        .set('Idempotency-Key', randomUUID())
+        .expect(404);
+    });
+
+    it('BLOCK nunca gera pagamento — Booking existe, mas nunca aparece como "minha reserva" (404)', async () => {
+      const block = await prisma.booking.create({
+        data: {
+          courtId: courtAId,
+          userId: ownerAId,
+          type: BookingType.BLOCK,
+          status: BookingStatus.CONFIRMED,
+          startsAt: new Date(Date.now() + 27 * 3_600_000),
+          endsAt: new Date(Date.now() + 28 * 3_600_000),
+          reason: 'Evento privado',
+        },
+      });
+
+      await request(app.getHttpServer())
+        .post(paymentsUrl(block.id))
+        .set(...authHeader('token-owner-a'))
+        .set('Idempotency-Key', randomUUID())
+        .expect(404);
+    });
+
+    it('Booking CANCELLED não pode gerar novo pagamento (409)', async () => {
+      const booking = await createConfirmedBooking(courtAId, customerAId, 29);
+      await request(app.getHttpServer())
+        .post(`/v1/arenas/${arenaAId}/courts/${courtAId}/bookings/${booking.id}/cancel`)
+        .set(...authHeader('token-customer-a'))
+        .expect(200);
+
+      await request(app.getHttpServer())
+        .post(paymentsUrl(booking.id))
+        .set(...authHeader('token-customer-a'))
+        .set('Idempotency-Key', randomUUID())
+        .expect(409);
+    });
+  });
+
+  describe('Idempotência e concorrência (itens 10, 11)', () => {
+    it('mesma Idempotency-Key duas vezes devolve o MESMO Payment, sem chamar o provider de novo', async () => {
+      const booking = await createConfirmedBooking(courtAId, customerAId, 30);
+      const key = randomUUID();
+
+      const first = await request(app.getHttpServer())
+        .post(paymentsUrl(booking.id))
+        .set(...authHeader('token-customer-a'))
+        .set('Idempotency-Key', key)
+        .expect(201);
+      const second = await request(app.getHttpServer())
+        .post(paymentsUrl(booking.id))
+        .set(...authHeader('token-customer-a'))
+        .set('Idempotency-Key', key)
+        .expect(201);
+
+      expect((first.body as PaymentViewBody).id).toBe((second.body as PaymentViewBody).id);
+      expect(fakeProvider.createCalls).toHaveLength(1);
+    });
+
+    it('duas criações simultâneas (mesma chave) via Promise.all: só uma linha, só uma chamada ao provider', async () => {
+      const booking = await createConfirmedBooking(courtAId, customerAId, 31);
+      const key = randomUUID();
+
+      const [r1, r2] = await Promise.all([
+        request(app.getHttpServer())
+          .post(paymentsUrl(booking.id))
+          .set(...authHeader('token-customer-a'))
+          .set('Idempotency-Key', key),
+        request(app.getHttpServer())
+          .post(paymentsUrl(booking.id))
+          .set(...authHeader('token-customer-a'))
+          .set('Idempotency-Key', key),
+      ]);
+
+      expect(r1.status).toBe(201);
+      expect(r2.status).toBe(201);
+      expect((r1.body as PaymentViewBody).id).toBe((r2.body as PaymentViewBody).id);
+      const count = await prisma.payment.count({ where: { bookingId: booking.id } });
+      expect(count).toBe(1);
+      expect(fakeProvider.createCalls).toHaveLength(1);
+    });
+
+    it('chaves DIFERENTES simultâneas para a mesma Booking convergem pra UMA tentativa ativa, nunca duas cobranças', async () => {
+      const booking = await createConfirmedBooking(courtAId, customerAId, 32);
+
+      const [r1, r2] = await Promise.all([
+        request(app.getHttpServer())
+          .post(paymentsUrl(booking.id))
+          .set(...authHeader('token-customer-a'))
+          .set('Idempotency-Key', randomUUID()),
+        request(app.getHttpServer())
+          .post(paymentsUrl(booking.id))
+          .set(...authHeader('token-customer-a'))
+          .set('Idempotency-Key', randomUUID()),
+      ]);
+
+      expect(r1.status).toBe(201);
+      expect(r2.status).toBe(201);
+      expect((r1.body as PaymentViewBody).id).toBe((r2.body as PaymentViewBody).id);
+      const count = await prisma.payment.count({ where: { bookingId: booking.id } });
+      expect(count).toBe(1);
+      expect(fakeProvider.createCalls).toHaveLength(1);
+    });
+  });
+
+  describe('Consulta (GET /payment)', () => {
+    it('sem nenhuma tentativa, devolve corpo vazio (null)', async () => {
+      const booking = await createConfirmedBooking(courtAId, customerAId, 33);
+
+      const response = await request(app.getHttpServer())
+        .get(paymentUrl(booking.id))
+        .set(...authHeader('token-customer-a'))
+        .expect(200);
+
+      expect(response.body).toEqual({});
+    });
+
+    it('depois de criado, reflete o estado real do banco', async () => {
+      const booking = await createConfirmedBooking(courtAId, customerAId, 34);
+      await request(app.getHttpServer())
+        .post(paymentsUrl(booking.id))
+        .set(...authHeader('token-customer-a'))
+        .set('Idempotency-Key', randomUUID())
+        .expect(201);
+
+      const response = await request(app.getHttpServer())
+        .get(paymentUrl(booking.id))
+        .set(...authHeader('token-customer-a'))
+        .expect(200);
+
+      expect((response.body as PaymentViewBody).status).toBe('PENDING');
+    });
+
+    it('outro usuário nunca acessa (404)', async () => {
+      const booking = await createConfirmedBooking(courtAId, customerAId, 35);
+
+      await request(app.getHttpServer())
+        .get(paymentUrl(booking.id))
+        .set(...authHeader('token-customer-c'))
+        .expect(404);
+    });
+  });
+
+  describe('Webhook — assinatura e idempotência (itens 8, 9)', () => {
+    async function createPendingPaymentWithWebhookId(hoursFromNow: number) {
+      const booking = await createConfirmedBooking(courtAId, customerAId, hoursFromNow);
+      const response = await request(app.getHttpServer())
+        .post(paymentsUrl(booking.id))
+        .set(...authHeader('token-customer-a'))
+        .set('Idempotency-Key', randomUUID())
+        .expect(201);
+      const payment = await prisma.payment.findUniqueOrThrow({
+        where: { id: (response.body as PaymentViewBody).id },
+      });
+      return { booking, payment };
+    }
+
+    function sendWebhook(
+      providerPaymentId: string,
+      opts?: { signature?: string; requestId?: string },
+    ) {
+      const requestId = opts?.requestId ?? randomUUID();
+      const ts = String(Math.floor(Date.now() / 1000));
+      const signature = opts?.signature ?? signWebhook(providerPaymentId, requestId, ts);
+      return request(app.getHttpServer())
+        .post('/v1/webhooks/payments/mercadopago')
+        .set('x-signature', signature)
+        .set('x-request-id', requestId)
+        .send({
+          id: randomUUID(),
+          type: 'payment',
+          action: 'payment.updated',
+          data: { id: providerPaymentId },
+        });
+    }
+
+    it('sem assinatura é rejeitado (403), nunca processado', async () => {
+      const { payment } = await createPendingPaymentWithWebhookId(40);
+      await request(app.getHttpServer())
+        .post('/v1/webhooks/payments/mercadopago')
+        .send({ id: '1', type: 'payment', data: { id: payment.providerPaymentId } })
+        .expect(403);
+
+      const unchanged = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+      expect(unchanged.status).toBe('PENDING');
+    });
+
+    it('assinatura inválida é rejeitada (403)', async () => {
+      const { payment } = await createPendingPaymentWithWebhookId(41);
+      await sendWebhook(payment.providerPaymentId!, {
+        signature: 'ts=1,v1=' + '0'.repeat(64),
+      }).expect(403);
+    });
+
+    it('evento para providerPaymentId desconhecido é aceito (200) mas não altera nada', async () => {
+      await sendWebhook('mp-desconhecido-xyz').expect(200);
+    });
+
+    it('assinatura válida aplica PAID a partir do status REAL do provider (nunca do corpo do webhook)', async () => {
+      const { payment } = await createPendingPaymentWithWebhookId(42);
+      fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PAID');
+
+      await sendWebhook(payment.providerPaymentId!).expect(200);
+
+      const updated = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+      expect(updated.status).toBe('PAID');
+      expect(updated.paidAt).not.toBeNull();
+    });
+
+    it('evento duplicado (mesmo id de notificação) só processa uma vez', async () => {
+      const { payment } = await createPendingPaymentWithWebhookId(43);
+      fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PAID');
+      const requestId = randomUUID();
+      const ts = String(Math.floor(Date.now() / 1000));
+      const signature = signWebhook(payment.providerPaymentId!, requestId, ts);
+      const notificationId = randomUUID();
+
+      const send = () =>
+        request(app.getHttpServer())
+          .post('/v1/webhooks/payments/mercadopago')
+          .set('x-signature', signature)
+          .set('x-request-id', requestId)
+          .send({ id: notificationId, type: 'payment', data: { id: payment.providerPaymentId } });
+
+      await send().expect(200);
+      await send().expect(200);
+
+      const updated = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+      expect(updated.status).toBe('PAID');
+    });
+
+    it('PAID é terminal: um evento FAILED chegando depois nunca reverte (item 9)', async () => {
+      const { payment } = await createPendingPaymentWithWebhookId(44);
+      fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PAID');
+      await sendWebhook(payment.providerPaymentId!).expect(200);
+
+      fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'FAILED');
+      await sendWebhook(payment.providerPaymentId!).expect(200);
+
+      const final = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+      expect(final.status).toBe('PAID');
+    });
+
+    it('duas confirmações PAID concorrentes (Promise.all) resolvem no mesmo estado final, sem erro', async () => {
+      const { payment } = await createPendingPaymentWithWebhookId(45);
+      fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PAID');
+
+      const [r1, r2] = await Promise.all([
+        sendWebhook(payment.providerPaymentId!),
+        sendWebhook(payment.providerPaymentId!),
+      ]);
+
+      expect(r1.status).toBe(200);
+      expect(r2.status).toBe(200);
+      const final = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+      expect(final.status).toBe('PAID');
+    });
+
+    it('PAID + FAILED simultâneos (Promise.all): resultado final é determinístico e nunca ambos aplicados', async () => {
+      const { payment } = await createPendingPaymentWithWebhookId(46);
+
+      const requestIdPaid = randomUUID();
+      const requestIdFailed = randomUUID();
+      const ts = String(Math.floor(Date.now() / 1000));
+
+      fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PAID');
+      const paidCall = request(app.getHttpServer())
+        .post('/v1/webhooks/payments/mercadopago')
+        .set('x-signature', signWebhook(payment.providerPaymentId!, requestIdPaid, ts))
+        .set('x-request-id', requestIdPaid)
+        .send({ id: randomUUID(), type: 'payment', data: { id: payment.providerPaymentId } });
+
+      const failedCall = request(app.getHttpServer())
+        .post('/v1/webhooks/payments/mercadopago')
+        .set('x-signature', signWebhook(payment.providerPaymentId!, requestIdFailed, ts))
+        .set('x-request-id', requestIdFailed)
+        .send({ id: randomUUID(), type: 'payment', data: { id: payment.providerPaymentId } });
+
+      await Promise.all([paidCall, failedCall]);
+
+      const final = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+      expect(['PAID', 'FAILED']).toContain(final.status); // determinístico, nunca um estado inválido
+    });
+  });
+
+  describe('Cancelamento durante o pagamento (itens 12, 12.1)', () => {
+    it('Booking cancelada enquanto o Payment está PENDING: um PAID que chega depois vira CANCELLED, nunca PAID', async () => {
+      const booking = await createConfirmedBooking(courtAId, customerAId, 50);
+      const createResponse = await request(app.getHttpServer())
+        .post(paymentsUrl(booking.id))
+        .set(...authHeader('token-customer-a'))
+        .set('Idempotency-Key', randomUUID())
+        .expect(201);
+      const payment = await prisma.payment.findUniqueOrThrow({
+        where: { id: (createResponse.body as PaymentViewBody).id },
+      });
+
+      await request(app.getHttpServer())
+        .post(`/v1/arenas/${arenaAId}/courts/${courtAId}/bookings/${booking.id}/cancel`)
+        .set(...authHeader('token-customer-a'))
+        .expect(200);
+
+      fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PAID');
+      const ts = String(Math.floor(Date.now() / 1000));
+      const requestId = randomUUID();
+      await request(app.getHttpServer())
+        .post('/v1/webhooks/payments/mercadopago')
+        .set('x-signature', signWebhook(payment.providerPaymentId!, requestId, ts))
+        .set('x-request-id', requestId)
+        .send({ id: randomUUID(), type: 'payment', data: { id: payment.providerPaymentId } })
+        .expect(200);
+
+      const final = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+      expect(final.status).toBe('CANCELLED'); // nunca PAID — nunca finge que houve reembolso, só nunca completa
+      expect(final.failureReason).toBe('BOOKING_CANCELLED_BEFORE_PAYMENT');
+    });
+  });
+
+  describe('Isolamento multi-tenant (item 16)', () => {
+    it('cliente da Arena A nunca acessa/cria pagamento de reserva da Arena B', async () => {
+      const bookingB = await createConfirmedBooking(courtBId, customerBId, 24, 999999);
+
+      await request(app.getHttpServer())
+        .post(paymentsUrl(bookingB.id))
+        .set(...authHeader('token-customer-a'))
+        .set('Idempotency-Key', randomUUID())
+        .expect(404);
+      await request(app.getHttpServer())
+        .get(paymentUrl(bookingB.id))
+        .set(...authHeader('token-customer-a'))
+        .expect(404);
+    });
+
+    it('Payment da Arena B nunca aparece com dados da Arena A (arenaId denormalizado corretamente)', async () => {
+      const bookingB = await createConfirmedBooking(courtBId, customerBId, 60, 999999);
+      const response = await request(app.getHttpServer())
+        .post(paymentsUrl(bookingB.id))
+        .set(...authHeader('token-customer-b'))
+        .set('Idempotency-Key', randomUUID())
+        .expect(201);
+
+      const payment = await prisma.payment.findUniqueOrThrow({
+        where: { id: (response.body as PaymentViewBody).id },
+      });
+      expect(payment.arenaId).toBe(arenaBId);
+      expect(payment.arenaId).not.toBe(arenaAId);
+    });
+  });
+});

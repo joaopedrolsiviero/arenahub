@@ -9,8 +9,14 @@ import {
 } from '@nestjs/common';
 import { verifyWebhook } from '@clerk/backend/webhooks';
 import type { WebhookEvent } from '@clerk/backend';
+import { SkipThrottle } from '@nestjs/throttler';
 import { UsersService } from '../users/users.service';
 
+// Fase 18 (item 4): @SkipThrottle() — mesma justificativa dos webhooks de
+// WhatsApp/Mercado Pago: a verificação de assinatura Svix já rejeita
+// qualquer requisição não autêntica antes de processar nada, e rate
+// limiting por IP arriscaria descartar eventos legítimos do Clerk.
+@SkipThrottle()
 @Controller('webhooks')
 export class WebhooksController {
   constructor(private readonly usersService: UsersService) {}

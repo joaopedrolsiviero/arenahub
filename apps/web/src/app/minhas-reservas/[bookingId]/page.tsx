@@ -3,13 +3,16 @@
 import { Suspense, use, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { CheckCircle2Icon, MapPinIcon } from 'lucide-react';
-import { useMyBooking, useCancelBooking } from '@/hooks/use-api';
+import { useMyBooking, useCancelBooking, useBookingPayment, useCreateBookingPayment } from '@/hooks/use-api';
 import { LoadingState, ErrorState } from '@/components/async-state';
 import { RequireAuth } from '@/components/require-auth';
 import { SiteHeader } from '@/components/site-header';
 import { BookingStatusBadge } from '@/components/booking-status-badge';
-import { Card, CardContent, CardHeader } from '@/components/ui/card';
+import { PaymentStatusBadge } from '@/components/payment-status-badge';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import {
   AlertDialog,
@@ -22,8 +25,124 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
-import { formatCurrencyBRL, formatDateInZone, formatTimeInZone } from '@/lib/format';
+import { formatCurrencyBRL, formatDateInZone, formatDateTimeInZone, formatTimeInZone } from '@/lib/format';
 import { ApiError } from '@/lib/api';
+import type { MyBooking } from '@/lib/types';
+
+// Fase 17 — seção financeira de "minhas reservas". Nunca permite editar
+// valor/status: o valor exibido é sempre `payment.amount` (vindo do
+// backend, que por sua vez o congela a partir de `Booking.total` — nunca um
+// campo editável aqui), e o status exibido é sempre `payment.status` —
+// nenhum estado local finge que um pagamento foi concluído (item 13 do
+// prompt da fase: "o frontend deve sempre refletir o estado retornado pelo
+// backend").
+function PaymentSection({ booking }: { booking: MyBooking }) {
+  const { data: payment, isPending, isError } = useBookingPayment(booking.id);
+  const createPayment = useCreateBookingPayment(booking.id);
+  const [payError, setPayError] = useState<string | null>(null);
+
+  async function handlePay() {
+    setPayError(null);
+    try {
+      // Chave nova a cada clique — o backend já resolve pra mesma tentativa
+      // ATIVA quando existir uma (nunca duas cobranças em paralelo, ver
+      // PaymentsService), então não há necessidade de persistir a chave
+      // entre cliques só para evitar duplicidade.
+      await createPayment.mutateAsync(crypto.randomUUID());
+    } catch (error) {
+      setPayError(
+        error instanceof ApiError ? error.message : 'Não foi possível iniciar o pagamento. Tente novamente.',
+      );
+    }
+  }
+
+  // Reserva cancelada e nunca chegou a ter nenhum pagamento — nada
+  // financeiro a mostrar.
+  if (!isPending && !payment && booking.status === 'CANCELLED') {
+    return null;
+  }
+
+  const canPay =
+    booking.status === 'CONFIRMED' && (!payment || payment.status === 'FAILED' || payment.status === 'EXPIRED');
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Pagamento</CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        {isPending ? <LoadingState label="Carregando pagamento…" /> : null}
+        {isError ? <ErrorState message="Não foi possível carregar o pagamento." /> : null}
+
+        {payError ? (
+          <Alert variant="destructive" role="alert">
+            <AlertTitle>Erro</AlertTitle>
+            <AlertDescription>{payError}</AlertDescription>
+          </Alert>
+        ) : null}
+
+        {!isPending && !payment ? (
+          <p className="text-sm text-muted-foreground">Esta reserva ainda não foi paga.</p>
+        ) : null}
+
+        {payment ? (
+          <>
+            <div className="flex items-center justify-between">
+              <PaymentStatusBadge status={payment.status} />
+              <span className="tabular text-base font-bold">{formatCurrencyBRL(payment.amount)}</span>
+            </div>
+
+            {payment.status === 'PENDING' && payment.pixCopyPaste ? (
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="pix-copy-paste">Código PIX copia e cola</Label>
+                <Input
+                  id="pix-copy-paste"
+                  readOnly
+                  value={payment.pixCopyPaste}
+                  onFocus={(event) => event.target.select()}
+                  className="font-mono text-xs"
+                />
+                {payment.expiresAt ? (
+                  <p className="text-xs text-muted-foreground">
+                    Expira em {formatDateTimeInZone(payment.expiresAt, booking.court.arena.timezone)}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+
+            {payment.status === 'PAID' && payment.paidAt ? (
+              <p className="text-sm text-muted-foreground">
+                Pago em {formatDateTimeInZone(payment.paidAt, booking.court.arena.timezone)}
+              </p>
+            ) : null}
+
+            {payment.status === 'FAILED' && payment.failureReason ? (
+              <p className="text-sm text-muted-foreground">
+                Não foi possível concluir o pagamento anterior.
+              </p>
+            ) : null}
+
+            {payment.status === 'CANCELLED' ? (
+              <p className="text-sm text-muted-foreground">
+                Esta tentativa de pagamento foi cancelada porque a reserva foi cancelada.
+              </p>
+            ) : null}
+          </>
+        ) : null}
+
+        {canPay ? (
+          <Button type="button" onClick={handlePay} disabled={createPayment.isPending}>
+            {createPayment.isPending
+              ? 'Iniciando pagamento…'
+              : payment
+                ? 'Tentar pagar novamente'
+                : 'Pagar com PIX'}
+          </Button>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
 
 export function BookingDetail({ bookingId }: { bookingId: string }) {
   const searchParams = useSearchParams();
@@ -102,6 +221,8 @@ export function BookingDetail({ bookingId }: { bookingId: string }) {
           </div>
         </CardContent>
       </Card>
+
+      <PaymentSection booking={booking} />
 
       {canCancel ? (
         <AlertDialog>

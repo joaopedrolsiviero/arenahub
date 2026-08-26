@@ -11,6 +11,11 @@ const securityHeaders = [
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
   { key: "X-Frame-Options", value: "DENY" },
   { key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains" },
+  // Fase 18, item 5: desliga só as APIs de navegador que o produto nunca usa
+  // (câmera/microfone/geolocalização) — ao contrário de CSP, não depende de
+  // conhecer domínios externos do Clerk/Next, então não tem o mesmo risco de
+  // quebrar a integração; seguro habilitar sem validação contra produção.
+  { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
 ];
 
 const nextConfig: NextConfig = {

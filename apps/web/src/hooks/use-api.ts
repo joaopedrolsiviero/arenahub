@@ -403,3 +403,32 @@ export function useArenaReport(arenaId: string | undefined, params: ReportQuery)
     enabled: !!arenaId,
   });
 }
+
+// --- Fase 17: pagamentos (ciclo financeiro de "minhas reservas") ---
+
+export function useBookingPayment(bookingId: string | undefined) {
+  const getToken = useToken();
+  return useQuery({
+    queryKey: ['booking-payment', bookingId],
+    queryFn: async () => api.getBookingPayment(await getToken(), bookingId!),
+    enabled: !!bookingId,
+    // Um PIX pendente pode mudar de status a qualquer momento (webhook do
+    // provider) sem nenhuma ação do próprio usuário nesta aba — refaz a
+    // consulta periodicamente enquanto a tela estiver aberta, mesma
+    // necessidade de "nunca reaproveitar cache antigo como se ainda fosse
+    // válido" já registrada para `useAvailability` (Fase 4).
+    refetchInterval: (query) => (query.state.data?.status === 'PENDING' ? 5_000 : false),
+  });
+}
+
+export function useCreateBookingPayment(bookingId: string) {
+  const getToken = useToken();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (idempotencyKey: string) =>
+      api.createBookingPayment(await getToken(), bookingId, idempotencyKey),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['booking-payment', bookingId] });
+    },
+  });
+}

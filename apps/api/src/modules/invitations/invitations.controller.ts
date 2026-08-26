@@ -1,4 +1,5 @@
 import { Body, Controller, Delete, Get, HttpCode, Param, Post, UseGuards } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { ArenaRole } from '@prisma/client';
 import { type AuthenticatedUser, ClerkAuthGuard } from '../auth/clerk-auth.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
@@ -15,6 +16,10 @@ import { CreateInvitationDto } from './dto/create-invitation.dto';
 export class InvitationsController {
   constructor(private readonly invitationsService: InvitationsService) {}
 
+  // Fase 18 (item 4): criação de convite dispara e-mail real (Fase 11) —
+  // limite dedicado evita que um OWNER comprometido/script vire uma máquina
+  // de spam de e-mail a partir da própria infraestrutura da ArenaHub.
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @Post()
   @RequireArenaRole(ArenaRole.OWNER)
   create(
@@ -41,6 +46,10 @@ export class InvitationsController {
     return this.invitationsService.revokeInvitation(arenaId, invitationId);
   }
 
+  // Fase 18 (item 4): "resend" é o vetor de spam de e-mail mais óbvio
+  // (reenviar pro MESMO destinatário repetidamente) — limite mais apertado
+  // que o de criação.
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post(':invitationId/resend')
   @RequireArenaRole(ArenaRole.OWNER)
   resend(

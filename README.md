@@ -62,11 +62,23 @@ em produção, veja [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 > intenção da mensagem (nunca responde ao cliente diretamente nem decide arena/usuário/preço); quem
 > executa é o mesmo `BookingsService`/`AvailabilityService` do resto do produto, com o mesmo
 > lock/EXCLUDE constraint/Idempotency-Key da Fase 4. Sem credenciais reais da Meta neste ambiente —
-> testado com um provider fake (ver `docs/DEPLOYMENT.md`). Backend continua a única autoridade em
-> tudo — disponibilidade, preço, dono da reserva, acesso administrativo. Double booking continua
-> prevenido em camadas reais no Postgres (`pg_advisory_xact_lock` + `EXCLUDE USING GIST`) com
-> `Idempotency-Key` persistida — inteiramente PostgreSQL, sem depender de Redis. Pagamentos ainda
-> não foram implementados.
+> testado com um provider fake (ver `docs/DEPLOYMENT.md`). Desde a **Fase 17 (concluída)**, uma
+> reserva CUSTOMER pode ser paga via **PIX** (Mercado Pago): a seção financeira em
+> `/minhas-reservas/[bookingId]` mostra valor, status e o código PIX, com confirmação só via
+> webhook assinado do gateway — nunca o frontend decidindo que um pagamento foi concluído. O ciclo
+> financeiro (`Payment`) é deliberadamente separado do ciclo operacional (`Booking.status`, que
+> continua só `CONFIRMED`/`CANCELLED`); nenhum refund foi implementado. Sem credenciais reais do
+> Mercado Pago neste ambiente — testado com um provider fake (ver `docs/DEPLOYMENT.md`). Backend
+> continua a única autoridade em tudo — disponibilidade, preço, dono da reserva, acesso
+> administrativo. Double booking continua prevenido em camadas reais no Postgres
+> (`pg_advisory_xact_lock` + `EXCLUDE USING GIST`) com `Idempotency-Key` persistida — inteiramente
+> PostgreSQL, sem depender de Redis. A **Fase 18 (concluída)** foi uma auditoria e hardening de
+> produção, sem nenhuma funcionalidade de produto nova: rate limiting pela primeira vez no produto
+> (em memória, por instância — limitação documentada, não escondida), headers de segurança HTTP no
+> backend (`helmet`), correlation ID (`X-Request-Id`) propagado via `AsyncLocalStorage` nativo do
+> Node, um filtro global de exceções que garante que nenhum erro não previsto vaza detalhe interno,
+> `WEB_APP_URL` agora obrigatória em produção, e `HEALTHCHECK` nativo do Docker — validado de
+> verdade contra uma imagem construída e executada nesta fase, não só escrito.
 
 ## Stack
 
@@ -222,6 +234,8 @@ arenahub/
 │       │                         # IdempotencyKey, ArenaOperatingHours) + migrations (inclui
 │       │                         # EXCLUDE USING GIST manual)
 │       └── src/
+│           ├── common/             # transversal (Fase 18): rate limiting, request-id,
+│           │                       # logging interceptor, filtro global de exceções
 │           ├── modules/
 │           │   ├── health/         # GET /v1/health (liveness) e /v1/health/ready (readiness — Fase 9)
 │           │   ├── auth/           # ClerkAuthGuard, ClerkService, @CurrentUser()
@@ -797,6 +811,59 @@ arenahub/
   testado com providers fake. Ver `docs/DEPLOYMENT.md`.
 - **Pagamentos, PIX, cartão, marketplace, campanhas, CRM, voz, imagem e comandos administrativos
   pelo WhatsApp continuam fora de escopo** — não implementados nesta fase.
+
+## Decisões da Fase 17
+
+- **Booking e Payment são conceitos diferentes** — `Booking.status` continua só `CONFIRMED`/
+  `CANCELLED` (ocupação da quadra, Fase 4, intocado); `Payment.status` é um ciclo financeiro à
+  parte (`PENDING`/`PAID`/`FAILED`/`EXPIRED`/`CANCELLED`). Desvio deliberado do placeholder
+  original desta fase (que previa hold via `BookingStatus`), registrado explicitamente.
+- **Valor sempre do backend** — `Payment.amount` é copiado de `Booking.total` (já congelado desde a
+  Fase 4); o endpoint de criação nem aceita `amount`/`status`/`currency` do cliente.
+- **Cardinalidade 1—N tentativas, no máximo 1 `PAID`** — garantido por um índice único parcial
+  (`Payment_bookingId_single_paid`), mesma técnica do único-OWNER de arena (Fase 10). Evolui a
+  sugestão original de 1—1.
+- **Máquina de estados com um único estado não-terminal** (`PENDING`) — CAS condicionado a
+  `status: PENDING` (mesmo padrão do CAS de cancelamento, Fase 13) impede que qualquer evento
+  posterior reverta um estado já definitivo.
+- **Idempotência sem mecanismo novo** — mesma técnica "claim-first" de `IdempotencyKey`/
+  `WhatsAppEvent`, aplicada à própria tabela `Payment`. A chamada ao gateway acontece FORA de
+  qualquer transação Prisma (nunca finge que Postgres torna uma chamada HTTP externa atômica).
+- **Webhook nunca confia no próprio corpo** — sempre busca o status real de volta no provider antes
+  de aplicar qualquer transição.
+- **Integração com cancelamento**: Booking cancelada com Payment `PENDING` faz uma confirmação
+  `PAID` posterior virar `CANCELLED`, nunca `PAID`. Nenhum refund foi implementado.
+- **Gateway escolhido: Mercado Pago (PIX)** — sandbox sem CNPJ, webhook HMAC compatível com o
+  padrão já usado por Clerk/WhatsApp. Nenhuma integração real validada nesta fase — testado com
+  `FakePaymentProvider`.
+- **WhatsApp/IA nunca escrevem em `Payment`** — nenhuma intenção de pagamento foi adicionada ao
+  classificador do WhatsApp.
+- **Marketplace/split, assinatura recorrente, cartão armazenado, refund e pagamento completo pelo
+  WhatsApp continuam fora de escopo** — não implementados nesta fase.
+
+## Decisões da Fase 18
+
+- **Rate limiting pela primeira vez no produto** (`@nestjs/throttler`, em memória, por instância) —
+  limite padrão global (300/min por IP+rota, configurável) + limites dedicados fixos no código nos
+  endpoints mais sensíveis a abuso (IA, pagamentos, convites, reservas, disponibilidade, clientes,
+  relatórios). Webhooks e health check nunca são limitados por IP — assinatura + deduplicação já
+  garantem autenticidade. Decisão explícita de não introduzir Redis só para isto — limitação "em
+  memória, não distribuído" documentada, não escondida.
+- **Correlation ID sem dependência nova** — `X-Request-Id` gerado ou ecoado (só se já seguro para
+  log), propagado a qualquer service via `AsyncLocalStorage` nativo do Node. Nunca usado para
+  autenticação.
+- **Filtro global de exceções** — rede de segurança (nunca a primeira linha de defesa) que garante
+  que nenhum erro não previsto vaza stack trace/mensagem interna do Prisma; `HttpException`s já
+  intencionais passam inalteradas.
+- **`WEB_APP_URL` obrigatória em produção** — a API se recusa a subir em produção sem ela, em vez de
+  herdar silenciosamente o default de desenvolvimento.
+- **Security headers no backend via `helmet`** — registrado duas vezes deliberadamente (módulo +
+  `main.ts`) porque o CORS finaliza sozinho requisições de preflight antes de qualquer middleware de
+  módulo alcançá-las (achado real desta fase).
+- **Docker HEALTHCHECK nativo**, validado de verdade: imagem construída, container rodando contra
+  Postgres real, `docker inspect` confirmando `"healthy"`.
+- **Nenhuma funcionalidade de produto nova, nenhum deploy real, nenhuma credencial real criada** —
+  auditoria e hardening, não expansão de escopo.
 
 ## Git
 

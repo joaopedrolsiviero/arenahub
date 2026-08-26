@@ -17,6 +17,7 @@ import type {
   OperatingInterval,
   OperatingIntervalInput,
   OwnershipTransferResult,
+  PaymentView,
   PublicInvitation,
   ReportQuery,
   ReportResponse,
@@ -333,5 +334,30 @@ export const api = {
     if (params.to) query.set('to', params.to);
     const suffix = query.toString() ? `?${query.toString()}` : '';
     return request(`/arenas/${arenaId}/reports${suffix}`, { token });
+  },
+
+  // --- Fase 17: pagamentos (ciclo financeiro de "minhas reservas") ---
+
+  // Sem corpo — o backend nem aceita um (item 4 da Fase 17: valor e status
+  // vêm exclusivamente da Booking, nunca do cliente). Idempotency-Key
+  // obrigatória, mesmo padrão de `createBooking` (Fase 4).
+  createBookingPayment: (
+    token: string | null,
+    bookingId: string,
+    idempotencyKey: string,
+  ): Promise<PaymentView> =>
+    request(`/users/me/bookings/${bookingId}/payments`, {
+      token,
+      method: 'POST',
+      headers: { 'Idempotency-Key': idempotencyKey },
+    }),
+
+  // `null` quando a reserva nunca teve nenhuma tentativa de pagamento —
+  // nunca 404 (a Booking existe; só não há pagamento ainda).
+  getBookingPayment: async (token: string | null, bookingId: string): Promise<PaymentView | null> => {
+    const result = await request<Partial<PaymentView>>(`/users/me/bookings/${bookingId}/payment`, {
+      token,
+    });
+    return result.id ? (result as PaymentView) : null;
   },
 };

@@ -95,6 +95,17 @@ COPY --from=build --chown=node:node /repo/apps/api/prisma ./prisma
 USER node
 EXPOSE 3001
 
+# Fase 18 (item 11): HEALTHCHECK nativo do Docker — a imagem node:*-slim não
+# tem curl/wget, então usa o próprio Node (`node -e`, já disponível, nenhum
+# pacote novo). Chama SEMPRE /v1/health (liveness — nunca /v1/health/ready,
+# que depende do Postgres: um Postgres temporariamente fora do ar não deve
+# fazer o orquestrador achar que ESTE container travou e reiniciá-lo em
+# loop, mesma razão pela qual liveness e readiness são endpoints
+# diferentes, ver HealthController). `start-period` dá tempo do processo
+# subir (conectar ao Prisma) antes da primeira checagem contar como falha.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD ["node", "-e", "require('node:http').get({host:'127.0.0.1',port:process.env.PORT||3001,path:'/v1/health',timeout:4000}, (res) => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+
 # dist/src/main.js, não dist/main.js — o tsconfig não declara rootDir
 # explicitamente, e como prisma/seed.ts (fora de src/) também é compilado,
 # o TypeScript infere a raiz como a pasta do projeto inteiro, não src/,

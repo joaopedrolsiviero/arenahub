@@ -1,4 +1,4 @@
-# ArenaHub — Documento de Arquitetura Inicial (v0.16)
+# ArenaHub — Documento de Arquitetura Inicial (v0.18)
 
 > Status: **arquitetura geral aprovada**, em implementação incremental por fases (Fase 1 — Setup,
 > Fase 2 — Autenticação, Fase 3 — Arenas/Quadras, Fase 4 — Disponibilidade e Booking, Fase 5 —
@@ -6,17 +6,100 @@
 > Dashboard Operacional da Arena, Fase 8 — Hardening/Segurança/Robustez, Fase 10 — Gestão de
 > Membros/RBAC Operacional, Fase 11 — Convites de Equipe e Transferência Segura de Ownership,
 > Fase 12 — Assistente de IA Operacional, Fase 13 — Customer Booking Lifecycle, Fase 14 —
-> Customer & Arena Client Management, Fase 15 — Operational Reports & Analytics e Fase 16 —
-> WhatsApp + Assistente de Reservas Controlado já concluídas; Fase 9 — Deploy e Infraestrutura
-> preparada, GitHub/CI validados contra um runner real, deploy real no Railway bloqueado por custo
-> (Hobby plan pago) e Vercel/Clerk produção por falta de acesso — ver Roadmap e
+> Customer & Arena Client Management, Fase 15 — Operational Reports & Analytics, Fase 16 —
+> WhatsApp + Assistente de Reservas Controlado, Fase 17 — Pagamentos e Ciclo de Vida Financeiro e
+> Fase 18 — Production Readiness, Observabilidade e Hardening Final já concluídas; Fase 9 — Deploy e
+> Infraestrutura preparada, GitHub/CI validados contra um runner real, deploy real no Railway
+> bloqueado por custo (Hobby plan pago) e Vercel/Clerk produção por falta de acesso — ver Roadmap e
 > `docs/DEPLOYMENT.md`).
-> Esta revisão (v0.16) registra as decisões tomadas durante a Fase 16 — WhatsApp como novo canal de
-> atendimento pro cliente (disponibilidade, reservas, cancelamento, informações da arena), com a IA
-> usada estritamente para classificar intenção (nunca para responder ao cliente ou decidir
-> `arenaId`/`userId`/preço) e toda escrita reaproveitando `BookingsService`/`AvailabilityService` já
-> existentes — nenhuma segunda implementação do domínio. Este documento é a fonte de verdade da
-> arquitetura até que decisões aqui descritas sejam revisadas.
+> Esta revisão (v0.18) registra as decisões tomadas durante a Fase 18 — uma auditoria e hardening de
+> produção transversal (rate limiting, security headers, correlation ID, filtro global de exceções,
+> `trust proxy`, HEALTHCHECK do Docker, `WEB_APP_URL` obrigatória em produção), sem nenhuma
+> funcionalidade de produto nova. Este documento é a fonte de verdade da arquitetura até que decisões
+> aqui descritas sejam revisadas.
+
+---
+
+## Decisões revisadas na v0.18
+
+Resumo das mudanças desta revisão (Fase 18 — Production Readiness, Observabilidade e Hardening
+Final). Detalhe completo na seção "Fase 18" do Roadmap abaixo.
+
+1. **Rate limiting introduzido pela primeira vez** (`@nestjs/throttler`, em memória, por instância) —
+   decisão explícita de NÃO introduzir Redis só para isto (ver Parte "Redis" em
+   `docs/DEPLOYMENT.md`, Seção 2): a garantia é por instância, documentada como limitação conhecida,
+   não uma falsa promessa de garantia distribuída. Limite padrão global generoso + limites dedicados
+   fixos no código para os endpoints mais sensíveis a abuso (IA, pagamentos, convites, reservas,
+   disponibilidade, clientes, relatórios). Webhooks e health check nunca são limitados — a
+   autenticidade deles já vem de assinatura + deduplicação, nunca de limite de taxa por IP.
+2. **Correlation ID (`X-Request-Id`) implementado sem dependência nova** — `AsyncLocalStorage`
+   nativo do Node carrega o `requestId` por toda a árvore de chamadas assíncronas de uma requisição,
+   sem precisar injetar o `Request` do Express em nenhum service (`AiService`/`PaymentsService`
+   continuam puros). Reverte a decisão da v0.9 de não implementar isso ainda — na época não havia
+   pra onde correlacionar; agora, o log estruturado por requisição (item 3) é esse destino.
+3. **Log estruturado por requisição** (`LoggingInterceptor`, global) — uma linha por requisição HTTP
+   com método, rota (nunca query string — pode carregar PII), status, duração e `requestId`. Erros
+   4xx (tráfego normal do produto) logados em nível `log`; só 5xx vira `error`.
+4. **Filtro global de exceções** (`AllExceptionsFilter`) como rede de segurança — nunca a primeira
+   linha de defesa (cada service já trata os próprios erros esperados desde as fases anteriores),
+   mas garante que um erro não previsto nunca vaza stack trace ou mensagem interna do Prisma/driver.
+5. **`WEB_APP_URL` passou a ser obrigatória em produção** — antes tinha um default de desenvolvimento
+   (`http://localhost:3000`) que podia silenciosamente "vazar" para um deploy de produção mal
+   configurado. Agora o processo se recusa a subir em produção sem ela.
+6. **Security headers no backend via `helmet`** (defaults) — registrado tanto em
+   `AppModule.configure()` (para ficar ativo em todos os testes e2e) quanto em `main.ts` antes do
+   CORS (porque o middleware de CORS finaliza sozinho requisições de preflight antes delas
+   alcançarem o middleware a nível de módulo — achado real corrigido nesta fase).
+7. **`trust proxy` condicional em produção** — sem isso, o rate limiter (item 1) atrás do proxy da
+   plataforma trataria todo cliente como o mesmo IP.
+8. **Docker HEALTHCHECK nativo** (`node -e`, sem dependência nova) contra `/v1/health` (liveness,
+   nunca `/health/ready` — uma falha temporária do Postgres não deve fazer o orquestrador reiniciar
+   o container em loop).
+9. **Nenhuma vulnerabilidade nova de multi-tenant/IDOR/mass assignment encontrada** na auditoria
+   transversal desta fase sobre Pagamentos/Clientes/Relatórios (Fases 14/15/17) — a cobertura
+   existente desde a Fase 8 (`hardening.e2e-spec.ts`) e os specs dedicados de cada fase já
+   exercitavam isso.
+10. **Nenhum segredo real versionado encontrado** na auditoria de segredos desta fase (busca por
+    padrões de chave/token no repositório inteiro).
+11. **Roadmap não precisou ser renumerado** — "Fase 18" é a próxima entrada natural depois da Fase 17.
+
+---
+
+## Decisões revisadas na v0.17
+
+Resumo das mudanças desta revisão (Fase 17 — Pagamentos e Ciclo de Vida Financeiro). Detalhe
+completo na seção "Fase 17" do Roadmap abaixo.
+
+1. **Booking e Payment são conceitos diferentes, de propósito** — `Booking.status` continua só
+   `CONFIRMED`/`CANCELLED` (ocupação da quadra); `Payment.status` é um ciclo financeiro à parte
+   (`PENDING`/`PAID`/`FAILED`/`EXPIRED`/`CANCELLED`). Isso é um desvio deliberado do placeholder
+   original desta fase (que previa `BookingStatus` ganhando `PENDING`/`EXPIRED` como hold) —
+   registrado explicitamente, não silenciosamente.
+2. **Valor sempre do backend**: `Payment.amount` é copiado de `Booking.total` (já congelado desde a
+   Fase 4) — o endpoint de criação não aceita `amount`/`status`/`currency` do cliente (nem declara
+   um corpo aceito).
+3. **Cardinalidade evoluída conscientemente**: de "1—1, 0 ou 1 no MVP" (sugestão original da Parte 7,
+   pré-implementação) para "1—N tentativas, no máximo 1 `PAID`" — garantido por um índice único
+   parcial (`Payment_bookingId_single_paid`), mesma técnica do único-OWNER de arena (Fase 10).
+4. **Máquina de estados com um único estado não-terminal** (`PENDING`) — todos os outros são
+   definitivos, via CAS condicionado a `status: PENDING` (mesmo padrão do CAS de cancelamento da
+   Fase 13). Resolve webhooks fora de ordem sem depender da ordem real de chegada.
+5. **Idempotência sem mecanismo novo**: a mesma técnica "claim-first" de `IdempotencyKey`
+   (Fase 4)/`WhatsAppEvent` (Fase 16), aplicada à própria tabela `Payment`
+   (`@@unique([bookingId, idempotencyKey])`) — não uma segunda tabela. A chamada ao gateway
+   acontece FORA de qualquer transação Prisma.
+6. **Webhook nunca confia no próprio corpo** — sempre busca o status real de volta no provider pelo
+   `data.id` antes de aplicar qualquer transição (`PaymentProvider.getPaymentStatus`).
+7. **Integração com cancelamento**: Booking cancelada com Payment ainda `PENDING` faz uma
+   confirmação `PAID` posterior virar `CANCELLED`, nunca `PAID`. Nenhum refund foi implementado —
+   limitação documentada, não fingida.
+8. **Gateway escolhido: Mercado Pago (PIX)** — sandbox acessível sem CNPJ e assinatura de webhook
+   HMAC compatível com o padrão já usado por Clerk/WhatsApp. Nenhuma integração real validada nesta
+   fase (sem credenciais no ambiente) — testado com `FakePaymentProvider`.
+9. **WhatsApp/IA nunca escrevem em `Payment`** — nenhuma intenção de pagamento foi adicionada ao
+   classificador do WhatsApp; `PaymentsService` é exportado só para um consumidor futuro.
+10. **Roadmap não precisou ser renumerado** — "Fase 17 — Pagamentos" já ocupava esse número desde a
+    v0.15 (como placeholder); esta revisão substitui o placeholder pela implementação real.
 
 ---
 
@@ -1193,9 +1276,17 @@ declarado, sem margem implícita).
 relevante), `responseStatus`, `responseBody` (Json), `createdAt`. Unique `(userId, endpoint, key)`.
 Ver Parte 8 para a estratégia completa ("claim-first").
 
-**Payment** (schema pronto, não usado no MVP)
+**Payment** (implementado na Fase 17 — ver seção "Fase 17" do Roadmap para o desenho real e a
+justificativa completa; este parágrafo é o esboço ORIGINAL, pré-implementação, preservado como
+histórico)
 `id`, `bookingId`, `provider` (`ASAAS` | `MERCADO_PAGO`), `status`, `amount`, `method`,
 `externalId`, `paidAt`, `refundedAt`, `createdAt`.
+> **Atualização Fase 17**: o desenho real ficou mais próximo, mas não idêntico, a este esboço —
+> `provider` só tem `MERCADO_PAGO` (Asaas foi avaliado e descartado, ver relatório da fase), não
+> existe `method` (só PIX nesta fase) nem `externalId`/`refundedAt` (chamam-se
+> `providerPaymentId`/não existe refund), e ganhou `userId`/`arenaId` denormalizados,
+> `idempotencyKey`, `expiresAt` e `failureReason` — nenhum desses estava previsto aqui porque as
+> exigências de idempotência/multi-tenant/concorrência só ficaram claras com a fase real.
 
 **Notification** (schema pronto, uso mínimo no MVP — ex: e-mail de confirmação)
 `id`, `userId`, `channel` (`EMAIL` | `SMS` | `WHATSAPP` | `PUSH`), `type`, `payload` (JSON),
@@ -1209,7 +1300,8 @@ Ver Parte 8 para a estratégia completa ("claim-first").
 - `Court` 1—N `CourtOperatingHours`
 - `Court` 1—N `Booking`
 - `User` 1—N `Booking` (como cliente; nulo se for bloqueio administrativo)
-- `Booking` 1—1 `Payment` (opcional, 0 ou 1 no MVP)
+- `Booking` 1—N `Payment` (tentativas; no máximo 1 `PAID` por Booking — implementado na Fase 17,
+  ver nota acima; o esboço original desta linha previa 1—1)
 - `User` 1—N `Notification`
 
 ### Índices e constraints importantes
@@ -2556,17 +2648,154 @@ testar em cada uma — mas a definição geral vale para todas.
   mutam o banco. Nenhum teste pré-existente foi removido ou reescrito. Ver relatório da fase para a
   lista completa.
 
-### Fase 17 — Pagamentos
-- **Objetivo:** cobrar pela reserva (PIX/cartão) via Asaas ou Mercado Pago.
-- **Funcionalidades:** ativar um fluxo `PENDING` com hold + expiração (`BookingStatus` ganha
-  `PENDING`/`EXPIRED` — ver Parte 7), integração de checkout, webhook de confirmação de pagamento
-  assinado, reembolso em cancelamento.
-- **Dependências:** Fase 4 (o `Booking` já existe desde lá) + Fase 9 (produção estável para
-  webhooks externos).
-- **Critério de conclusão:** reserva só vira `CONFIRMED` após pagamento aprovado via webhook; holds
-  abandonados expiram automaticamente e liberam o horário (coberto por teste de integração com o job
-  de expiração do BullMQ). Teste confirmando rejeição de webhook com assinatura inválida e
-  idempotência do processamento do webhook (reenvio do mesmo evento não gera cobrança duplicada).
+### Fase 17 — Pagamentos e Ciclo de Vida Financeiro ✅ concluída
+- **Objetivo:** dar a uma Booking CUSTOMER um ciclo financeiro próprio (`Payment`), separado do
+  ciclo operacional (`Booking.status`) — cliente inicia o pagamento (PIX), o provider confirma via
+  webhook, tudo idempotente/multi-tenant/seguro contra concorrência.
+- **Desvio deliberado do placeholder original desta seção (registrado explicitamente, não
+  silenciosamente)**: a v0.1 previa `BookingStatus` ganhando `PENDING`/`EXPIRED` (um fluxo de
+  "hold" — a reserva só existiria de fato depois do pagamento). A Fase 17 real fez o OPOSTO,
+  seguindo uma regra explícita do prompt da fase ("nunca transforme Booking.status em status de
+  pagamento"): a Booking continua sendo criada e ocupando a quadra exatamente como desde a Fase 4
+  (`CONFIRMED` imediato, protegida pelo mesmo lock/EXCLUDE constraint), e o pagamento é um registro
+  financeiro BOLT-ON sobre uma Booking que já existe — nunca um portão antes dela existir. Native
+  hold-based payment (reserva só é criada depois de aprovado) fica como possível evolução futura,
+  não implementada aqui.
+- **Fonte única de verdade do valor**: `Payment.amount` é copiado de `Booking.total` (já congelado
+  desde a Fase 4) no momento da criação do Payment — o cliente não tem nenhum campo pra enviar
+  `amount`/`status`/`currency`/`providerPaymentId` (o endpoint de criação nem declara um corpo
+  aceito, a defesa mais forte possível contra mass assignment: não existe nada pra ler).
+- **Modelo financeiro** (`Payment`, nova model): `id`, `bookingId`, `userId`, `arenaId` (os dois
+  últimos DENORMALIZADOS deliberadamente — nunca só deriváveis via `booking.userId`/
+  `booking.court.arenaId` — para que o webhook e consultas administrativas nunca dependam de um
+  JOIN até `Booking`→`Court` pra provar isolamento multi-tenant; risco de inconsistência é nulo, os
+  dois valores são copiados da mesma Booking na criação e nunca mudam depois), `amount`
+  (`Decimal(10,2)`, nunca float — mesmo padrão de `Booking.total`), `currency` (sempre `"BRL"`
+  nesta fase), `status`, `provider`, `providerPaymentId` (`@unique` quando não nulo), `idempotencyKey`,
+  `failureReason`, `paidAt`, `expiresAt`, `createdAt`/`updatedAt`.
+- **Cardinalidade evoluída conscientemente**: a Parte 7 original (pré-implementação) sugeria
+  `Booking` 1—1 `Payment` (0 ou 1 no MVP). A Fase 17 real implementa `Booking` 1—N `Payment`
+  (tentativas — permite retry após `FAILED`/`EXPIRED` sem duplicar cobrança efetiva), mas no
+  MÁXIMO um `PAID` por Booking — garantido por um índice único parcial no Postgres
+  (`Payment_bookingId_single_paid`, `WHERE status = 'PAID'`), mesma técnica já usada pro
+  único-OWNER de arena (Fase 10) e a EXCLUDE constraint de Booking (Fase 4). Uma tentativa
+  `PENDING` ativa (não expirada) pra mesma Booking é reaproveitada — nunca duas cobranças abertas
+  em paralelo.
+- **Máquina de estados**: `PENDING` é o ÚNICO estado não-terminal.
+  `PAID`/`FAILED`/`EXPIRED`/`CANCELLED` são todos terminais e imutáveis — CAS condicionado a
+  `status: PENDING` (mesmo padrão do CAS de cancelamento da Fase 13) garante que nenhum evento
+  posterior (webhook fora de ordem, reenvio duplicado) reverta um estado já definitivo. Expiração
+  (PIX, 30 min) é avaliada em tempo de leitura, mesmo padrão de `ArenaInvitation.expiresAt`
+  (Fase 11) — nunca um job/cron.
+- **Idempotência sem mecanismo novo**: reaproveita a MESMA técnica "claim-first" já estabelecida em
+  `IdempotencyKey` (Fase 4)/`WhatsAppEvent` (Fase 16), aplicada diretamente à própria tabela
+  `Payment` (via `@@unique([bookingId, idempotencyKey])`) em vez de uma segunda tabela — decisão
+  registrada porque `IdempotencyService.execute()` embrulha tudo numa única transação Prisma, e a
+  chamada ao gateway de pagamento é uma chamada HTTP externa que nunca deveria ficar dentro de uma
+  transação de banco (ver Seção 24 do prompt da fase). Concorrência na CRIAÇÃO é resolvida por
+  `pg_advisory_xact_lock(hashtext(bookingId))`, mesmo padrão já usado por
+  `BookingsService.createBooking` pra `courtId` (Fase 4).
+- **Webhook nunca confia no próprio corpo**: `POST /v1/webhooks/payments/mercadopago` exige
+  assinatura válida (`X-Signature`/`X-Request-Id`, HMAC-SHA256, mesma disciplina do Clerk/WhatsApp)
+  e, mesmo depois de aceito, NUNCA aplica o `status` que a notificação alega — sempre busca o
+  status real de volta na API do provider pelo `data.id` antes de qualquer mudança de estado
+  (`PaymentProvider.getPaymentStatus`). Deduplicado por `PaymentWebhookEvent` (nova model, mesma
+  técnica "claim-first").
+- **Dois endpoints novos, aninhados sob "minhas reservas" (Fase 6)**:
+  `POST /v1/users/me/bookings/:bookingId/payments` (inicia/retoma uma tentativa, Idempotency-Key
+  obrigatória, mesmo padrão da criação de Booking) e
+  `GET /v1/users/me/bookings/:bookingId/payment` (consulta o estado atual, `null` se nunca houve
+  tentativa). Reaproveita `BookingsService.findMyBookingDetail` (já exportado desde a Fase 16) pra
+  toda checagem de existência/ownership/tipo — `BLOCK`/`MAINTENANCE` nunca geram Payment porque
+  esse método já filtra `type: CUSTOMER`, estruturalmente, sem nenhuma checagem extra.
+- **Integração com cancelamento (Fase 13)**: se a Booking for cancelada enquanto um Payment ainda
+  está `PENDING`, uma confirmação `PAID` que chegue depois nunca é aplicada — vira `CANCELLED`
+  (`failureReason: BOOKING_CANCELLED_BEFORE_PAYMENT`). **Nenhum refund foi implementado** (fora de
+  escopo explícito do prompt) — uma Booking já paga e depois cancelada mantém o `Payment` como
+  `PAID` (histórico correto de que o dinheiro entrou); qualquer devolução real é limitação
+  documentada, não fingida.
+- **WhatsApp (Fase 16) e IA (Fase 12) nunca escrevem em `Payment`**: nenhuma intenção de
+  pagamento foi adicionada ao classificador do WhatsApp (`WhatsAppIntentService` continua com as
+  mesmas 9 intenções da Fase 16); `PaymentsService` é exportado de `PaymentsModule` só para um
+  consumidor futuro reaproveitar (nunca importado por `WhatsAppModule` nesta fase) — preparar a
+  arquitetura, não implementar pagamento pelo WhatsApp.
+- **Gateway escolhido**: Mercado Pago (PIX) — ver auditoria completa na entrada do relatório da
+  fase; decisivo foi sandbox acessível sem CNPJ e um esquema de assinatura de webhook que mapeia
+  diretamente no mesmo padrão HMAC já usado por Clerk/WhatsApp. Nenhuma integração real foi
+  validada nesta fase (sem credenciais no ambiente) — testado inteiramente com
+  `FakePaymentProvider`. Ver `docs/DEPLOYMENT.md`, "Pagamentos", para o que falta antes de produção.
+- **Explicitamente fora de escopo** (conforme o prompt): marketplace/split, assinatura recorrente,
+  cartão armazenado, refund, pagamento completo pelo WhatsApp, cartão de crédito (só PIX nesta
+  fase).
+- **Dependências:** Fase 4 (`Booking`, `Idempotency-Key`, lock por quadra, EXCLUDE constraint),
+  Fase 6 ("minhas reservas", frontend), Fase 10 (índice único parcial, técnica reaproveitada),
+  Fase 11 (expiração em tempo de leitura), Fase 13 (CAS de cancelamento), Fase 16
+  (`BookingsService.findMyBookingDetail` exportado, convenção de webhook assinado).
+- **Critério de conclusão:** testes unitários e e2e novos cobrindo criação (válida, Booking
+  inexistente/alheia/cancelada, BLOCK, mass assignment, idempotência), webhook (assinatura
+  válida/inválida/ausente, evento desconhecido/duplicado/fora de ordem, `PAID` terminal),
+  concorrência real (duas criações simultâneas, duas confirmações `PAID` simultâneas, `PAID`+
+  `FAILED` simultâneos, cancelamento durante pagamento), multi-tenant e IDOR. Nenhum teste
+  pré-existente foi removido ou reescrito. Ver relatório da fase para os números reais.
+
+---
+
+### Fase 18 — Production Readiness, Observabilidade e Hardening Final ✅ concluída
+- **Objetivo:** auditar e endurecer o ArenaHub para um primeiro deploy real (Vercel + Railway +
+  Postgres gerenciado), sem adicionar nenhuma funcionalidade de produto nova. Pergunta central:
+  "que problema de segurança/observabilidade/configuração/confiabilidade ainda pode quebrar o
+  sistema em produção?"
+- **Rate limiting pela primeira vez no produto** (`@nestjs/throttler`, registrado globalmente via
+  `APP_GUARD`): limite padrão (`RATE_LIMIT_MAX`/`RATE_LIMIT_WINDOW_MS`, default 300/min por IP+rota)
+  para qualquer rota sem override, e limites dedicados fixos no código — não configuráveis por env
+  var, decisão de segurança — nos endpoints mais caros/sensíveis a abuso: IA (`ask`, 30/min),
+  criação de pagamento (30/min), criação/cancelamento de reserva (100/min cada), criação de convite
+  (20/min), resend de convite (10/min), clientes (100/min), relatórios (60/min), disponibilidade
+  (200/min). `@SkipThrottle()` explícito nos três webhooks (Clerk/WhatsApp/Mercado Pago) e no health
+  check — nunca dependem de limite por IP. Em memória, por instância — decisão deliberada de não
+  introduzir Redis só para isto (mesmo raciocínio da não-adoção de Redis desde a Fase 1); limitação
+  documentada, não escondida.
+- **Correlation ID sem dependência nova**: `requestIdMiddleware` (registrado via
+  `AppModule.configure`, não `app.use()` solto em `main.ts` — para ficar ativo também nos testes
+  e2e) gera ou ecoa (só se já for seguro para log) um `X-Request-Id`, devolvido no header de
+  resposta e propagado a qualquer service via `AsyncLocalStorage` nativo do Node
+  (`RequestContext.getRequestId()`). Nunca usado para autenticação.
+- **`LoggingInterceptor` global**: uma linha de log por requisição HTTP (método, rota sem query
+  string, status, duração, `requestId`); 4xx em nível `log` (tráfego normal do produto), só 5xx em
+  `error`.
+- **`AllExceptionsFilter` global**: rede de segurança, nunca a primeira linha de defesa. Mapeia
+  `Prisma.PrismaClientKnownRequestError` não tratado (`P2025`→404, `P2002`→409, resto→500) e
+  qualquer outro erro não previsto para uma mensagem genérica — nunca vaza stack trace/mensagem de
+  driver. `HttpException`s já intencionais (a maioria dos erros do app) passam inalteradas.
+- **`WEB_APP_URL` obrigatória em produção**: `assertProductionSafety()` (`main.ts`) recusa o boot em
+  produção sem essa variável — antes, o default de desenvolvimento (`localhost:3000`) podia
+  silenciosamente virar a configuração real de um deploy mal feito.
+- **Security headers no backend** (`helmet`, defaults) — registrado duas vezes deliberadamente (ver
+  decisão 6 acima) para também cobrir requisições de preflight CORS. CORS em si ganhou
+  normalização de origens (`trim`) e métodos declarados explicitamente.
+- **`trust proxy` condicional em produção** — necessário para o rate limiting funcionar corretamente
+  atrás do proxy da plataforma de deploy.
+- **Docker HEALTHCHECK nativo** (Node puro, sem `curl`/`wget`) contra `/v1/health` — validado de
+  verdade nesta fase (build real da imagem, container rodando contra Postgres real,
+  `docker inspect` confirmando `"Status":"healthy"`).
+- **Permissions-Policy no frontend** (`camera=(), microphone=(), geolocation=()`) — não tem o mesmo
+  risco de quebrar Clerk/Next que CSP teria, então foi adicionado sem a mesma ressalva.
+- **Auditoria transversal sem vulnerabilidade nova**: multi-tenant/IDOR/mass assignment revisados
+  nos módulos de Pagamentos/Clientes/Relatórios (Fases 14/15/17) — a cobertura de testes já
+  existente (Fase 8 `hardening.e2e-spec.ts` + specs dedicados de cada fase) já exercitava isso
+  corretamente; nenhuma correção de segurança foi necessária.
+- **Auditoria de segredos**: busca por padrões de chave/token (Clerk, OpenAI, Mercado Pago,
+  WhatsApp, AWS, GitHub, chaves privadas) no repositório inteiro — nenhum segredo real versionado
+  encontrado.
+- **Explicitamente fora de escopo** (conforme o prompt): nenhuma funcionalidade de produto nova,
+  nenhum deploy real, nenhuma credencial real criada, nenhuma integração real com OpenAI/Mercado
+  Pago/Meta exercitada (permanecem pendentes de credenciais, ver Fases 12/16/17).
+- **Dependências novas**: `@nestjs/throttler` e `helmet` (backend) — ambas justificadas por um
+  requisito concreto desta fase, nenhuma adicionada preventivamente.
+- **Critério de conclusão:** testes novos cobrindo rate limiting (e2e, com concorrência real via
+  `Promise.all`), security headers, X-Request-Id (unitário + e2e), e o filtro global de exceções
+  (unitário, incluindo o mapeamento de erros do Prisma). Nenhum teste pré-existente foi removido ou
+  enfraquecido. Ver relatório da fase para os números reais.
 
 ---
 
@@ -2614,8 +2843,42 @@ testar em cada uma — mas a definição geral vale para todas.
   `FakeWhatsAppProvider` (unitário e e2e); antes de produção, validar manualmente o handshake do
   webhook, o envio real de mensagens e o formato exato do payload contra a Cloud API real (ver
   `docs/DEPLOYMENT.md`, "Canal de WhatsApp").
-- **Acoplamento prematuro a um gateway de pagamento** — mitigado por manter `Payment` no schema mas
-  fora do fluxo até a Fase 17, evitando reescrever o fluxo de reserva quando o pagamento chegar.
+- **Acoplamento a um gateway de pagamento específico** — mitigado desde a Fase 17 por `PaymentProvider`
+  (abstração, mesmo padrão de `AiProvider`/`WhatsAppProvider`) — trocar de Mercado Pago para outro
+  gateway é implementar uma nova classe e trocar o `useClass` em `PaymentsModule`, sem tocar em
+  `PaymentsService`/controllers/frontend. Reescrever o fluxo de reserva nunca foi necessário: a
+  Booking continua sendo criada e ocupando a quadra exatamente como desde a Fase 4, o pagamento é
+  bolt-on sobre uma Booking que já existe.
+- **Pagamento confirmado depois que a reserva foi cancelada** — mitigado desde a Fase 17: o webhook
+  sempre rechecha o status atual da Booking antes de aplicar `PAID`, e uma Booking `CANCELLED`
+  nunca deixa um Payment virar `PAID` (vira `CANCELLED` em vez disso). Refund não implementado —
+  limitação documentada (`docs/DEPLOYMENT.md`, "Pagamentos"), nunca fingida.
+- **Webhook de pagamento processado fora de ordem ou duplicado corrompendo o estado financeiro** —
+  mitigado desde a Fase 17 por uma máquina de estados com um único estado não-terminal (`PENDING`)
+  e CAS condicionado a ele (mesmo padrão do CAS de cancelamento da Fase 13), mais deduplicação de
+  evento (`PaymentWebhookEvent`, mesma técnica do `WhatsAppEvent` da Fase 16). Validado com
+  concorrência real (`Promise.all` de webhooks simultâneos contra Postgres real).
+- **Pagamento real com o Mercado Pago nunca foi exercitado neste ambiente** — toda a integração foi
+  validada com `FakePaymentProvider` (unitário e e2e); antes de produção, validar manualmente uma
+  cobrança PIX de ponta a ponta com credenciais de sandbox (ver `docs/DEPLOYMENT.md`, "Pagamentos").
+- **Rate limiting em memória não é uma garantia distribuída** — introduzido na Fase 18
+  (`@nestjs/throttler`); o contador vive no processo, então múltiplas instâncias rodando em paralelo
+  multiplicam o limite efetivo por usuário. Aceitável para uma primeira implantação single-instance;
+  se o produto crescer para múltiplas réplicas, o storage do throttler precisa migrar para um
+  backend compartilhado (Redis, já provisionado no `docker-compose.yml` mas sem uso em produção
+  hoje) antes de confiar nesses limites como proteção real — documentado, não escondido (ver
+  `docs/DEPLOYMENT.md`, Seção 5.1).
+- **Middleware a nível de módulo não cobre requisições de preflight CORS** — achado real na Fase 18:
+  o middleware de CORS finaliza sozinho toda requisição `OPTIONS` antes dela alcançar qualquer
+  middleware registrado via `NestModule.configure()`, então `helmet` "ativo" ainda deixava
+  `X-Powered-By: Express` vazar em respostas de preflight. Corrigido registrando `helmet()` também
+  diretamente em `main.ts`, antes de `enableCors()` — relevante para qualquer middleware futuro que
+  precise cobrir literalmente toda resposta, inclusive preflight.
+- **Endpoints sem limite de taxa até a Fase 18** — de Fase 1 até Fase 17, nenhum endpoint tinha
+  qualquer proteção contra abuso por volume além de autenticação/autorização; mitigado na Fase 18
+  com `@nestjs/throttler` (ver decisão 1 da v0.18) — risco de abuso por script/scraping
+  significativamente reduzido, mas nunca eliminado (rate limiting é mitigação, não prevenção
+  absoluta), e a limitação de "em memória" (item acima) permanece.
 - **Listagem de clientes virando N+1 conforme a arena cresce** — mitigado desde a Fase 14 por
   agregação via `groupBy` (Postgres), sempre delimitada pela página atual, nunca uma query por
   cliente nem o histórico inteiro de reservas da arena carregado em memória.

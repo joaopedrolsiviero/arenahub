@@ -1,6 +1,11 @@
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { BookingDetail } from './page';
-import { useMyBooking, useCancelBooking } from '../../../hooks/use-api';
+import {
+  useMyBooking,
+  useCancelBooking,
+  useBookingPayment,
+  useCreateBookingPayment,
+} from '../../../hooks/use-api';
 import { ApiError } from '../../../lib/api';
 
 const push = jest.fn();
@@ -14,10 +19,14 @@ jest.mock('next/navigation', () => ({
 jest.mock('../../../hooks/use-api', () => ({
   useMyBooking: jest.fn(),
   useCancelBooking: jest.fn(),
+  useBookingPayment: jest.fn(),
+  useCreateBookingPayment: jest.fn(),
 }));
 
 const mockedUseMyBooking = useMyBooking as jest.Mock;
 const mockedUseCancelBooking = useCancelBooking as jest.Mock;
+const mockedUseBookingPayment = useBookingPayment as jest.Mock;
+const mockedUseCreateBookingPayment = useCreateBookingPayment as jest.Mock;
 
 const booking = {
   id: 'booking-1',
@@ -35,12 +44,19 @@ const booking = {
 
 describe('BookingDetail', () => {
   let mutateAsync: jest.Mock;
+  let createPaymentMutateAsync: jest.Mock;
 
   beforeEach(() => {
     jest.clearAllMocks();
     searchParamsValue = new URLSearchParams();
     mutateAsync = jest.fn();
     mockedUseCancelBooking.mockReturnValue({ mutateAsync, isPending: false });
+    createPaymentMutateAsync = jest.fn();
+    mockedUseBookingPayment.mockReturnValue({ data: null, isPending: false, isError: false });
+    mockedUseCreateBookingPayment.mockReturnValue({
+      mutateAsync: createPaymentMutateAsync,
+      isPending: false,
+    });
   });
 
   it('mostra os dados da reserva', () => {
@@ -122,5 +138,127 @@ describe('BookingDetail', () => {
     render(<BookingDetail bookingId="booking-inexistente" />);
 
     expect(screen.getByRole('alert')).toHaveTextContent(/não encontrada/i);
+  });
+
+  describe('Seção de pagamento (Fase 17)', () => {
+    const payment = {
+      id: 'payment-1',
+      bookingId: 'booking-1',
+      status: 'PENDING',
+      amount: '100',
+      currency: 'BRL',
+      checkoutUrl: 'https://mp.example/checkout',
+      pixCopyPaste: '00020126-fake-pix',
+      failureReason: null,
+      paidAt: null,
+      expiresAt: '2026-09-07T13:30:00.000Z',
+      createdAt: '2026-09-07T13:00:00.000Z',
+    };
+
+    it('sem nenhum pagamento ainda, mostra "Pagar com PIX"', () => {
+      mockedUseMyBooking.mockReturnValue({ data: booking, isPending: false, isError: false });
+      mockedUseBookingPayment.mockReturnValue({ data: null, isPending: false, isError: false });
+
+      render(<BookingDetail bookingId="booking-1" />);
+
+      expect(screen.getByText('Esta reserva ainda não foi paga.')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Pagar com PIX' })).toBeInTheDocument();
+    });
+
+    it('clicar em "Pagar com PIX" dispara a mutation com uma Idempotency-Key nova', async () => {
+      mockedUseMyBooking.mockReturnValue({ data: booking, isPending: false, isError: false });
+      mockedUseBookingPayment.mockReturnValue({ data: null, isPending: false, isError: false });
+      createPaymentMutateAsync.mockResolvedValue(payment);
+
+      render(<BookingDetail bookingId="booking-1" />);
+      fireEvent.click(screen.getByRole('button', { name: 'Pagar com PIX' }));
+
+      await waitFor(() => expect(createPaymentMutateAsync).toHaveBeenCalledTimes(1));
+      expect(typeof createPaymentMutateAsync.mock.calls[0][0]).toBe('string');
+    });
+
+    it('PENDING mostra o código PIX copia e cola e o prazo de expiração — nunca edita o valor', () => {
+      mockedUseMyBooking.mockReturnValue({ data: booking, isPending: false, isError: false });
+      mockedUseBookingPayment.mockReturnValue({ data: payment, isPending: false, isError: false });
+
+      render(<BookingDetail bookingId="booking-1" />);
+
+      expect(screen.getByText('Aguardando pagamento')).toBeInTheDocument();
+      const pixInput = screen.getByLabelText('Código PIX copia e cola') as HTMLInputElement;
+      expect(pixInput).toHaveValue('00020126-fake-pix');
+      expect(pixInput).toHaveAttribute('readonly');
+      // O valor exibido é sempre o do backend — não há nenhum campo editável.
+      expect(screen.getAllByText('R$ 100,00').length).toBeGreaterThan(0);
+    });
+
+    it('PAID mostra confirmação e data de pagamento, sem botão de pagar', () => {
+      mockedUseMyBooking.mockReturnValue({ data: booking, isPending: false, isError: false });
+      mockedUseBookingPayment.mockReturnValue({
+        data: { ...payment, status: 'PAID', paidAt: '2026-09-07T13:05:00.000Z' },
+        isPending: false,
+        isError: false,
+      });
+
+      render(<BookingDetail bookingId="booking-1" />);
+
+      expect(screen.getByText('Pago')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /pagar/i })).not.toBeInTheDocument();
+    });
+
+    it('FAILED mostra "Tentar pagar novamente"', () => {
+      mockedUseMyBooking.mockReturnValue({ data: booking, isPending: false, isError: false });
+      mockedUseBookingPayment.mockReturnValue({
+        data: { ...payment, status: 'FAILED', failureReason: 'insufficient_funds', pixCopyPaste: null },
+        isPending: false,
+        isError: false,
+      });
+
+      render(<BookingDetail bookingId="booking-1" />);
+
+      expect(screen.getByText('Pagamento recusado')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Tentar pagar novamente' })).toBeInTheDocument();
+    });
+
+    it('CANCELLED explica que a tentativa foi cancelada junto com a reserva, sem botão de pagar', () => {
+      mockedUseMyBooking.mockReturnValue({
+        data: { ...booking, status: 'CANCELLED' },
+        isPending: false,
+        isError: false,
+      });
+      mockedUseBookingPayment.mockReturnValue({
+        data: { ...payment, status: 'CANCELLED', pixCopyPaste: null },
+        isPending: false,
+        isError: false,
+      });
+
+      render(<BookingDetail bookingId="booking-1" />);
+
+      expect(screen.getByText(/cancelada porque a reserva foi cancelada/i)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /pagar/i })).not.toBeInTheDocument();
+    });
+
+    it('reserva cancelada e nunca paga: seção financeira nem aparece', () => {
+      mockedUseMyBooking.mockReturnValue({
+        data: { ...booking, status: 'CANCELLED' },
+        isPending: false,
+        isError: false,
+      });
+      mockedUseBookingPayment.mockReturnValue({ data: null, isPending: false, isError: false });
+
+      render(<BookingDetail bookingId="booking-1" />);
+
+      expect(screen.queryByText('Pagamento')).not.toBeInTheDocument();
+    });
+
+    it('erro ao iniciar pagamento mostra mensagem amigável, nunca finge sucesso', async () => {
+      mockedUseMyBooking.mockReturnValue({ data: booking, isPending: false, isError: false });
+      mockedUseBookingPayment.mockReturnValue({ data: null, isPending: false, isError: false });
+      createPaymentMutateAsync.mockRejectedValue(new ApiError(409, 'Esta reserva já está paga.'));
+
+      render(<BookingDetail bookingId="booking-1" />);
+      fireEvent.click(screen.getByRole('button', { name: 'Pagar com PIX' }));
+
+      expect(await screen.findByText('Esta reserva já está paga.')).toBeInTheDocument();
+    });
   });
 });

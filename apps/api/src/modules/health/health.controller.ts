@@ -1,4 +1,5 @@
 import { Controller, Get, ServiceUnavailableException } from '@nestjs/common';
+import { SkipThrottle } from '@nestjs/throttler';
 import { PrismaService } from '../../prisma/prisma.service';
 
 interface LivenessResponse {
@@ -19,6 +20,13 @@ interface ReadinessResponse extends LivenessResponse {
 // exige autenticação (a plataforma de deploy não tem um token do Clerk pra
 // oferecer), e nenhuma vaza detalhe interno — nem mensagem de erro do
 // driver/Prisma, nem DATABASE_URL, nem stack trace.
+// Fase 18 (item 4/10): a plataforma de deploy chama /health e /health/ready
+// com muito mais frequência do que qualquer limite razoável de rate
+// limiting permitiria (ex: a cada poucos segundos) — nunca pode ser
+// throttled, ou o próprio healthcheck da plataforma passaria a falhar
+// esporadicamente e derrubar/reiniciar a aplicação por um motivo que nada
+// tem a ver com a saúde real dela.
+@SkipThrottle()
 @Controller('health')
 export class HealthController {
   constructor(private readonly prisma: PrismaService) {}

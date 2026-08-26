@@ -341,3 +341,28 @@ export interface ReportResponse {
   demand: ReportDemand;
   busiestDays: { date: string; count: number }[];
 }
+
+// Fase 17 — ciclo financeiro de uma Booking CUSTOMER, deliberadamente
+// separado do ciclo operacional (BookingStatus, acima, nunca alterado por
+// pagamento). PENDING é o único estado não-terminal — todos os outros são
+// definitivos (ver docs/ARCHITECTURE.md, Fase 17).
+export type PaymentStatus = 'PENDING' | 'PAID' | 'FAILED' | 'EXPIRED' | 'CANCELLED';
+
+// Nunca inclui `providerPaymentId`/`idempotencyKey` (IDs internos do
+// gateway/da requisição — o backend já não os expõe, ver
+// PaymentsService.PaymentView).
+export interface PaymentView {
+  id: string;
+  bookingId: string;
+  status: PaymentStatus;
+  // Decimal do Prisma serializa como string em JSON — mesmo padrão de
+  // `Booking.total`/`Court.pricePerSlot` (nunca tratar como number direto).
+  amount: string;
+  currency: string;
+  checkoutUrl: string | null;
+  pixCopyPaste: string | null;
+  failureReason: string | null;
+  paidAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+}

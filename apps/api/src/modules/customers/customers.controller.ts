@@ -1,4 +1,5 @@
 import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { ArenaRole } from '@prisma/client';
 import { ClerkAuthGuard } from '../auth/clerk-auth.guard';
 import { ArenaAccessGuard } from '../arena-members/arena-access.guard';
@@ -17,6 +18,11 @@ import { ListCustomersQueryDto } from './dto/list-customers-query.dto';
 // ArenaMember, então já ficaria de fora de qualquer forma, mas a intenção
 // fica explícita). Reaproveita ClerkAuthGuard/ArenaAccessGuard sem
 // modificação — nenhum sistema de autorização novo.
+// Fase 18 (item 4): consultas de clientes tocam PII (nome, telefone,
+// histórico) — limite dedicado moderado (bem acima do uso real de um
+// dashboard humano, que nunca pagina 100x/min) para dificultar scraping em
+// massa de dados de clientes por uma sessão comprometida.
+@Throttle({ default: { limit: 100, ttl: 60_000 } })
 @Controller('arenas/:arenaId/customers')
 @UseGuards(ClerkAuthGuard, ArenaAccessGuard)
 @RequireArenaRole(ArenaRole.OWNER, ArenaRole.ADMIN)
