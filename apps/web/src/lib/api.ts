@@ -63,7 +63,20 @@ async function request<T>(path: string, options: RequestOptions): Promise<T> {
   if (response.status === 204) {
     return undefined as T;
   }
-  return (await response.json()) as T;
+  // Fase 23 — bug real encontrado em produção: um controller que retorna
+  // `null` (ex: GET .../payment sem nenhuma tentativa ainda) faz o Nest
+  // devolver um corpo LITERALMENTE VAZIO (Content-Length: 0), não a string
+  // JSON "null" nem "{}" — `response.json()` lança `SyntaxError: Unexpected
+  // end of JSON input` num fetch real de navegador (supertest, usado nos
+  // testes e2e do backend, mascarava isso: `response.body` cai pra `{}`
+  // sozinho quando o texto é vazio, então o teste nunca pegou isso). Lendo
+  // como texto primeiro e tratando vazio como `null` evita esse throw sem
+  // precisar mudar o contrato do backend.
+  const text = await response.text();
+  if (!text) {
+    return null as T;
+  }
+  return JSON.parse(text) as T;
 }
 
 async function extractErrorMessage(response: Response): Promise<string> {
@@ -353,11 +366,14 @@ export const api = {
     }),
 
   // `null` quando a reserva nunca teve nenhuma tentativa de pagamento —
-  // nunca 404 (a Booking existe; só não há pagamento ainda).
+  // nunca 404 (a Booking existe; só não há pagamento ainda). Depois do
+  // fix da Fase 23, `request()` já devolve `null` puro nesse caso (corpo
+  // vazio do backend) — `result?.id` cobre tanto isso quanto qualquer
+  // objeto parcial inesperado.
   getBookingPayment: async (token: string | null, bookingId: string): Promise<PaymentView | null> => {
-    const result = await request<Partial<PaymentView>>(`/users/me/bookings/${bookingId}/payment`, {
+    const result = await request<Partial<PaymentView> | null>(`/users/me/bookings/${bookingId}/payment`, {
       token,
     });
-    return result.id ? (result as PaymentView) : null;
+    return result?.id ? (result as PaymentView) : null;
   },
 };

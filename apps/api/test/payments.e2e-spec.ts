@@ -416,7 +416,7 @@ describe('Pagamentos (e2e)', () => {
   });
 
   describe('Consulta (GET /payment)', () => {
-    it('sem nenhuma tentativa, devolve corpo vazio (null)', async () => {
+    it('sem nenhuma tentativa, devolve corpo REALMENTE vazio (Content-Length 0) — bug real corrigido no client na Fase 23', async () => {
       const booking = await createConfirmedBooking(courtAId, customerAId, 33);
 
       const response = await request(app.getHttpServer())
@@ -424,6 +424,14 @@ describe('Pagamentos (e2e)', () => {
         .set(...authHeader('token-customer-a'))
         .expect(200);
 
+      // Checagem explícita do texto cru, não de `response.body` — o
+      // supertest normaliza um corpo vazio/não-parseável pra `{}` sozinho,
+      // o que mascarou por meses o fato de que o Nest devolve um corpo
+      // LITERALMENTE vazio pra um controller que retorna `null` (nunca a
+      // string JSON "null"). Um `fetch().json()` real de navegador lança
+      // `SyntaxError` nesse caso — corrigido no client (`apps/web/src/lib/api.ts`,
+      // `request()` agora lê `.text()` antes de fazer `JSON.parse`).
+      expect(response.text).toBe('');
       expect(response.body).toEqual({});
     });
 
