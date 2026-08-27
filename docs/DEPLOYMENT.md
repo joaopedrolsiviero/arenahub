@@ -3,20 +3,19 @@
 > Companheiro de `docs/ARCHITECTURE.md` (v0.18) — este documento é operacional
 > (como implantar e operar), não arquitetural (por que o sistema é como é).
 >
-> **Status honesto desta fase**: tudo que podia ser preparado e validado
-> *dentro deste repositório* foi preparado e validado de verdade (build real
-> da imagem Docker, container rodando contra Postgres real, migrations
-> aplicadas em banco limpo, health/readiness testados com requisições reais,
-> CI rodando de verdade num runner real do GitHub — ver Seção 0 abaixo). A
-> tentativa real de deploy no Railway esbarrou em um bloqueio diferente dos
-> anteriores: **custo**, não falta de acesso — o Railway exige o Hobby plan
-> (US$5/mês) para qualquer deploy, e a decisão consciente foi pausar antes de
-> gastar. Vercel e Clerk produção continuam **BLOQUEADO POR INFRAESTRUTURA**
-> de fato (sem conta/ambiente criado). Cada seção abaixo diz explicitamente o
-> que é **IMPLEMENTADO** (existe no repo, testado localmente), **TESTADO**
-> (rodou de verdade neste ambiente), **BLOQUEADO POR CUSTO** (acesso existe,
-> gasto não autorizado) ou **BLOQUEADO POR INFRAESTRUTURA** (sem
-> conta/acesso).
+> **Status honesto (Fase 19, sessão em 2026-08-26/27 — INCOMPLETA, ver Seção
+> 16 para o handoff exato)**: o bloqueio de custo do Railway foi superado
+> nesta sessão (usuário autorizou o Hobby plan). Infraestrutura real:
+> **Postgres gerenciado — IMPLEMENTADO e rodando** (addon Railway, projeto
+> `bubbly-simplicity`); **frontend — IMPLEMENTADO, TESTADO e PÚBLICO**
+> (`https://arenahub-xi.vercel.app`, Vercel, confirmado sem erros de console
+> numa aba limpa); **backend na Railway — BLOQUEADO, causa raiz
+> desconhecida** (todo deploy falha no passo `BUILD_IMAGE` em ~4s sem log
+> útil via CLI/API; investigação pausada esperando o usuário olhar o Build
+> Log direto no dashboard); **Clerk produção — criado, mas com um bug
+> conhecido não corrigido**: a Vercel está com as chaves de
+> **desenvolvimento** (`pk_test_`/`sk_test_`), não as `_live_` de produção —
+> ver Seção 17. Não declarar esta fase concluída até a Seção 17 estar vazia.
 
 ---
 
@@ -110,18 +109,24 @@ exatos de teste e as ressalvas.
                     └─────────────┘                       └──────────────┘
 ```
 
-- **Frontend**: Vercel, deploy nativo (Next.js App Router) — **IMPLEMENTADO** (pronto pra
-  conectar), **BLOQUEADO POR INFRAESTRUTURA** (sem conta Vercel neste ambiente).
+- **Frontend**: Vercel — **IMPLEMENTADO, TESTADO e PÚBLICO** (Fase 19):
+  `https://arenahub-xi.vercel.app`, projeto `arenahub` (scope
+  `fraagelos-projects`). Confirmado carregando sem erros de console numa aba
+  limpa. Chaves do Clerk ainda incorretas nessa deploy — ver Seção 8/16.
 - **Backend**: container Docker (`apps/api/Dockerfile`) — **IMPLEMENTADO e TESTADO**
   localmente (build real + container rodando contra Postgres real, ver Seção 4).
-  **BLOQUEADO POR CUSTO** o deploy real no Railway (Hobby plan pago exigido, ver
-  Seção 3) — decisão consciente de pausar antes de gastar.
-- **Banco**: PostgreSQL gerenciado — hoje só existe o Postgres local do
-  `docker/docker-compose.yml`. **BLOQUEADO POR INFRAESTRUTURA** provisionar um
-  gerenciado real.
-- **Autenticação**: Clerk — só existe um ambiente de *desenvolvimento* configurado
-  (chaves `sk_test_...`/`pk_test_...`). **BLOQUEADO POR INFRAESTRUTURA** criar o
-  ambiente de *produção* separado (exige acesso ao dashboard.clerk.com da conta real).
+  Deploy real no Railway **em andamento, BLOQUEADO** por uma falha de build sem
+  causa raiz identificada ainda (Fase 19, ver Seção 3/16) — não é mais bloqueio
+  de custo, o Hobby plan já foi contratado.
+- **Banco**: PostgreSQL gerenciado — **IMPLEMENTADO** (Fase 19): addon oficial do
+  Railway, projeto `bubbly-simplicity`, rodando. `DATABASE_URL` da API referencia
+  o addon (`${{Postgres.DATABASE_URL}}`), nunca um valor copiado à mão. Migrations
+  ainda não confirmadas rodando contra ele de verdade, porque o serviço `api`
+  nunca completou um deploy (ver acima).
+- **Autenticação**: Clerk — ambiente de **produção criado** (Fase 19, clonado do
+  Development). Chaves de produção já configuradas no Railway (coladas direto no
+  dashboard pelo usuário). **Bug pendente**: a Vercel está com as chaves de
+  desenvolvimento por engano — ver Seção 8/16.
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`) — **IMPLEMENTADO E TESTADO**: o
   repositório foi publicado em `github.com/fraagelo/arenahub` e o workflow rodou num
   runner real do GitHub. A primeira execução **falhou de verdade** — o placeholder
@@ -178,12 +183,41 @@ mesmas env vars).
 > muda a escolha técnica (a tabela acima continua válida), só o custo mínimo
 > real.
 
-**Status: BLOQUEADO POR CUSTO** — a conta Railway existe, mas o deploy real foi
-**pausado deliberadamente** (decisão do usuário) por exigir gasto recorrente
-(US$5/mês) que não foi autorizado neste momento. Diferente de "bloqueado por
-infraestrutura" (falta de acesso/conta) — aqui o acesso existe, a decisão é de
-custo. A escolha de plataforma acima continua válida caso o deploy real seja
-retomado.
+> **Atualização (Fase 19)**: o usuário autorizou o Hobby plan (US$5/mês) e o
+> upgrade foi feito de verdade. Projeto Railway: `bubbly-simplicity`
+> (workspace "João Pedro Lopes Siviero's Projects"). Dois serviços
+> provisionados: `Postgres` (addon oficial, **rodando** —
+> `postgres.railway.internal:5432`, referenciado pela API via
+> `${{Postgres.DATABASE_URL}}`, nunca um valor copiado à mão) e `api`
+> (conectado a `fraagelo/arenahub`, branch `main`, deploy automático a cada
+> push). Domínio público gerado: `api-production-34e0.up.railway.app`.
+>
+> **`api` está BLOQUEADO — causa raiz não identificada.** Todo deploy falha
+> no passo `BUILD_IMAGE` em ~4 segundos, sem log de build útil (via
+> `railway logs` ou a query GraphQL `buildLogs` — ambos só devolvem
+> `"scheduling build on Metal builder..."` e depois o evento genérico
+> `"Failed to build an image. Please check the build logs for more
+> details."`, sem detalhe real). Isso NÃO é o bloqueio de custo antigo —
+> plano pago já está ativo. Ver Seção 17 para o próximo passo exato.
+>
+> Duas coisas já foram corrigidas nesta sessão que valem para qualquer
+> retomada:
+> 1. `apps/api/package.json` — `prisma` (CLI) movido de `devDependencies`
+>    para `dependencies`: sem isso, a imagem de produção (`pnpm deploy
+>    --prod`, que exclui devDependencies) não tem o binário `prisma` para
+>    rodar `migrate deploy` no Pre-Deploy Command. Bug real, não cosmético.
+> 2. O `railway.json` (raiz do repo) **não é aplicado automaticamente** pelo
+>    Railway para o serviço `api` já existente — confirmado via API
+>    (`serviceInstance.dockerfilePath` continuava `null` mesmo com o arquivo
+>    commitado). O CLI avisa que Config as Code está sendo descontinuado a
+>    favor de `.railway/railway.ts` (que exige o pacote npm `railway`, não
+>    instalado — decisão desta sessão foi não adicionar essa dependência só
+>    por isso). Os valores reais em uso hoje foram setados diretamente via
+>    mutation GraphQL (`serviceInstanceUpdate`) — se o serviço for recriado do
+>    zero, replique manualmente: `dockerfilePath=apps/api/Dockerfile`,
+>    `healthcheckPath=/v1/health`, `healthcheckTimeout=300`,
+>    `preDeployCommand=["npx prisma migrate deploy"]`,
+>    `restartPolicyType=ON_FAILURE`, `restartPolicyMaxRetries=10`.
 
 ---
 
@@ -661,7 +695,25 @@ dar tempo de `$disconnect()` e de requests em andamento terminarem).
 
 ---
 
-## 8. Clerk em produção — BLOQUEADO POR INFRAESTRUTURA
+## 8. Clerk em produção — IMPLEMENTADO, com um bug pendente
+
+> **Atualização (Fase 19)**: o ambiente de Production foi criado de verdade
+> (clonado do Development, preservando auth/tema — inclui a exigência de
+> telefone verificado da Fase 16/WhatsApp), com domínio de aplicação
+> configurado e um webhook cadastrado apontando pra
+> `https://api-production-34e0.up.railway.app/v1/webhooks/clerk`.
+>
+> `CLERK_SECRET_KEY`/`CLERK_WEBHOOK_SIGNING_SECRET` de produção foram colados
+> **direto no dashboard do Railway** pelo usuário — nunca passaram pelo
+> Claude, conforme a regra de nunca solicitar segredo no chat.
+>
+> **Bug real, não corrigido**: ao configurar as variáveis da Vercel, o Claude
+> extraiu os valores de `apps/web/.env.local` — mas esse arquivo local ainda
+> tinha as chaves de **desenvolvimento** (`pk_test_.../sk_test_...`), não as
+> de produção. Resultado: `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` e
+> `CLERK_SECRET_KEY` no ambiente **Production da Vercel hoje são as chaves de
+> dev**, violando a regra abaixo (item 5) e provavelmente quebrando login em
+> produção. Ver Seção 17 para o fix exato (já mapeado, não executado).
 
 Requer acesso à conta real do Clerk (dashboard.clerk.com). Passo a passo pra
 quem tiver esse acesso:
@@ -890,6 +942,87 @@ real, nunca assumir que "deveria funcionar":
       nunca os dados de fato
 - [ ] `OPTIONS` de uma origem não configurada não recebe
       `Access-Control-Allow-Origin`
+
+---
+
+## 17. Handoff — Fase 19 incompleta (sessão 2026-08-26/27)
+
+Esta sessão trocou de máquina no meio do trabalho. Estado exato pra continuar
+sem repetir passos já feitos:
+
+### O que já está funcionando de verdade
+- GitHub + CI: inalterado, já era real desde a Fase 9.
+- Railway: projeto `bubbly-simplicity`, Hobby plan ativo, Postgres addon
+  **rodando**.
+- Vercel: projeto `arenahub` (scope `fraagelos-projects`), frontend **público
+  e funcionando** em `https://arenahub-xi.vercel.app` — Root Directory
+  `apps/web`, `apps/web/vercel.json` força `"framework": "nextjs"` (a
+  auto-detecção da Vercel ficava presa em "Other" e servia a saída errada,
+  causando 404 — só resolveu depois desse arquivo). SSO/Deployment
+  Protection da Vercel foi **desativado** deliberadamente (com autorização do
+  usuário) porque bloqueava acesso público de clientes reais.
+- Clerk: ambiente Production criado, webhook cadastrado, chaves de produção
+  já coladas no Railway pelo usuário.
+- `apps/api/package.json`: `prisma` movido pra `dependencies` (bug real,
+  necessário pro Pre-Deploy Command rodar migrations em produção).
+
+### Os dois blocos pendentes, em ordem de prioridade
+
+**1. Corrigir as chaves do Clerk na Vercel (rápido, sem investigação)**
+
+A Vercel está com `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`/`CLERK_SECRET_KEY` de
+**desenvolvimento**, não produção (Claude copiou de `apps/web/.env.local`
+sem confirmar que já tinha sido atualizado). Passos:
+1. Pegar a `pk_live_...` real em dashboard.clerk.com → ambiente Production →
+   API Keys (não é secreta, pode ser digitada em qualquer lugar).
+2. `vercel env rm NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY production` e
+   `vercel env add NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY production` com o valor
+   novo (rodar da raiz do repo, com `.vercel/project.json` linkado — ver
+   nota abaixo).
+3. `CLERK_SECRET_KEY` (`sk_live_...`) é secreta — pedir pro usuário colar
+   direto em vercel.com → projeto `arenahub` → Settings → Environment
+   Variables (nunca no chat).
+4. Depois de trocar as duas: `vercel deploy --prod` (da raiz do repo — ver
+   nota) pra rebuildar com os valores corretos (`NEXT_PUBLIC_*` é embutido
+   em build time, trocar a env var sozinha não basta).
+
+**2. Descobrir por que o build da API no Railway falha (não investigado a
+fundo — a etapa seguinte planejada era pedir pro usuário abrir o dashboard)**
+
+Todo deploy do serviço `api` falha no passo `BUILD_IMAGE` em ~4 segundos,
+sem log útil via `railway logs --build` nem via a query GraphQL `buildLogs`
+(`railway api 'query { buildLogs(deploymentId: "...", limit: 500) { message
+severity timestamp } }'`) — ambos só devolvem a linha de agendamento no
+"Metal builder" e depois um evento genérico de falha
+(`deploymentEvents(id: "...")`, campo `payload.error`). As configurações de
+build já estão corretas (`dockerfilePath=apps/api/Dockerfile`,
+confirmado via `serviceInstanceUpdate`/query — ver Seção 3), então a causa
+provável é algo no próprio Dockerfile/contexto que só aparece no ambiente
+remoto do Railway (diferente do build local, que nunca foi revalidado nesta
+sessão porque o Docker Desktop desta máquina está quebrado por um problema
+de SO não relacionado ao projeto).
+
+Próximo passo recomendado: abrir railway.app → projeto `bubbly-simplicity` →
+serviço `api` → deployment mais recente → aba **Build Logs** — a UI web
+costuma mostrar mais detalhe em tempo real do que a API pública. Se o
+dashboard também não mostrar nada útil, considerar contatar o suporte do
+Railway ou tentar recriar o serviço do zero com a mesma config documentada
+na Seção 3.
+
+### Nota operacional: `.vercel/project.json` não é versionado
+
+`.vercel` está no `.gitignore` (raiz e `apps/web`) por convenção do próprio
+Vercel CLI — não contém segredo, só `projectId`/`orgId`. Em qualquer máquina
+nova, rodar (da raiz do repo, não de dentro de `apps/web` — o CLI duplica o
+Root Directory se rodado de dentro do subdiretório, foi um erro real cometido
+nesta sessão):
+
+```bash
+vercel link --yes --project arenahub
+```
+
+antes de qualquer `vercel deploy`/`vercel env`. Idem para `railway link -p
+bubbly-simplicity` do lado do Railway.
 
 ---
 

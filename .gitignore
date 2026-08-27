@@ -37,3 +37,6 @@ apps/api/generated/
 # Misc
 *.tsbuildinfo
 next-env.d.ts
+
+# Vercel CLI project link (local, no secrets — regenerate with `vercel link`)
+.vercel
