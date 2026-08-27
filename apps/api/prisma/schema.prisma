@@ -503,6 +503,9 @@ model Payment {
   // nunca em resposta de mutation guardada em memória).
   checkoutUrl  String?
   pixCopyPaste String?
+  // Imagem PNG do QR Code, em base64 — potencialmente vários KB, por isso
+  // @db.Text (não o VARCHAR curto default do Postgres pro Prisma String).
+  qrCodeBase64 String? @db.Text
 
   // Idempotência da CRIAÇÃO (item 10 do prompt) — mesma técnica
   // "claim-first" já estabelecida em IdempotencyKey/WhatsAppEvent, aplicada

@@ -29,6 +29,7 @@ class FakePaymentProvider extends PaymentProvider {
     providerPaymentId: 'mp-fake-1',
     checkoutUrl: 'https://mp.example/checkout/fake',
     pixCopyPaste: '00020126-fake-pix',
+    qrCodeBase64: 'ZmFrZS1xci1wbmc=',
   };
   nextCreateError: Error | null = null;
   statusByProviderPaymentId = new Map<string, ProviderPaymentStatus>();

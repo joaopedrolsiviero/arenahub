@@ -92,6 +92,16 @@ function PaymentSection({ booking }: { booking: MyBooking }) {
               <span className="tabular text-base font-bold">{formatCurrencyBRL(payment.amount)}</span>
             </div>
 
+            {payment.status === 'PENDING' && payment.qrCodeBase64 ? (
+              <img
+                src={`data:image/png;base64,${payment.qrCodeBase64}`}
+                alt="QR Code do PIX"
+                width={220}
+                height={220}
+                className="mx-auto"
+              />
+            ) : null}
+
             {payment.status === 'PENDING' && payment.pixCopyPaste ? (
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="pix-copy-paste">Código PIX copia e cola</Label>

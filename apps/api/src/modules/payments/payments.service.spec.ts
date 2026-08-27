@@ -65,6 +65,7 @@ describe('PaymentsService', () => {
     providerPaymentId: null,
     checkoutUrl: null,
     pixCopyPaste: null,
+    qrCodeBase64: null,
     idempotencyKey: 'key-1',
     failureReason: null,
     paidAt: null,
@@ -102,6 +103,7 @@ describe('PaymentsService', () => {
         providerPaymentId: 'mp-123',
         checkoutUrl: 'https://mp.example/checkout',
         pixCopyPaste: '00020126...',
+        qrCodeBase64: 'iVBORw0KGgo=',
       }),
       getPaymentStatus: jest.fn(),
     };
@@ -163,6 +165,7 @@ describe('PaymentsService', () => {
           providerPaymentId: 'mp-123',
           checkoutUrl: 'https://mp.example/checkout',
           pixCopyPaste: '00020126...',
+          qrCodeBase64: 'iVBORw0KGgo=',
         }),
       );
 
@@ -182,10 +185,12 @@ describe('PaymentsService', () => {
           providerPaymentId: 'mp-123',
           checkoutUrl: 'https://mp.example/checkout',
           pixCopyPaste: '00020126...',
+          qrCodeBase64: 'iVBORw0KGgo=',
         },
       });
       expect(result.checkoutUrl).toBe('https://mp.example/checkout');
       expect(result.pixCopyPaste).toBe('00020126...');
+      expect(result.qrCodeBase64).toBe('iVBORw0KGgo=');
     });
 
     it('idempotência: mesma (bookingId, idempotencyKey) devolve o Payment existente, nunca chama o provider de novo', async () => {

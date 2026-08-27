@@ -18,7 +18,7 @@ interface MercadoPagoPaymentResponse {
   status_detail?: string;
   date_approved?: string | null;
   point_of_interaction?: {
-    transaction_data?: { ticket_url?: string; qr_code?: string };
+    transaction_data?: { ticket_url?: string; qr_code?: string; qr_code_base64?: string };
   };
 }
 
@@ -108,6 +108,7 @@ export class MercadoPagoPaymentProviderService extends PaymentProvider {
         providerPaymentId: String(body.id),
         checkoutUrl: body.point_of_interaction?.transaction_data?.ticket_url ?? null,
         pixCopyPaste: body.point_of_interaction?.transaction_data?.qr_code ?? null,
+        qrCodeBase64: body.point_of_interaction?.transaction_data?.qr_code_base64 ?? null,
       };
     } catch (error) {
       this.rethrowMapped(error, timeoutMs, startedAt);

@@ -26,6 +26,7 @@ export interface PaymentView {
   currency: string;
   checkoutUrl: string | null;
   pixCopyPaste: string | null;
+  qrCodeBase64: string | null;
   failureReason: string | null;
   paidAt: Date | null;
   expiresAt: Date | null;
@@ -41,6 +42,7 @@ function toView(payment: Payment): PaymentView {
     currency: payment.currency,
     checkoutUrl: payment.checkoutUrl,
     pixCopyPaste: payment.pixCopyPaste,
+    qrCodeBase64: payment.qrCodeBase64,
     failureReason: payment.failureReason,
     paidAt: payment.paidAt,
     expiresAt: payment.expiresAt,
@@ -182,6 +184,7 @@ export class PaymentsService {
           providerPaymentId: result.providerPaymentId,
           checkoutUrl: result.checkoutUrl,
           pixCopyPaste: result.pixCopyPaste,
+          qrCodeBase64: result.qrCodeBase64,
         },
       });
       return toView(updated);

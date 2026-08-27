@@ -149,6 +149,7 @@ describe('BookingDetail', () => {
       currency: 'BRL',
       checkoutUrl: 'https://mp.example/checkout',
       pixCopyPaste: '00020126-fake-pix',
+      qrCodeBase64: 'iVBORw0KGgo=',
       failureReason: null,
       paidAt: null,
       expiresAt: '2026-09-07T13:30:00.000Z',
@@ -184,6 +185,8 @@ describe('BookingDetail', () => {
       render(<BookingDetail bookingId="booking-1" />);
 
       expect(screen.getByText('Aguardando pagamento')).toBeInTheDocument();
+      const qrImage = screen.getByAltText('QR Code do PIX') as HTMLImageElement;
+      expect(qrImage.src).toContain('data:image/png;base64,iVBORw0KGgo=');
       const pixInput = screen.getByLabelText('Código PIX copia e cola') as HTMLInputElement;
       expect(pixInput).toHaveValue('00020126-fake-pix');
       expect(pixInput).toHaveAttribute('readonly');

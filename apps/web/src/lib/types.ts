@@ -361,6 +361,7 @@ export interface PaymentView {
   currency: string;
   checkoutUrl: string | null;
   pixCopyPaste: string | null;
+  qrCodeBase64: string | null;
   failureReason: string | null;
   paidAt: string | null;
   expiresAt: string | null;

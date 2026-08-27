@@ -14,6 +14,8 @@ export interface PaymentProviderCreateResult {
   checkoutUrl: string | null;
   /** Código "copia e cola" do PIX, quando o provider gera na criação. */
   pixCopyPaste: string | null;
+  /** Imagem do QR Code do PIX, em base64 (PNG), pronta pra exibir num `<img>`. */
+  qrCodeBase64: string | null;
 }
 
 export type ProviderPaymentStatus = 'PENDING' | 'PAID' | 'FAILED' | 'EXPIRED' | 'CANCELLED';
