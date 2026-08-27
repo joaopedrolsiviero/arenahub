@@ -87,7 +87,14 @@ em produção, veja [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 > está bloqueado até haver um domínio próprio (Clerk produção exige DNS verificável, que um
 > subdomínio `*.vercel.app`/`*.up.railway.app` não oferece; ver `docs/DEPLOYMENT.md`, Seção 8, para
 > o achado completo e o passo a passo de migração quando houver domínio). Detalhes completos,
-> histórico de investigação e checklist de smoke test em `docs/DEPLOYMENT.md`.
+> histórico de investigação e checklist de smoke test em `docs/DEPLOYMENT.md`. A **Fase 20**
+> auditou esse deploy real sem adicionar nada novo: saúde, migrations, CORS, segredos e headers de
+> segurança reconfirmados contra a infraestrutura ao vivo (nenhum problema crítico encontrado, um
+> bug cosmético de log corrigido); nenhuma credencial real de OpenAI/Mercado Pago/WhatsApp está
+> configurada em produção ainda; o fluxo completo de reserva em produção continua sem validar,
+> porque criar a primeira arena de teste esbarra numa decisão de produto em aberto (deve ser
+> autocadastro aberto, como é hoje, ou exigir aprovação?). Classificação: **GO com ressalvas** — ver
+> o relatório da Fase 20 para a lista completa de pendências antes de abrir pro público.
 
 ## Stack
 

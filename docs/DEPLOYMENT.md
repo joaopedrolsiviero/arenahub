@@ -24,6 +24,60 @@
 
 ---
 
+## 0.2. Fase 20 (Production Readiness & Go-Live Validation) — auditoria, sem novo deploy
+
+Auditoria de "sistema publicado" → "produção tecnicamente pronta pra go-live", sem
+adicionar funcionalidade nova. Nenhuma operação destrutiva foi executada contra o
+banco de produção. Resultado geral: **GO COM RESSALVAS** — ver o relatório final
+da fase para a classificação completa. Resumo por categoria:
+
+**VALIDADO REALMENTE** (contra a infraestrutura de verdade, nesta fase):
+- `/v1/health` e `/v1/health/ready` respondendo `200` reais, banco conectado.
+- CORS: origem da Vercel aceita, origem desconhecida bloqueada — testado ao vivo.
+- Rota autenticada sem token → `401` seguro, sem vazar detalhe interno.
+- Headers de segurança (`helmet`, CSP, HSTS, `X-Request-Id`) presentes em resposta real.
+- Migrations aplicadas no banco de produção: confirmado via log real do Pre-Deploy
+  Command da Railway (`9 migrations found`, `No pending migrations to apply.`) — não
+  foi possível rodar `prisma migrate status` diretamente daqui porque o Postgres da
+  Railway só é alcançável de dentro da rede privada da própria Railway (postura de
+  segurança correta, não uma falha).
+- Nenhuma credencial de OpenAI/Mercado Pago/WhatsApp está configurada no ambiente de
+  produção do backend (Railway) — confirmado listando as variáveis reais do serviço.
+- Nenhum segredo real versionado no Git — confirmado por busca no repositório (a
+  única ocorrência de uma chave real da OpenAI está em `apps/api/.env`, arquivo local
+  nunca rastreado pelo Git).
+- Suíte de testes completa (ver relatório final da fase para os números).
+
+**VALIDADO ESTRUTURALMENTE** (por código/teste automatizado, não contra o serviço externo real):
+- Rate limiting (Fase 18) — coberto por teste e2e que dispara 429 de verdade
+  localmente; não foi reexercitado contra produção nesta fase para não gerar carga
+  desnecessária.
+- Tratamento de erro de IA/pagamento/WhatsApp sem credencial configurada (503/erro
+  tratado, nunca 500 cru) — coberto pelos testes unitários/e2e de cada provider.
+
+**BLOQUEADO / PENDENTE**:
+- Clerk Production — depende de domínio próprio (Seção 8).
+- Fluxo completo de reserva e áreas do dashboard em produção — depende da decisão de
+  produto sobre autocadastro de arena (Parte 2 do relatório da fase); nenhum dado de
+  teste foi criado em produção nesta fase até essa decisão ser tomada.
+- OpenAI, Mercado Pago, WhatsApp reais — sem credencial configurada em produção.
+- Backup do Postgres gerenciado — não verificável via CLI da Railway; precisa
+  conferir manualmente no dashboard (projeto `bubbly-simplicity` → serviço
+  `Postgres` → aba **Backups**).
+- CI/CD — workflow inalterado e correto por inspeção de código; status das
+  execuções mais recentes não verificável nesta sessão (repositório privado, sem
+  `gh` autenticado).
+
+**Bug real encontrado e corrigido nesta fase**: `AppModule.configure()` registrava o
+middleware global (Fase 18) com `forRoutes('*')` — sintaxe antiga do
+`path-to-regexp` que gerava um `WARN` de depreciação do Express em todo boot de
+produção (`"Unsupported route path... /v1/*"`). Funcionava (o Nest converte
+automaticamente), mas poluía o log sem necessidade. Corrigido para `forRoutes('{*path}')`
+(sintaxe nomeada que a versão atual já espera direto), revalidado pela suíte e2e
+inteira (o middleware de correlação/segurança é exercitado em todo teste).
+
+---
+
 ## 0. GitHub e CI — IMPLEMENTADO e TESTADO
 
 O repositório foi publicado em `github.com/fraagelo/arenahub` (primeiro commit e

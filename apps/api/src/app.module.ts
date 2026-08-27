@@ -82,7 +82,14 @@ export class AppModule implements NestModule {
   // Registrar aqui garante que o middleware de correlação e os headers de
   // segurança HTTP estão realmente ativos em CADA teste e2e da suíte —
   // não só documentados, verificáveis (ver test/production-hardening.e2e-spec.ts).
+  // Fase 20: `forRoutes('*')` (sintaxe antiga do path-to-regexp) gerava um
+  // WARN de depreciação do Express em TODO boot em produção
+  // ("Unsupported route path... Attempting to auto-convert to
+  // '/v1/{*path}'") — funcionava (o auto-convert cobre o caso), mas
+  // poluía o log a cada deploy sem necessidade. `'{*path}'` é a sintaxe
+  // nomeada que o path-to-regexp novo já espera diretamente, sem shim de
+  // conversão nem warning.
   configure(consumer: MiddlewareConsumer): void {
-    consumer.apply(requestIdMiddleware, helmet()).forRoutes('*');
+    consumer.apply(requestIdMiddleware, helmet()).forRoutes('{*path}');
   }
 }
