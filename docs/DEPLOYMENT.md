@@ -3,19 +3,24 @@
 > Companheiro de `docs/ARCHITECTURE.md` (v0.18) — este documento é operacional
 > (como implantar e operar), não arquitetural (por que o sistema é como é).
 >
-> **Status honesto (Fase 19, sessão em 2026-08-26/27 — INCOMPLETA, ver Seção
-> 16 para o handoff exato)**: o bloqueio de custo do Railway foi superado
-> nesta sessão (usuário autorizou o Hobby plan). Infraestrutura real:
-> **Postgres gerenciado — IMPLEMENTADO e rodando** (addon Railway, projeto
-> `bubbly-simplicity`); **frontend — IMPLEMENTADO, TESTADO e PÚBLICO**
-> (`https://arenahub-xi.vercel.app`, Vercel, confirmado sem erros de console
-> numa aba limpa); **backend na Railway — BLOQUEADO, causa raiz
-> desconhecida** (todo deploy falha no passo `BUILD_IMAGE` em ~4s sem log
-> útil via CLI/API; investigação pausada esperando o usuário olhar o Build
-> Log direto no dashboard); **Clerk produção — criado, mas com um bug
-> conhecido não corrigido**: a Vercel está com as chaves de
-> **desenvolvimento** (`pk_test_`/`sk_test_`), não as `_live_` de produção —
-> ver Seção 17. Não declarar esta fase concluída até a Seção 17 estar vazia.
+> **Status honesto (Fase 19, sessões em 2026-08-26/27 — smoke test de login
+> validado de ponta a ponta, ver Seção 17 para o histórico completo)**: toda
+> a infraestrutura real está no ar e funcionando. **Postgres gerenciado —
+> IMPLEMENTADO e rodando** (addon Railway, projeto `bubbly-simplicity`);
+> **frontend — IMPLEMENTADO, TESTADO e PÚBLICO**
+> (`https://arenahub-xi.vercel.app`); **backend na Railway — IMPLEMENTADO,
+> TESTADO e PÚBLICO** (`https://api-production-34e0.up.railway.app`,
+> `/v1/health` e `/v1/health/ready` confirmados `200` reais — o bloqueio de
+> build documentado numa sessão anterior não se repetiu, causa raiz nunca
+> identificada com certeza). **Clerk — rodando em ambiente de
+> Development, deliberadamente** (não Production): ver Seção 8 para o
+> motivo (Clerk produção exige domínio próprio verificável por DNS, que
+> este projeto não tem — um domínio `*.vercel.app` não serve, porque você
+> não controla o DNS dessa zona). **Login + rota autenticada validados de
+> ponta a ponta, ao vivo**: usuário real logou pelo Clerk (dev) no site de
+> produção, o webhook `user.created`/`user.updated` do Clerk (Development,
+> agora cadastrado apontando pro Railway) sincronizou o usuário no Postgres
+> real, e `GET /v1/users/me/bookings` respondeu `200`.
 
 ---
 
@@ -112,21 +117,32 @@ exatos de teste e as ressalvas.
 - **Frontend**: Vercel — **IMPLEMENTADO, TESTADO e PÚBLICO** (Fase 19):
   `https://arenahub-xi.vercel.app`, projeto `arenahub` (scope
   `fraagelos-projects`). Confirmado carregando sem erros de console numa aba
-  limpa. Chaves do Clerk ainda incorretas nessa deploy — ver Seção 8/16.
-- **Backend**: container Docker (`apps/api/Dockerfile`) — **IMPLEMENTADO e TESTADO**
-  localmente (build real + container rodando contra Postgres real, ver Seção 4).
-  Deploy real no Railway **em andamento, BLOQUEADO** por uma falha de build sem
-  causa raiz identificada ainda (Fase 19, ver Seção 3/16) — não é mais bloqueio
-  de custo, o Hobby plan já foi contratado.
-- **Banco**: PostgreSQL gerenciado — **IMPLEMENTADO** (Fase 19): addon oficial do
-  Railway, projeto `bubbly-simplicity`, rodando. `DATABASE_URL` da API referencia
-  o addon (`${{Postgres.DATABASE_URL}}`), nunca um valor copiado à mão. Migrations
-  ainda não confirmadas rodando contra ele de verdade, porque o serviço `api`
-  nunca completou um deploy (ver acima).
-- **Autenticação**: Clerk — ambiente de **produção criado** (Fase 19, clonado do
-  Development). Chaves de produção já configuradas no Railway (coladas direto no
-  dashboard pelo usuário). **Bug pendente**: a Vercel está com as chaves de
-  desenvolvimento por engano — ver Seção 8/16.
+  limpa, e confirmado autenticando de verdade contra o Clerk (Development —
+  ver Seção 8).
+- **Backend**: container Docker (`apps/api/Dockerfile`) — **IMPLEMENTADO,
+  TESTADO e PÚBLICO** (Fase 19): `https://api-production-34e0.up.railway.app`,
+  projeto Railway `bubbly-simplicity`, serviço `api`. `/v1/health` e
+  `/v1/health/ready` confirmados `200` reais contra o deploy ao vivo. A falha
+  de build documentada numa sessão anterior desta mesma fase (todo deploy
+  falhando em `BUILD_IMAGE`) não se reproduziu nas verificações mais
+  recentes — a causa raiz nunca foi identificada com certeza (não sabemos se
+  foi um problema transitório da plataforma ou algo que se autocorrigiu).
+- **Banco**: PostgreSQL gerenciado — **IMPLEMENTADO e TESTADO** (Fase 19):
+  addon oficial do Railway, projeto `bubbly-simplicity`, rodando.
+  `DATABASE_URL` da API referencia o addon (`${{Postgres.DATABASE_URL}}`),
+  nunca um valor copiado à mão. Migrations confirmadas aplicadas (o backend
+  não estaria saudável em `/health/ready` nem sincronizaria usuários reais
+  sem elas).
+- **Autenticação**: Clerk — ambiente de **Development em uso real em
+  produção, deliberadamente** (Fase 19). O ambiente de Production foi criado
+  mas está **bloqueado**: Clerk exige um domínio próprio verificável por DNS
+  para produção, e este projeto só tem domínios temporários da
+  plataforma (`*.vercel.app`/`*.up.railway.app`), cujo DNS pertence à
+  própria Vercel/Railway, não a você — ver Seção 8 para o detalhe completo e
+  o que fazer quando houver um domínio próprio. O webhook de sincronização
+  de usuário (`user.created`/`user.updated` → tabela `User`) está cadastrado
+  no ambiente Development apontando pro Railway, e foi validado com um
+  evento real (assinatura verificada, `200`, usuário sincronizado).
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`) — **IMPLEMENTADO E TESTADO**: o
   repositório foi publicado em `github.com/fraagelo/arenahub` e o workflow rodou num
   runner real do GitHub. A primeira execução **falhou de verdade** — o placeholder
@@ -192,13 +208,16 @@ mesmas env vars).
 > (conectado a `fraagelo/arenahub`, branch `main`, deploy automático a cada
 > push). Domínio público gerado: `api-production-34e0.up.railway.app`.
 >
-> **`api` está BLOQUEADO — causa raiz não identificada.** Todo deploy falha
-> no passo `BUILD_IMAGE` em ~4 segundos, sem log de build útil (via
-> `railway logs` ou a query GraphQL `buildLogs` — ambos só devolvem
-> `"scheduling build on Metal builder..."` e depois o evento genérico
-> `"Failed to build an image. Please check the build logs for more
-> details."`, sem detalhe real). Isso NÃO é o bloqueio de custo antigo —
-> plano pago já está ativo. Ver Seção 17 para o próximo passo exato.
+> **Atualização (sessão seguinte, mesma Fase 19): `api` está rodando.**
+> `/v1/health` e `/v1/health/ready` respondem `200` reais, o serviço
+> aparece `Online` (`railway status`), e logs de boot aparecem normalmente
+> (`railway logs --service api`). A falha de `BUILD_IMAGE` acima nunca foi
+> diagnosticada com certeza — pode ter sido um problema transitório da
+> plataforma, ou pode ter sido resolvido pelas duas correções já feitas
+> (`prisma` em `dependencies`, `railway.json`/config do serviço). Não
+> reproduza nem "conserte" isso de novo sem antes confirmar que o serviço
+> está de fato fora do ar (`railway status`/`GET /v1/health`) — o problema
+> pode simplesmente não existir mais.
 >
 > Duas coisas já foram corrigidas nesta sessão que valem para qualquer
 > retomada:
@@ -695,40 +714,74 @@ dar tempo de `$disconnect()` e de requests em andamento terminarem).
 
 ---
 
-## 8. Clerk em produção — IMPLEMENTADO, com um bug pendente
+## 8. Clerk em produção — BLOQUEADO por falta de domínio próprio; Development em uso real
 
-> **Atualização (Fase 19)**: o ambiente de Production foi criado de verdade
-> (clonado do Development, preservando auth/tema — inclui a exigência de
-> telefone verificado da Fase 16/WhatsApp), com domínio de aplicação
-> configurado e um webhook cadastrado apontando pra
-> `https://api-production-34e0.up.railway.app/v1/webhooks/clerk`.
+> **Achado real desta fase**: o ambiente de Production do Clerk foi criado
+> (clonado do Development), e por engano a Vercel ficou configurada
+> primeiro com as chaves de Development, depois foi corrigida pra
+> `pk_live_`/`sk_live_` reais. **Com as chaves de produção, o site inteiro
+> (`/sign-in`, `/sign-up`) ficou em branco.** Causa raiz confirmada: a
+> `pk_live_` do Clerk tem embutido o domínio do "Frontend API" exigido pelo
+> ambiente de produção (`clerk.arenahub.vercel.app`, decodificável do
+> próprio valor da chave em base64) — testado com `curl` direto nesse host:
+> a conexão TLS é recusada (nenhum certificado válido ali). Clerk exige, pra
+> rodar em produção, um domínio que você registre com um provedor de DNS de
+> verdade e onde você adicione os registros CNAME que o próprio Clerk
+> fornece (Dashboard → Configure → Domains). Um subdomínio `*.vercel.app` ou
+> `*.up.railway.app` **não serve** pra isso — o DNS dessas zonas pertence à
+> Vercel/Railway, você não tem como adicionar um CNAME lá.
 >
-> `CLERK_SECRET_KEY`/`CLERK_WEBHOOK_SIGNING_SECRET` de produção foram colados
-> **direto no dashboard do Railway** pelo usuário — nunca passaram pelo
-> Claude, conforme a regra de nunca solicitar segredo no chat.
+> **Decisão tomada (reversível a qualquer momento)**: voltamos
+> deliberadamente as chaves da Vercel e do Railway para o ambiente de
+> **Development** do Clerk (`pk_test_`/`sk_test_`), que não tem essa
+> exigência de domínio — funciona em qualquer host, inclusive
+> `*.vercel.app`. Isso restaurou o site ao funcionamento normal. **Esta é a
+> configuração real em uso em produção hoje**, uma limitação conhecida, não
+> escondida — ver a tabela de diferenças abaixo antes de considerar isso
+> aceitável pro seu caso.
 >
-> **Bug real, não corrigido**: ao configurar as variáveis da Vercel, o Claude
-> extraiu os valores de `apps/web/.env.local` — mas esse arquivo local ainda
-> tinha as chaves de **desenvolvimento** (`pk_test_.../sk_test_...`), não as
-> de produção. Resultado: `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` e
-> `CLERK_SECRET_KEY` no ambiente **Production da Vercel hoje são as chaves de
-> dev**, violando a regra abaixo (item 5) e provavelmente quebrando login em
-> produção. Ver Seção 17 para o fix exato (já mapeado, não executado).
+> **Webhook de sincronização de usuário, agora correto para o Development**:
+> como o webhook de Production apontava só pro ambiente que não está em
+> uso, foi cadastrado um NOVO endpoint no ambiente **Development** do Clerk,
+> apontando pra `https://api-production-34e0.up.railway.app/v1/webhooks/clerk`
+> (eventos `user.created`/`user.updated`/`user.deleted`), com seu próprio
+> Signing Secret (cada endpoint de webhook tem o seu — nunca é o mesmo
+> "secret do ambiente" reaproveitado). **Validado com um evento real**:
+> editar um campo do usuário de teste no dashboard do Clerk disparou
+> `user.updated`, a assinatura HMAC verificou, o backend respondeu `200`, e
+> o `upsert` em `UsersService.syncFromClerkEvent` criou a linha que faltava
+> — confirmado por `GET /v1/users/me/bookings` passar de `404`
+> ("Usuário autenticado ainda não sincronizado") para `200`.
 
-Requer acesso à conta real do Clerk (dashboard.clerk.com). Passo a passo pra
-quem tiver esse acesso:
+### Development vs. Production do Clerk — o que muda na prática
 
-1. No projeto Clerk existente, ativar/criar o ambiente de **Production**
-   (separado do "Development" já usado neste repositório).
-2. Copiar as chaves de produção (`pk_live_...`/`sk_live_...`) para:
-   - `apps/web`: `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY` (Vercel, env de produção).
-   - `apps/api`: `CLERK_SECRET_KEY` (Railway, secret).
-3. Cadastrar um endpoint de webhook novo apontando pra
-   `https://<api-de-produção>/v1/webhooks/clerk`, copiar o *Signing Secret*
-   pra `CLERK_WEBHOOK_SIGNING_SECRET` na API de produção.
-4. Configurar as URLs permitidas (sign-in/sign-up/redirect) pro domínio real
+| | Development (em uso hoje) | Production (bloqueado) |
+|---|---|---|
+| Domínio exigido | Qualquer um, sem verificação | Domínio próprio com DNS verificado |
+| Limites de uso | Baixos (é ambiente de teste) | Do seu plano pago |
+| Base de usuários | Separada da de produção | Separada da de dev |
+| Marca/e-mails | Indicador "modo dev", e-mails com marca do Clerk | Sem indicador, e-mails customizáveis |
+
+### Passo a passo para migrar para Production quando houver domínio próprio
+
+1. Registrar um domínio de verdade (qualquer provedor: Registro.br, Namecheap etc.).
+2. Apontar esse domínio pra Vercel (domínio customizado do projeto).
+3. No Clerk (ambiente Production) → Configure → Domains: adicionar esse
+   domínio, copiar os registros CNAME fornecidos, adicioná-los no DNS do
+   provedor do domínio, aguardar a verificação do Clerk.
+4. Copiar as chaves de produção (`pk_live_...`/`sk_live_...`) para:
+   - `apps/web` (Vercel, env Production): `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`.
+   - `apps/api` (Railway): `CLERK_SECRET_KEY`.
+5. Cadastrar um NOVO endpoint de webhook no ambiente Production apontando
+   pra `https://<api-de-produção>/v1/webhooks/clerk`, copiar o *Signing
+   Secret* desse endpoint específico pra `CLERK_WEBHOOK_SIGNING_SECRET` na
+   API (Railway).
+6. Configurar as URLs permitidas (sign-in/sign-up/redirect) pro domínio real
    de produção do frontend.
-5. Nunca reutilizar a chave de desenvolvimento em produção.
+7. Redeploy do frontend (Vercel — `NEXT_PUBLIC_*` é embutido em build time,
+   trocar a env var sozinha não basta) e restart do backend (Railway já
+   reinicia sozinho ao salvar uma variável).
+8. Repetir o smoke test de login (Seção 16) contra as chaves novas.
 
 O código não muda entre ambientes — só a configuração (princípio da Fase 9,
 item 4).
@@ -899,15 +952,23 @@ implantado foi configurada nesta fase). Marcar cada item com o resultado
 real, nunca assumir que "deveria funcionar":
 
 **Infraestrutura**
-- [ ] `GET https://<api>/v1/health` → `200`
-- [ ] `GET https://<api>/v1/health/ready` → `200` com `database: "ok"`
-- [ ] Resposta de `/v1/health` inclui `X-Request-Id` e os headers do
-      `helmet` (`X-Content-Type-Options: nosniff` no mínimo)
+- [x] `GET https://<api>/v1/health` → `200` — **validado real** (Fase 19,
+      `api-production-34e0.up.railway.app`)
+- [x] `GET https://<api>/v1/health/ready` → `200` com `database: "ok"` —
+      **validado real**
+- [x] Resposta de `/v1/health` inclui `X-Request-Id` e os headers do
+      `helmet` (`X-Content-Type-Options: nosniff` no mínimo) — **validado
+      real**
 
 **Produto — fluxo principal**
-- [ ] Frontend abre na URL de produção
-- [ ] Login via Clerk funciona (sign-in real)
-- [ ] Usuário autenticado consegue navegar (não cai em loop de redirect)
+- [x] Frontend abre na URL de produção — **validado real**
+      (`arenahub-xi.vercel.app`)
+- [x] Login via Clerk funciona (sign-in real) — **validado real**, com o
+      Clerk em ambiente Development (ver Seção 8) — usuário real logou no
+      site de produção
+- [x] Usuário autenticado consegue navegar (não cai em loop de redirect) —
+      **validado real**: `GET /v1/users/me/bookings` responde `200`, sem
+      loop, depois do webhook de sincronização estar correto (ver Seção 8)
 - [ ] Criação/seleção de arena administrada aparece no dashboard
 - [ ] Dashboard carrega (ocupação do dia)
 - [ ] Criar uma quadra nova
@@ -945,69 +1006,64 @@ real, nunca assumir que "deveria funcionar":
 
 ---
 
-## 17. Handoff — Fase 19 incompleta (sessão 2026-08-26/27)
+## 17. Handoff — histórico da Fase 19 (sessões 2026-08-26/27)
 
-Esta sessão trocou de máquina no meio do trabalho. Estado exato pra continuar
-sem repetir passos já feitos:
+Esta fase trocou de máquina/sessão várias vezes. Histórico condensado pra
+quem retomar não repetir investigação já feita:
 
-### O que já está funcionando de verdade
+### Estado final desta fase (o que importa pra continuar)
 - GitHub + CI: inalterado, já era real desde a Fase 9.
-- Railway: projeto `bubbly-simplicity`, Hobby plan ativo, Postgres addon
-  **rodando**.
-- Vercel: projeto `arenahub` (scope `fraagelos-projects`), frontend **público
-  e funcionando** em `https://arenahub-xi.vercel.app` — Root Directory
-  `apps/web`, `apps/web/vercel.json` força `"framework": "nextjs"` (a
-  auto-detecção da Vercel ficava presa em "Other" e servia a saída errada,
-  causando 404 — só resolveu depois desse arquivo). SSO/Deployment
-  Protection da Vercel foi **desativado** deliberadamente (com autorização do
-  usuário) porque bloqueava acesso público de clientes reais.
-- Clerk: ambiente Production criado, webhook cadastrado, chaves de produção
-  já coladas no Railway pelo usuário.
+- Railway: projeto `bubbly-simplicity`, Hobby plan ativo, Postgres addon e
+  serviço `api` **rodando** — `/v1/health`/`/v1/health/ready` validados
+  reais. A falha de build de uma sessão anterior (abaixo) não se repetiu.
+- Vercel: projeto `arenahub` (scope `fraagelos-projects`), frontend
+  **público e funcionando** em `https://arenahub-xi.vercel.app`.
+- Clerk: rodando em **Development** deliberadamente (chaves `pk_test_`/
+  `sk_test_` na Vercel e no Railway) — ver Seção 8 pro motivo (Production
+  exige domínio próprio verificado por DNS, que este projeto não tem).
+  Webhook de sincronização de usuário cadastrado no ambiente Development,
+  apontando pro Railway, **validado com evento real**.
+- Login + `GET /v1/users/me/bookings` **validados de ponta a ponta, ao
+  vivo**, com um usuário real.
 - `apps/api/package.json`: `prisma` movido pra `dependencies` (bug real,
-  necessário pro Pre-Deploy Command rodar migrations em produção).
+  necessário pro Pre-Deploy Command rodar migrations em produção) —
+  correção permanente, mantida.
 
-### Os dois blocos pendentes, em ordem de prioridade
+### Linha do tempo do que foi investigado (contexto, não pendência)
 
-**1. Corrigir as chaves do Clerk na Vercel (rápido, sem investigação)**
+**1. Chaves do Clerk na Vercel estavam em Development por engano** — uma
+sessão anterior copiou de `apps/web/.env.local` sem notar que ainda eram as
+de dev. Corrigido pra `pk_live_`/`sk_live_` reais — e isso **quebrou o
+site** (telas de login/cadastro em branco). Investigado e encontrada a
+causa raiz real: o Clerk de produção exige um domínio próprio verificado
+por DNS (a `pk_live_` tem embutido `clerk.arenahub.vercel.app`, que não
+resolve com certificado válido — testado com `curl` direto). Decisão:
+reverter pra Development até haver domínio próprio (ver Seção 8, que tem o
+passo a passo completo de como migrar quando houver domínio).
 
-A Vercel está com `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`/`CLERK_SECRET_KEY` de
-**desenvolvimento**, não produção (Claude copiou de `apps/web/.env.local`
-sem confirmar que já tinha sido atualizado). Passos:
-1. Pegar a `pk_live_...` real em dashboard.clerk.com → ambiente Production →
-   API Keys (não é secreta, pode ser digitada em qualquer lugar).
-2. `vercel env rm NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY production` e
-   `vercel env add NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY production` com o valor
-   novo (rodar da raiz do repo, com `.vercel/project.json` linkado — ver
-   nota abaixo).
-3. `CLERK_SECRET_KEY` (`sk_live_...`) é secreta — pedir pro usuário colar
-   direto em vercel.com → projeto `arenahub` → Settings → Environment
-   Variables (nunca no chat).
-4. Depois de trocar as duas: `vercel deploy --prod` (da raiz do repo — ver
-   nota) pra rebuildar com os valores corretos (`NEXT_PUBLIC_*` é embutido
-   em build time, trocar a env var sozinha não basta).
+**2. Ao reverter pra Development, "minhas reservas" continuou quebrada**
+— mas com um erro diferente (`404`, não mais problema de chave). Causa:
+o webhook de sincronização de usuário (`user.created`) só estava cadastrado
+no ambiente **Production** do Clerk, nunca no Development — então o login
+funcionava (é só client-side), mas nenhuma linha de `User` era criada no
+Postgres, e qualquer chamada autenticada ao backend caía no
+`NotFoundException` documentado em `UsersService.findByClerkId`
+("Usuário autenticado ainda não sincronizado"). Corrigido cadastrando um
+webhook novo no ambiente Development apontando pro Railway, com o Signing
+Secret **daquele endpoint específico** (nunca o "secret do ambiente" — cada
+endpoint de webhook do Clerk tem o seu próprio) em
+`CLERK_WEBHOOK_SIGNING_SECRET` no Railway. Validado disparando um
+`user.updated` manual (editar um campo do usuário de teste no dashboard do
+Clerk) — o `upsert` em `syncFromClerkEvent` criou a linha que faltava.
 
-**2. Descobrir por que o build da API no Railway falha (não investigado a
-fundo — a etapa seguinte planejada era pedir pro usuário abrir o dashboard)**
-
-Todo deploy do serviço `api` falha no passo `BUILD_IMAGE` em ~4 segundos,
-sem log útil via `railway logs --build` nem via a query GraphQL `buildLogs`
-(`railway api 'query { buildLogs(deploymentId: "...", limit: 500) { message
-severity timestamp } }'`) — ambos só devolvem a linha de agendamento no
-"Metal builder" e depois um evento genérico de falha
-(`deploymentEvents(id: "...")`, campo `payload.error`). As configurações de
-build já estão corretas (`dockerfilePath=apps/api/Dockerfile`,
-confirmado via `serviceInstanceUpdate`/query — ver Seção 3), então a causa
-provável é algo no próprio Dockerfile/contexto que só aparece no ambiente
-remoto do Railway (diferente do build local, que nunca foi revalidado nesta
-sessão porque o Docker Desktop desta máquina está quebrado por um problema
-de SO não relacionado ao projeto).
-
-Próximo passo recomendado: abrir railway.app → projeto `bubbly-simplicity` →
-serviço `api` → deployment mais recente → aba **Build Logs** — a UI web
-costuma mostrar mais detalhe em tempo real do que a API pública. Se o
-dashboard também não mostrar nada útil, considerar contatar o suporte do
-Railway ou tentar recriar o serviço do zero com a mesma config documentada
-na Seção 3.
+**3. A falha de build do Railway (`BUILD_IMAGE` em ~4s, sem log útil)
+documentada numa sessão anterior não se reproduziu** nas verificações mais
+recentes — o serviço está `Online` e saudável. Causa raiz nunca confirmada
+com certeza (pode ter sido as duas correções já aplicadas — `prisma` em
+`dependencies` e a config do `dockerfilePath`/`healthcheckPath` setada via
+API — ou algo transitório da própria plataforma). Se o problema
+reaparecer, ver o registro histórico completo que ficava aqui antes desta
+atualização (disponível no histórico do Git deste arquivo).
 
 ### Nota operacional: `.vercel/project.json` não é versionado
 
@@ -1036,5 +1092,7 @@ bubbly-simplicity` do lado do Railway.
 | `/health/ready` retorna 503 | Postgres inacessível (rede, credencial, ou banco fora do ar) | `DATABASE_URL`, conectividade de rede da plataforma até o Postgres |
 | Frontend chama `localhost:3001` em produção | `NEXT_PUBLIC_API_URL` não configurada na Vercel | Env vars do projeto na Vercel, ambiente de produção |
 | Login/webhook do Clerk não funciona em produção | Chaves de desenvolvimento usadas em produção, ou webhook não recadastrado pro domínio real | Ver Seção 8 |
+| Telas de login/cadastro em branco depois de trocar pra chaves `pk_live_`/`sk_live_` | Clerk produção exige domínio próprio verificado por DNS — um domínio `*.vercel.app`/`*.up.railway.app` não serve | Ver Seção 8 — reverter pra Development até haver domínio próprio, ou completar a verificação de domínio no Clerk |
+| Login funciona mas qualquer chamada autenticada ao backend retorna 404 "Usuário autenticado ainda não sincronizado" | Webhook `user.created`/`user.updated` do Clerk não está cadastrado (ou está com o Signing Secret errado) para o ambiente do Clerk realmente em uso | Cadastrar/corrigir o webhook nesse ambiente específico (Seção 8) — cada endpoint tem seu próprio Signing Secret, nunca reaproveite o de outro endpoint |
 | Cliente legítimo recebe `429` num endpoint de negócio | Limite dedicado (Fase 18, Seção 5.1) atingido — verificar se é abuso real ou um limite calibrado baixo demais para o uso real do produto | `@Throttle()` no controller do endpoint em questão |
 | `429` acontece "cedo demais" com múltiplas instâncias rodando | Rate limiting é por instância (em memória) — o limite efetivo multiplica pelo número de réplicas (Fase 18, Seção 5.1) | Reduzir réplicas, ou migrar o storage do throttler para Redis antes de escalar horizontalmente |

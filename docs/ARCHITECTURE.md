@@ -2801,6 +2801,25 @@ testar em cada uma — mas a definição geral vale para todas.
 
 ## Riscos técnicos identificados
 
+- **Clerk em produção exige domínio próprio verificado por DNS — achado real da Fase 19** — ao
+  trocar as chaves do Clerk na Vercel para as de produção (`pk_live_`/`sk_live_`), o site inteiro
+  ficou em branco (telas de login/cadastro nunca renderizam). Causa raiz confirmada: a `pk_live_`
+  do Clerk embute o domínio do "Frontend API" exigido em produção
+  (`clerk.<seu-domínio>`), que precisa de registros CNAME reais no DNS de um domínio que você
+  controla — um subdomínio `*.vercel.app`/`*.up.railway.app` nunca serve pra isso, porque o DNS
+  dessas zonas pertence à Vercel/Railway, não a você. Mitigação atual: o ambiente de produção roda
+  deliberadamente com o Clerk em modo **Development** (que não tem essa exigência) até haver um
+  domínio próprio — documentado como limitação conhecida, não escondida, com o passo a passo
+  completo de migração em `docs/DEPLOYMENT.md`, Seção 8. Isso significa que, hoje, "produção" tem um
+  limite de usuários/e-mails de ambiente de teste do Clerk — relevante pra qualquer decisão de
+  lançar o produto pra usuários reais antes de resolver isso.
+- **Webhook do Clerk é por ambiente E por endpoint, não só por ambiente — achado real da Fase 19** —
+  o Signing Secret de um webhook do Clerk é único por ENDPOINT cadastrado, não um "secret do
+  ambiente" reaproveitável. Reaproveitar o secret de um endpoint antigo (ex: de desenvolvimento
+  local) para um endpoint novo (ex: apontando pra produção) falha a verificação de assinatura
+  silenciosamente do lado errado (o endpoint novo rejeita tudo com 403, mas do ponto de vista do
+  Clerk o evento "foi entregue"). Sempre copiar o secret exibido na tela do endpoint específico
+  recém-criado, nunca reutilizar de memória/documentação.
 - **Concorrência em reservas** — mitigado pela defesa em profundidade da Parte 8; é o risco mais
   crítico do produto e o único que, se mal resolvido, quebra a confiança da arena no sistema.
   **Validado na Fase 4** com teste de concorrência real (`Promise.all` contra servidor e Postgres

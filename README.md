@@ -78,7 +78,16 @@ em produção, veja [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 > backend (`helmet`), correlation ID (`X-Request-Id`) propagado via `AsyncLocalStorage` nativo do
 > Node, um filtro global de exceções que garante que nenhum erro não previsto vaza detalhe interno,
 > `WEB_APP_URL` agora obrigatória em produção, e `HEALTHCHECK` nativo do Docker — validado de
-> verdade contra uma imagem construída e executada nesta fase, não só escrito.
+> verdade contra uma imagem construída e executada nesta fase, não só escrito. A **Fase 19** colocou
+> o ArenaHub em infraestrutura real: frontend público na Vercel
+> (`arenahub-xi.vercel.app`), backend público na Railway
+> (`api-production-34e0.up.railway.app`, saudável, conectado a um Postgres gerenciado real), com
+> login e navegação autenticada validados de ponta a ponta contra essa infraestrutura ao vivo. O
+> Clerk roda em ambiente de **Development**, deliberadamente — o ambiente de Production existe mas
+> está bloqueado até haver um domínio próprio (Clerk produção exige DNS verificável, que um
+> subdomínio `*.vercel.app`/`*.up.railway.app` não oferece; ver `docs/DEPLOYMENT.md`, Seção 8, para
+> o achado completo e o passo a passo de migração quando houver domínio). Detalhes completos,
+> histórico de investigação e checklist de smoke test em `docs/DEPLOYMENT.md`.
 
 ## Stack
 
