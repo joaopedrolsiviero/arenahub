@@ -86,8 +86,11 @@ export class MercadoPagoPaymentProviderService extends PaymentProvider {
       });
 
       if (!response.ok) {
+        // DEBUG TEMPORÁRIO (Fase 23) — remover depois de identificar a causa
+        // do 500. Só vai pro log do servidor, nunca pra resposta HTTP.
+        const debugBody = await response.text().catch(() => '<unreadable>');
         this.logger.error(
-          `Mercado Pago respondeu ${response.status} em ${Date.now() - startedAt}ms.`,
+          `Mercado Pago respondeu ${response.status} em ${Date.now() - startedAt}ms. DEBUG body: ${debugBody}`,
         );
         throw new PaymentProviderError();
       }
