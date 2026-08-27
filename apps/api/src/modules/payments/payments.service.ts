@@ -162,11 +162,20 @@ export class PaymentsService {
     // chamada HTTP externa atomicamente transacional").
     const startedAt = Date.now();
     try {
+      // O Mercado Pago exige payer.email pra criar um pagamento PIX
+      // (achado real, Fase 23 — "payer_cannot_be_nil"). userId já foi
+      // validado por findMyBookingDetail acima, então este User sempre
+      // existe.
+      const { email } = await this.prisma.user.findUniqueOrThrow({
+        where: { id: userId },
+        select: { email: true },
+      });
       const result = await this.paymentProvider.createPayment({
         paymentId: payment.id,
         amount: Number(amount),
         currency: 'BRL',
         description: `Reserva ${courtId}`,
+        payerEmail: email,
       });
       this.logger.log(
         `Pagamento ${payment.id} criado no provider em ${Date.now() - startedAt}ms (arena=${arenaId}).`,

@@ -50,8 +50,8 @@ function mapMercadoPagoStatus(status: string | undefined): ProviderPaymentStatus
  * docs/ARCHITECTURE.md, Fase 17, para a justificativa completa da escolha).
  * Usa `fetch` nativo, sem SDK novo — mesma filosofia de dependências
  * mínimas já seguida em `OpenAiAiProviderService` (Fase 12) e
- * `MetaWhatsAppProviderService` (Fase 16). NUNCA exercitado contra a API
- * real neste ambiente (sem credenciais) — ver relatório da Fase 17.
+ * `MetaWhatsAppProviderService` (Fase 16). Validado contra a API real de
+ * sandbox na Fase 23 — ver docs/DEPLOYMENT.md.
  */
 @Injectable()
 export class MercadoPagoPaymentProviderService extends PaymentProvider {
@@ -81,16 +81,19 @@ export class MercadoPagoPaymentProviderService extends PaymentProvider {
           transaction_amount: request.amount,
           description: request.description,
           payment_method_id: 'pix',
+          // Obrigatório — sem isso o Mercado Pago rejeita a criação com
+          // "payer_cannot_be_nil" (achado real ao validar contra a API de
+          // verdade, Fase 23). E-mail é o único dado do payer que o domínio
+          // já tem disponível e precisa enviar; nenhum outro campo de payer
+          // é necessário pra PIX.
+          payer: { email: request.payerEmail },
         }),
         signal: controller.signal,
       });
 
       if (!response.ok) {
-        // DEBUG TEMPORÁRIO (Fase 23) — remover depois de identificar a causa
-        // do 500. Só vai pro log do servidor, nunca pra resposta HTTP.
-        const debugBody = await response.text().catch(() => '<unreadable>');
         this.logger.error(
-          `Mercado Pago respondeu ${response.status} em ${Date.now() - startedAt}ms. DEBUG body: ${debugBody}`,
+          `Mercado Pago respondeu ${response.status} em ${Date.now() - startedAt}ms.`,
         );
         throw new PaymentProviderError();
       }

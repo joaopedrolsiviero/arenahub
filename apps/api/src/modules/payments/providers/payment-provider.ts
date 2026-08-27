@@ -4,6 +4,8 @@ export interface PaymentProviderCreateRequest {
   amount: number;
   currency: string;
   description: string;
+  /** E-mail de quem está pagando — exigido pelo Mercado Pago (`payer.email`) para criar um pagamento PIX. */
+  payerEmail: string;
 }
 
 export interface PaymentProviderCreateResult {

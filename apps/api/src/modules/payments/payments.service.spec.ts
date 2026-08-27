@@ -32,6 +32,7 @@ describe('PaymentsService', () => {
       update: jest.Mock;
       updateMany: jest.Mock;
     };
+    user: { findUniqueOrThrow: jest.Mock };
   };
   let bookingsService: { findMyBookingDetail: jest.Mock };
   let paymentProvider: { createPayment: jest.Mock; getPaymentStatus: jest.Mock };
@@ -91,6 +92,7 @@ describe('PaymentsService', () => {
         update: jest.fn(),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
+      user: { findUniqueOrThrow: jest.fn().mockResolvedValue({ email: 'user1@example.com' }) },
     };
     bookingsService = { findMyBookingDetail: jest.fn().mockResolvedValue(myBooking()) };
     paymentProvider = {
@@ -159,7 +161,12 @@ describe('PaymentsService', () => {
       const result = await service.createPayment('user-1', 'booking-1', 'key-1');
 
       expect(paymentProvider.createPayment).toHaveBeenCalledWith(
-        expect.objectContaining({ paymentId: 'payment-1', amount: 75, currency: 'BRL' }),
+        expect.objectContaining({
+          paymentId: 'payment-1',
+          amount: 75,
+          currency: 'BRL',
+          payerEmail: 'user1@example.com',
+        }),
       );
       expect(prisma.payment.update).toHaveBeenCalledWith({
         where: { id: 'payment-1' },
