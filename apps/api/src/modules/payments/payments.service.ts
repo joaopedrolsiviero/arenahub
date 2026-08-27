@@ -32,19 +32,15 @@ export interface PaymentView {
   createdAt: Date;
 }
 
-function toView(
-  payment: Payment,
-  checkoutUrl: string | null,
-  pixCopyPaste: string | null,
-): PaymentView {
+function toView(payment: Payment): PaymentView {
   return {
     id: payment.id,
     bookingId: payment.bookingId,
     status: payment.status,
     amount: payment.amount,
     currency: payment.currency,
-    checkoutUrl,
-    pixCopyPaste,
+    checkoutUrl: payment.checkoutUrl,
+    pixCopyPaste: payment.pixCopyPaste,
     failureReason: payment.failureReason,
     paidAt: payment.paidAt,
     expiresAt: payment.expiresAt,
@@ -154,7 +150,7 @@ export class PaymentsService {
       // Replay de Idempotency-Key, tentativa ativa já em andamento, ou
       // pagamento já concluído — nunca chama o provider de novo (item 10:
       // "duas requisições simultâneas... nunca criar duas cobranças reais").
-      return toView(payment, null, null);
+      return toView(payment);
     }
 
     // Fora da transação — chamada externa nunca trava o Postgres (item 24
@@ -182,9 +178,13 @@ export class PaymentsService {
       );
       const updated = await this.prisma.payment.update({
         where: { id: payment.id },
-        data: { providerPaymentId: result.providerPaymentId },
+        data: {
+          providerPaymentId: result.providerPaymentId,
+          checkoutUrl: result.checkoutUrl,
+          pixCopyPaste: result.pixCopyPaste,
+        },
       });
-      return toView(updated, result.checkoutUrl, result.pixCopyPaste);
+      return toView(updated);
     } catch (error) {
       this.logger.error(
         `Falha ao criar pagamento ${payment.id} no provider: ${
@@ -198,7 +198,7 @@ export class PaymentsService {
       void failed;
       const current = await this.prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
       if (error instanceof PaymentProviderError) {
-        return toView(current, null, null);
+        return toView(current);
       }
       throw error;
     }
@@ -219,7 +219,7 @@ export class PaymentsService {
     }
 
     const resolved = await this.resolveExpiry(payment);
-    return toView(resolved, null, null);
+    return toView(resolved);
   }
 
   /** Usado só pelo webhook (nunca pelo frontend/IA) para localizar o Payment local a partir do ID do provider. */

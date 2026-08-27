@@ -494,6 +494,16 @@ model Payment {
   // mesmo pagamento no provider.
   providerPaymentId String? @unique
 
+  // Devolvidos pelo provider só na criação (a API do Mercado Pago não
+  // reenvia isso numa consulta de status) — persistidos aqui pra que toda
+  // consulta subsequente (GET /payment, usado pelo polling do frontend)
+  // consiga mostrar o mesmo QR/link, não só a resposta imediata do POST.
+  // Achado real na Fase 23: sem persistir, o QR nunca aparecia (o
+  // frontend deliberadamente só confia no estado devolvido pelo backend,
+  // nunca em resposta de mutation guardada em memória).
+  checkoutUrl  String?
+  pixCopyPaste String?
+
   // Idempotência da CRIAÇÃO (item 10 do prompt) — mesma técnica
   // "claim-first" já estabelecida em IdempotencyKey/WhatsAppEvent, aplicada
   // diretamente aqui (não uma segunda tabela): duas requisições com a MESMA

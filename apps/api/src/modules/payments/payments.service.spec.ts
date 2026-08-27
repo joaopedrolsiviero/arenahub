@@ -63,6 +63,8 @@ describe('PaymentsService', () => {
     status: 'PENDING',
     provider: 'MERCADO_PAGO',
     providerPaymentId: null,
+    checkoutUrl: null,
+    pixCopyPaste: null,
     idempotencyKey: 'key-1',
     failureReason: null,
     paidAt: null,
@@ -156,7 +158,13 @@ describe('PaymentsService', () => {
 
     it('chama o provider só depois de criar o Payment local, e persiste o providerPaymentId', async () => {
       tx.payment.create.mockResolvedValue(paymentRow());
-      prisma.payment.update.mockResolvedValue(paymentRow({ providerPaymentId: 'mp-123' }));
+      prisma.payment.update.mockResolvedValue(
+        paymentRow({
+          providerPaymentId: 'mp-123',
+          checkoutUrl: 'https://mp.example/checkout',
+          pixCopyPaste: '00020126...',
+        }),
+      );
 
       const result = await service.createPayment('user-1', 'booking-1', 'key-1');
 
@@ -170,7 +178,11 @@ describe('PaymentsService', () => {
       );
       expect(prisma.payment.update).toHaveBeenCalledWith({
         where: { id: 'payment-1' },
-        data: { providerPaymentId: 'mp-123' },
+        data: {
+          providerPaymentId: 'mp-123',
+          checkoutUrl: 'https://mp.example/checkout',
+          pixCopyPaste: '00020126...',
+        },
       });
       expect(result.checkoutUrl).toBe('https://mp.example/checkout');
       expect(result.pixCopyPaste).toBe('00020126...');
