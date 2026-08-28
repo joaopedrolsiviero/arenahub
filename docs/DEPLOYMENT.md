@@ -27,17 +27,38 @@
 > métricas, RBAC, isolamento entre arenas, IDOR) — sem nenhum bug
 > encontrado. Ver relatórios das respectivas fases.
 >
-> **Fase 23 (Mercado Pago/PIX) — EM ANDAMENTO, bloqueada em ação externa**:
-> um bug real do fluxo de pagamento foi encontrado e corrigido (corpo HTTP
-> vazio interpretado como erro fatal no client — commit `9b735a5`, já em
-> produção), e toda a segurança/ownership do pagamento (reserva
+> **Fase 23 (Mercado Pago/PIX) — PAUSADA deliberadamente, bloqueio de
+> ferramenta de teste (não do nosso código)**: a conta do Mercado Pago foi
+> verificada e credenciais de teste reais (`TEST-...`) foram configuradas em
+> produção (Railway). A partir daí, **três bugs reais foram encontrados e
+> corrigidos** validando contra a API real do gateway (não só inspeção de
+> código):
+> 1. Corpo HTTP vazio interpretado como erro fatal no client (commit
+>    `9b735a5`).
+> 2. `payer.email` ausente no request — o Mercado Pago rejeitava toda
+>    criação de pagamento com `500 payer_cannot_be_nil` (commit `43e1b7c`).
+> 3. `checkoutUrl`/`pixCopyPaste`/`qrCodeBase64` nunca eram persistidos —
+>    o Mercado Pago só devolve isso na criação, então toda consulta
+>    seguinte (o polling que o frontend já fazia por design) via `null`; o
+>    QR/copia-e-cola simplesmente não aparecia mesmo com o pagamento criado
+>    com sucesso (commits `427c5f1` e `46e51cf`).
+>
+> Depois dos três fixes: pagamento PIX criado de verdade contra o Mercado
+> Pago (sandbox), QR Code visual e código copia-e-cola exibidos
+> corretamente na tela da reserva em produção, webhook de criação recebido
+> e verificado (assinatura HMAC real). Toda a segurança/ownership (reserva
 > cancelada/inexistente/de outro usuário, degradação graciosa sem
-> credencial) foi validada ao vivo. **A validação real de ponta a ponta com
-> o gateway (PIX, QR Code, webhook, aprovação) está bloqueada**: não existe
-> nenhuma credencial do Mercado Pago ainda — a criação da conta exige
-> verificação de identidade com selfie que só pode ser concluída em outro
-> computador. Ver Seção 5 ("Pagamentos") para o passo a passo exato de como
-> retomar assim que a conta estiver verificada.
+> credencial) também validada ao vivo.
+>
+> **O que ficou de fora**: a confirmação real de `PAID` via pagamento
+> efetivamente completado. As contas de teste "comprador" do Mercado Pago
+> só conseguem pagar PIX pelo aplicativo de celular (a interface web
+> bloqueia `Copia e Cola` deliberadamente) — e o app, ao logar com uma
+> conta de teste, exige verificação de documento que falha (conta fake,
+> sem CPF real por trás). Isso é uma limitação da ferramenta de sandbox do
+> próprio Mercado Pago, não um bug do ArenaHub. Decisão consciente:
+> **pausar aqui em vez de fingir uma validação que não aconteceu.** Ver
+> Seção 5 ("Pagamentos") para o passo a passo exato de como retomar.
 
 ---
 
@@ -657,24 +678,23 @@ gerar credenciais de sandbox, configurar o webhook apontando pra
 a ponta com as credenciais de teste — não fingir que essa validação já aconteceu.
 
 > **Atualização (Fase 23 — Mercado Pago e Pagamento via PIX de Ponta a Ponta,
-> sessão em 2026-08-27, INCOMPLETA — bloqueada em ação externa)**:
+> sessões em 2026-08-27, PAUSADA — bloqueio de ferramenta de teste, não do
+> nosso código)**:
 >
-> **Bug real encontrado e corrigido** (não era falta de credencial): a tela
-> de "minhas reservas" mostrava "Não foi possível carregar o pagamento"
-> mesmo sem nenhuma tentativa de pagamento ainda existir. Causa raiz: quando
+> **Bug real #1** (encontrado antes de haver qualquer credencial): a tela de
+> "minhas reservas" mostrava "Não foi possível carregar o pagamento" mesmo
+> sem nenhuma tentativa de pagamento ainda existir. Causa raiz: quando
 > `PaymentsController.getPayment` retorna `null` (nenhuma tentativa ainda), o
 > NestJS devolve um corpo HTTP **literalmente vazio** (`Content-Length: 0`),
 > nunca a string JSON `"null"`. Um `fetch().json()` real de navegador lança
 > `SyntaxError` nesse caso — o teste e2e existente nunca pegou isso porque o
 > supertest normaliza corpo vazio pra `{}` sozinho (`response.body`),
-> mascarando o comportamento real. **Corrigido e publicado em produção**
-> (commit `9b735a5`): `request()` em `apps/web/src/lib/api.ts` agora lê o
-> corpo como texto antes de tentar `JSON.parse`, tratando vazio como `null`.
-> Validado ao vivo contra produção depois do deploy.
+> mascarando o comportamento real. Corrigido em `apps/web/src/lib/api.ts`
+> (commit `9b735a5`): `request()` agora lê o corpo como texto antes de
+> tentar `JSON.parse`, tratando vazio como `null`.
 >
 > **Validado ao vivo em produção, sem precisar de credencial real** (todas
-> essas checagens acontecem ANTES de qualquer chamada ao gateway, então não
-> dependem do Mercado Pago estar configurado):
+> essas checagens acontecem ANTES de qualquer chamada ao gateway):
 > - Criar pagamento pra reserva já cancelada → `409`, nenhum pagamento criado.
 > - Criar pagamento pra reserva inexistente → `404`, nenhuma informação vazada.
 > - Usuário B tentando criar OU LER o pagamento da reserva do usuário A →
@@ -685,33 +705,68 @@ a ponta com as credenciais de teste — não fingir que essa validação já aco
 >   `failureReason: "PROVIDER_ERROR"` — nunca um 500 cru, degrada
 >   graciosamente exatamente como projetado.
 >
-> **Bloqueado — ação externa meio-completada**: o usuário iniciou a criação
-> de uma conta Mercado Pago (necessária pra gerar credenciais de teste/PIX
-> sandbox), mas o Mercado Pago exige verificação de identidade com selfie
-> que só pode ser concluída depois, em outro computador. **Nenhuma
-> credencial de Mercado Pago existe em lugar nenhum ainda** (nem local, nem
-> Railway) — confirmado checando as variáveis reais do serviço `api`.
+> **Credenciais de teste reais configuradas** (sessão seguinte, conta
+> Mercado Pago já verificada): aplicação criada no painel de developers
+> (Checkout Transparente → API de Pagamentos, a mesma que o código já
+> implementava — não a API de Orders, mais nova, que exigiria reescrever a
+> integração), `PAYMENT_API_KEY` (`TEST-...`) e `PAYMENT_WEBHOOK_SECRET`
+> configurados direto no Railway pelo usuário (nunca passaram pelo Claude).
 >
-> **Retomar de onde parou** (quando a conta estiver verificada):
-> 1. Finalizar a verificação de identidade no Mercado Pago.
-> 2. Painel do desenvolvedor (mercadopago.com.br/developers/panel) → criar
->    aplicação → pegar o **Access Token de TESTE** (`TEST-...`) → vira
->    `PAYMENT_API_KEY`.
-> 3. Na mesma aplicação, cadastrar um webhook apontando pra
->    `https://api-production-34e0.up.railway.app/v1/webhooks/payments/mercadopago`,
->    evento "Pagamentos" → o Signing Secret mostrado vira
->    `PAYMENT_WEBHOOK_SECRET`.
-> 4. Configurar as duas variáveis no Railway (serviço `api` → Variables).
-> 5. Validar: criar uma reserva → "Pagar com PIX" → confirmar QR/copia-e-cola
->    reais aparecem → usar o mecanismo de teste do Mercado Pago pra simular
->    aprovação → confirmar que o webhook chega e o status muda pra `PAID`
->    (nunca aceitar só a palavra do frontend como prova — sempre reconferir
->    via `GET .../payment`).
+> **Bug real #2**: toda criação de pagamento passou a responder `500` do
+> lado do Mercado Pago com `"payer_cannot_be_nil"`. O request nunca incluía
+> o objeto `payer` — `PaymentProviderCreateRequest` ganhou `payerEmail`,
+> `PaymentsService` busca o e-mail do `User` (já validado como dono da
+> Booking) antes de chamar o provider. Corrigido no commit `43e1b7c`,
+> confirmado ao vivo (pagamento passou a ser criado com sucesso).
 >
-> Ver o relatório da Fase 23 (quando concluída) para o restante da
-> validação — idempotência sob concorrência real, webhook duplicado/fora de
-> ordem/inválido, e os estados `PENDING`/`APPROVED`/`REJECTED`/`EXPIRED`
-> continuam pendentes até haver credencial real.
+> **Bug real #3**: mesmo com o pagamento criado, nem o código PIX
+> copia-e-cola nem o QR Code apareciam na tela. Causa raiz: o Mercado Pago
+> só devolve `qr_code`/`qr_code_base64`/`ticket_url` na resposta da
+> **criação** — nunca numa consulta de status. Como `PaymentsService` nunca
+> persistia esses valores (só `providerPaymentId`), toda consulta seguinte
+> (o polling que `useBookingPayment` já fazia por design, seguindo o
+> princípio "frontend sempre reflete o estado do backend, nunca confia em
+> resposta de mutation guardada em memória") devolvia `null` pros três
+> campos. `Payment` ganhou as colunas `checkoutUrl`/`pixCopyPaste`/
+> `qrCodeBase64` (migrations não-destrutivas), persistidas na criação e
+> devolvidas em toda consulta subsequente. Corrigido nos commits `427c5f1`
+> (copia-e-cola/link) e `46e51cf` (QR Code visual, campo `qr_code_base64`
+> que o Mercado Pago já devolvia mas nunca era capturado). Confirmado ao
+> vivo: QR Code e copia-e-cola aparecem corretamente na reserva em
+> produção depois de "Pagar com PIX".
+>
+> **O que ficou pendente — bloqueio da ferramenta de teste, não do
+> ArenaHub**: para fechar o ciclo (confirmar `PAID` de verdade via
+> webhook), é preciso efetivamente pagar o PIX de teste com uma conta
+> "compradora" do Mercado Pago. A interface **web** do Mercado Pago recusa
+> pagar via Pix Copia e Cola ("Abra o app no celular pra pagar" — bloqueio
+> deliberado deles, não nosso). No **app** de celular, a conta de teste
+> compradora criada no painel de developers pede verificação de documento
+> ao logar — e falha, porque é uma conta fake sem CPF real por trás. Sem
+> outra forma de completar um pagamento de teste disponível nesta sessão,
+> a decisão foi **pausar aqui em vez de fingir uma validação que não
+> aconteceu**. Webhook de **criação** foi recebido e teve a assinatura
+> verificada com sucesso (confirmado nos logs reais da Railway); o webhook
+> de **aprovação** nunca chegou a ser exercitado porque nenhum pagamento
+> real/de teste foi efetivamente completado.
+>
+> **Retomar de onde parou** (quando houver uma forma de completar um
+> pagamento de teste — app funcionando com outra conta de teste, ou
+> aceitar usar um valor real pequeno):
+> 1. Criar uma reserva → "Pagar com PIX" → QR Code e copia-e-cola já
+>    funcionam, não precisa investigar essa parte de novo.
+> 2. Pagar de fato (app do Mercado Pago com conta de teste funcional, ou
+>    PIX real de baixo valor).
+> 3. Confirmar que o webhook de aprovação chega e o status muda pra `PAID`
+>    — nunca aceitar só a palavra do frontend como prova, sempre reconferir
+>    via `GET .../payment` (ou, melhor ainda, direto no banco — `railway
+>    connect` exige uma chave SSH registrada antes, `railway ssh keys add`
+>    ou `railway ssh keys github`, não configurado nesta sessão).
+> 4. Depois de `PAID` confirmado: idempotência sob concorrência real,
+>    webhook duplicado/fora de ordem/inválido, e os estados
+>    `REJECTED`/`EXPIRED` — tudo isso já tem cobertura e2e com provider
+>    fake (`test/payments.e2e-spec.ts`), só falta a confirmação com o
+>    gateway de verdade.
 
 ### 5.1. Rate limiting (Fase 18) — em memória, NUNCA distribuído
 
