@@ -231,6 +231,43 @@ export class PaymentsService {
   }
 
   /**
+   * Resumo leve (só `bookingId` + `status`) da tentativa de pagamento MAIS
+   * RECENTE de cada Booking do usuário — pensado pra "Minhas reservas"
+   * (Fase 26, item 14 do prompt: a lista precisa mostrar status do
+   * pagamento, não só da reserva) mostrar isso sem N+1 (uma consulta por
+   * reserva). `distinct: ['bookingId']` + `orderBy: createdAt desc` é o
+   * padrão suportado pelo Prisma pra "a linha mais recente de cada grupo"
+   * numa única query.
+   *
+   * Nunca escreve no banco (diferente de `resolveExpiry`, usado na tela de
+   * detalhes) — um `PENDING` cujo prazo já passou é reportado como
+   * `EXPIRED` só nesta resposta, pra exibição; a escrita real (lazy expiry)
+   * continua acontecendo só quando o cliente abre os detalhes da reserva,
+   * evitando N escritas concorrentes toda vez que a lista é carregada.
+   */
+  async getLatestPaymentStatusesForUser(userId: string): Promise<Record<string, PaymentStatus>> {
+    const payments = await this.prisma.payment.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      distinct: ['bookingId'],
+      select: { bookingId: true, status: true, expiresAt: true },
+    });
+
+    const now = Date.now();
+    const result: Record<string, PaymentStatus> = {};
+    for (const payment of payments) {
+      const displayStatus =
+        payment.status === PaymentStatus.PENDING &&
+        payment.expiresAt &&
+        payment.expiresAt.getTime() <= now
+          ? PaymentStatus.EXPIRED
+          : payment.status;
+      result[payment.bookingId] = displayStatus;
+    }
+    return result;
+  }
+
+  /**
    * Aplica o status AUTORITATIVO já buscado do provider (nunca o que veio
    * no corpo do webhook) — CAS condicionado a `status: PENDING` (item 9 do
    * prompt): PENDING é o ÚNICO estado não-terminal desta máquina de

@@ -29,6 +29,7 @@ describe('PaymentsService', () => {
       findUnique: jest.Mock;
       findUniqueOrThrow: jest.Mock;
       findFirst: jest.Mock;
+      findMany: jest.Mock;
       update: jest.Mock;
       updateMany: jest.Mock;
     };
@@ -92,6 +93,7 @@ describe('PaymentsService', () => {
         findUnique: jest.fn(),
         findUniqueOrThrow: jest.fn(),
         findFirst: jest.fn(),
+        findMany: jest.fn(),
         update: jest.fn(),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
@@ -290,6 +292,52 @@ describe('PaymentsService', () => {
         data: { status: 'EXPIRED' },
       });
       expect(result?.status).toBe('EXPIRED');
+    });
+  });
+
+  describe('getLatestPaymentStatusesForUser (Fase 26)', () => {
+    it('devolve um mapa bookingId -> status, uma linha por Booking (a mais recente)', async () => {
+      prisma.payment.findMany.mockResolvedValue([
+        { bookingId: 'booking-1', status: 'PAID', expiresAt: null },
+        { bookingId: 'booking-2', status: 'FAILED', expiresAt: null },
+      ]);
+
+      const result = await service.getLatestPaymentStatusesForUser('user-1');
+
+      expect(prisma.payment.findMany).toHaveBeenCalledWith({
+        where: { userId: 'user-1' },
+        orderBy: { createdAt: 'desc' },
+        distinct: ['bookingId'],
+        select: { bookingId: true, status: true, expiresAt: true },
+      });
+      expect(result).toEqual({ 'booking-1': 'PAID', 'booking-2': 'FAILED' });
+    });
+
+    it('PENDING com prazo vencido é reportado como EXPIRED só na resposta, sem escrever no banco', async () => {
+      prisma.payment.findMany.mockResolvedValue([
+        { bookingId: 'booking-1', status: 'PENDING', expiresAt: new Date(Date.now() - 1000) },
+      ]);
+
+      const result = await service.getLatestPaymentStatusesForUser('user-1');
+
+      expect(result).toEqual({ 'booking-1': 'EXPIRED' });
+      expect(prisma.payment.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('PENDING ainda dentro do prazo continua PENDING', async () => {
+      prisma.payment.findMany.mockResolvedValue([
+        { bookingId: 'booking-1', status: 'PENDING', expiresAt: new Date(Date.now() + 60_000) },
+      ]);
+
+      const result = await service.getLatestPaymentStatusesForUser('user-1');
+
+      expect(result).toEqual({ 'booking-1': 'PENDING' });
+    });
+
+    it('sem nenhuma tentativa de pagamento, devolve mapa vazio', async () => {
+      prisma.payment.findMany.mockResolvedValue([]);
+
+      await expect(service.getLatestPaymentStatusesForUser('user-1')).resolves.toEqual({});
     });
   });
 

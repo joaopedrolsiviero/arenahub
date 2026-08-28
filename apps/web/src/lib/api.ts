@@ -17,6 +17,7 @@ import type {
   OperatingInterval,
   OperatingIntervalInput,
   OwnershipTransferResult,
+  PaymentStatus,
   PaymentView,
   PublicInvitation,
   ReportQuery,
@@ -376,4 +377,12 @@ export const api = {
     });
     return result?.id ? (result as PaymentView) : null;
   },
+
+  // Fase 26, item 14: status do pagamento (não só da reserva) na listagem
+  // "Minhas reservas" — um mapa bookingId -> status da tentativa mais
+  // recente, sem N+1 (uma chamada só, em paralelo com `getMyBookings`).
+  // Bookings sem nenhuma tentativa de pagamento simplesmente não aparecem
+  // no mapa (nunca `null`/undefined explícito por chave).
+  getMyPaymentStatuses: (token: string | null): Promise<Record<string, PaymentStatus>> =>
+    request('/users/me/payments', { token }),
 };

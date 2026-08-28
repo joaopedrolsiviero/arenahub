@@ -122,6 +122,22 @@ describe('BookingDetail', () => {
     );
   });
 
+  it('avisa que não há reembolso automático ao cancelar uma reserva já paga (Fase 26, item 22)', async () => {
+    mockedUseMyBooking.mockReturnValue({ data: booking, isPending: false, isError: false });
+    mockedUseBookingPayment.mockReturnValue({
+      data: { status: 'PAID', paidAt: '2026-09-07T13:05:00.000Z' },
+      isPending: false,
+      isError: false,
+    });
+    render(<BookingDetail bookingId="booking-1" />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancelar reserva' }));
+
+    expect(
+      await screen.findByText(/não gera reembolso automático/i),
+    ).toBeInTheDocument();
+  });
+
   it('mostra mensagem de erro amigável quando o cancelamento falha', async () => {
     mutateAsync.mockRejectedValue(new ApiError(409, 'Reserva já cancelada.'));
     mockedUseMyBooking.mockReturnValue({ data: booking, isPending: false, isError: false });

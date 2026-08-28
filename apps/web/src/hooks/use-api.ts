@@ -74,6 +74,17 @@ export function useMyBookings() {
   });
 }
 
+// Fase 26, item 14: consultado em paralelo com `useMyBookings` na tela
+// "Minhas reservas" pra mostrar status do pagamento junto do status da
+// reserva, sem N+1 (uma chamada só pra todas as reservas do usuário).
+export function useMyPaymentStatuses() {
+  const getToken = useToken();
+  return useQuery({
+    queryKey: ['my-payment-statuses'],
+    queryFn: async () => api.getMyPaymentStatuses(await getToken()),
+  });
+}
+
 export function useMyBooking(bookingId: string | undefined) {
   const getToken = useToken();
   return useQuery({

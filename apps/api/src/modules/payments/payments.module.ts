@@ -4,6 +4,7 @@ import { UsersModule } from '../users/users.module';
 import { BookingsModule } from '../bookings/bookings.module';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { PaymentsController } from './payments.controller';
+import { MyPaymentsController } from './my-payments.controller';
 import { PaymentsWebhookController } from './payments-webhook.controller';
 import { PaymentsService } from './payments.service';
 import { PaymentsWebhookService } from './payments-webhook.service';
@@ -19,7 +20,7 @@ import { MercadoPagoPaymentProviderService } from './providers/mercado-pago-paym
 // WhatsApp além do necessário pra manter a arquitetura preparada").
 @Module({
   imports: [AuthModule, UsersModule, BookingsModule, PrismaModule],
-  controllers: [PaymentsController, PaymentsWebhookController],
+  controllers: [PaymentsController, MyPaymentsController, PaymentsWebhookController],
   providers: [
     PaymentsService,
     PaymentsWebhookService,

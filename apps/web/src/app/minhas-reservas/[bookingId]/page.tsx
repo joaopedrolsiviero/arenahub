@@ -137,6 +137,12 @@ function PaymentSection({ booking }: { booking: MyBooking }) {
                 Esta tentativa de pagamento foi cancelada porque a reserva foi cancelada.
               </p>
             ) : null}
+
+            {payment.status === 'EXPIRED' ? (
+              <p className="text-sm text-muted-foreground">
+                O prazo para pagar esse PIX expirou. Tente pagar novamente.
+              </p>
+            ) : null}
           </>
         ) : null}
 
@@ -162,6 +168,13 @@ export function BookingDetail({ bookingId }: { bookingId: string }) {
   const { data: booking, isPending, isError } = useMyBooking(bookingId);
   const cancelBooking = useCancelBooking();
   const [cancelError, setCancelError] = useState<string | null>(null);
+  // Mesma query key de `PaymentSection` abaixo — o React Query dedupe evita
+  // uma segunda requisição; só precisamos saber aqui se já está PAID pra
+  // avisar no dialog de cancelamento (item 22 do prompt da Fase 26: não
+  // inventar política de reembolso, só deixar claro o que realmente
+  // acontece hoje — nada, o Payment continua PAID mesmo com a Booking
+  // cancelada).
+  const { data: payment } = useBookingPayment(bookingId);
 
   async function handleCancel() {
     if (!booking) return;
@@ -248,6 +261,12 @@ export function BookingDetail({ bookingId }: { bookingId: string }) {
               <AlertDialogDescription>
                 {booking.court.name} · {booking.court.arena.name} · {timePart}, {datePart}. Essa ação não
                 pode ser desfeita.
+                {payment?.status === 'PAID' ? (
+                  <>
+                    {' '}
+                    Esta reserva já está paga — o cancelamento não gera reembolso automático.
+                  </>
+                ) : null}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>

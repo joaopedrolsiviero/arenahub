@@ -1,10 +1,25 @@
 import Link from 'next/link';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardAction } from '@/components/ui/card';
 import { BookingStatusBadge } from '@/components/booking-status-badge';
+import { PaymentStatusBadge } from '@/components/payment-status-badge';
 import { formatCurrencyBRL, formatDateInZone, formatTimeInZone } from '@/lib/format';
-import type { MyBooking } from '@/lib/types';
+import type { MyBooking, PaymentStatus } from '@/lib/types';
 
-export function BookingCard({ booking, highlight = false }: { booking: MyBooking; highlight?: boolean }) {
+// Fase 26, item 17: "Reserva" (BookingStatus) e "Pagamento" (PaymentStatus)
+// são conceitos independentes — os dois badges aparecem lado a lado, nunca
+// um substituindo o outro. `paymentStatus` vem de uma consulta separada
+// (`useMyPaymentStatuses`, uma chamada só pra todas as reservas da lista);
+// `undefined` significa "nenhuma tentativa de pagamento ainda" — omite o
+// badge em vez de inventar um estado que não existe.
+export function BookingCard({
+  booking,
+  paymentStatus,
+  highlight = false,
+}: {
+  booking: MyBooking;
+  paymentStatus?: PaymentStatus;
+  highlight?: boolean;
+}) {
   return (
     <Link href={`/minhas-reservas/${booking.id}`} className="group block">
       <Card
@@ -17,8 +32,9 @@ export function BookingCard({ booking, highlight = false }: { booking: MyBooking
         <CardHeader>
           <CardTitle>{booking.court.arena.name}</CardTitle>
           <CardDescription>{booking.court.name}</CardDescription>
-          <CardAction>
+          <CardAction className="flex flex-col items-end gap-1">
             <BookingStatusBadge status={booking.status} />
+            {paymentStatus ? <PaymentStatusBadge status={paymentStatus} /> : null}
           </CardAction>
         </CardHeader>
         <CardContent className="flex items-end justify-between">

@@ -691,4 +691,48 @@ describe('Pagamentos (e2e)', () => {
       expect(payment.arenaId).not.toBe(arenaAId);
     });
   });
+
+  describe('GET /v1/users/me/payments — resumo pra "Minhas reservas" (Fase 26, item 14)', () => {
+    it('exige autenticação (401)', async () => {
+      await request(app.getHttpServer()).get('/v1/users/me/payments').expect(401);
+    });
+
+    it('devolve o status da tentativa MAIS RECENTE de cada Booking do usuário, nunca a de outro usuário', async () => {
+      const bookingA1 = await createConfirmedBooking(courtAId, customerAId, 70);
+      await request(app.getHttpServer())
+        .post(paymentsUrl(bookingA1.id))
+        .set(...authHeader('token-customer-a'))
+        .set('Idempotency-Key', randomUUID())
+        .expect(201);
+
+      const bookingB1 = await createConfirmedBooking(courtBId, customerBId, 71);
+      await request(app.getHttpServer())
+        .post(paymentsUrl(bookingB1.id))
+        .set(...authHeader('token-customer-b'))
+        .set('Idempotency-Key', randomUUID())
+        .expect(201);
+
+      const response = await request(app.getHttpServer())
+        .get('/v1/users/me/payments')
+        .set(...authHeader('token-customer-a'))
+        .expect(200);
+
+      const summary = response.body as Record<string, string>;
+      expect(summary[bookingA1.id]).toBe('PENDING');
+      // Nunca vaza o status do pagamento de B pra uma consulta feita por A —
+      // mesma disciplina anti-IDOR do resto do módulo (item 16 do prompt).
+      expect(summary[bookingB1.id]).toBeUndefined();
+    });
+
+    it('Booking sem nenhuma tentativa de pagamento simplesmente não aparece no mapa', async () => {
+      const bookingSemPagamento = await createConfirmedBooking(courtAId, customerAId, 72);
+
+      const response = await request(app.getHttpServer())
+        .get('/v1/users/me/payments')
+        .set(...authHeader('token-customer-a'))
+        .expect(200);
+
+      expect((response.body as Record<string, string>)[bookingSemPagamento.id]).toBeUndefined();
+    });
+  });
 });

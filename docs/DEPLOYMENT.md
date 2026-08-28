@@ -80,6 +80,16 @@
 > a partir de agora, qualquer pagamento real no ArenaHub gera cobrança de
 > verdade. Ver Seção 19 para o relatório completo.
 >
+> **Fase 26 (Jornada Completa do Cliente) — GO (2026-08-28/29)**: auditoria
+> mostrou que quase toda a jornada (descoberta de arena → data → quadra →
+> disponibilidade → reserva → pagamento → minhas reservas → detalhes →
+> cancelamento) já estava implementada e correta desde as Fases 1-18.
+> Nenhuma mudança de arquitetura. Só 3 lacunas reais foram fechadas: status
+> do pagamento agora aparece na lista "Minhas reservas" (endpoint novo
+> `GET /v1/users/me/payments`, sem N+1), texto explicativo pro estado
+> `EXPIRED` do pagamento, e aviso honesto (sem inventar política) de que
+> cancelar uma reserva já paga não gera reembolso automático. Ver Seção 20.
+>
 > **Fase 24 (migração pra Orders API) — TENTADA e REVERTIDA deliberadamente,
 > produção usa a Payments API (clássica) de novo**: ver Seção 0.3 pro
 > relato completo. Resumo: a Orders API tem, sim, um mecanismo oficial de
@@ -1520,6 +1530,114 @@ outro: usar uma credencial de **produção real**.
 - Lint: 0 erros, 1 aviso pré-existente (`no-img-element` no QR Code)
 - Typecheck: limpo
 - Build: verde
+
+---
+
+## 20. Fase 26 — Jornada Completa do Cliente (2026-08-28/29)
+
+### Objetivo
+Transformar o fluxo técnico comprovado na Fase 25 (pagamento real →
+`approved` → webhook → `PAID` automático) numa jornada de cliente coerente
+de ponta a ponta: descobrir arena → escolher data/quadra/horário → reservar
+→ pagar → ver confirmação → consultar depois.
+
+### Auditoria — quase tudo já existia (Fases 1-18)
+Antes de qualquer código, a jornada inteira foi mapeada. Resultado: a
+maior parte já estava implementada e correta —
+
+| Etapa | Estado antes da Fase 26 |
+|---|---|
+| Descoberta de arena (`/arenas`) | ✅ Completo |
+| Escolha de data (Luxon, timezone da arena) | ✅ Completo |
+| Escolha de quadra | ✅ Completo |
+| Disponibilidade (backend é a única fonte de verdade) | ✅ Completo |
+| Criação de reserva (idempotência + concorrência) | ✅ Completo |
+| Resumo antes de reservar (`BookingSummaryCard`) | ✅ Completo |
+| Pagamento PIX (QR/copia-cola/polling 5s) | ✅ Completo |
+| "Minhas reservas" (próximas/histórico/canceladas) | ✅ Completo |
+| Detalhes da reserva | ✅ Completo |
+| Cancelamento | ✅ Completo |
+| Responsividade (Tailwind `sm:`/`md:`/`lg:` consistente) | ✅ Completo |
+| **Status do pagamento na lista "Minhas reservas"** | ❌ Faltava — só mostrava status da reserva |
+| Texto explicativo do estado `EXPIRED` do pagamento | ⚠️ Faltava (FAILED/CANCELLED já tinham) |
+| Aviso ao cancelar uma reserva já paga | ⚠️ Faltava (nenhuma menção ao Payment no dialog) |
+
+Nenhuma mudança de arquitetura foi necessária ou feita: `Booking` continua
+`CONFIRMED` desde a criação, sem novo estado `PENDING_PAYMENT`; nenhuma
+migration; Payments API preservada integralmente.
+
+### O que foi implementado (só as lacunas reais)
+
+1. **Status do pagamento em "Minhas reservas"** — endpoint novo
+   `GET /v1/users/me/payments` (`MyPaymentsController`, dentro de
+   `PaymentsModule`) devolve um mapa `{ bookingId: status }` da tentativa de
+   pagamento mais recente de cada reserva do usuário, numa única query
+   (`distinct: ['bookingId']` + `orderBy: createdAt desc`, sem N+1). Vive em
+   `PaymentsModule` (não em `BookingsModule`) deliberadamente — a mesma
+   regra "`Booking` nunca depende de `Payment`" da Fase 4 também vale pro
+   grafo de módulos do Nest, não só pro modelo de dados; `BookingsModule` já
+   é importado por `PaymentsModule`, então o inverso criaria um ciclo.
+   Frontend busca essa lista em paralelo com `useMyBookings` (`useMyPaymentStatuses`)
+   e mescla por `bookingId` — `BookingCard` agora mostra os dois badges
+   (`BookingStatusBadge` + `PaymentStatusBadge`) lado a lado quando há
+   pagamento associado.
+2. **Texto explicativo pro estado `EXPIRED`** na tela de detalhes — "O
+   prazo para pagar esse PIX expirou. Tente pagar novamente." (mesmo padrão
+   já usado por FAILED/CANCELLED).
+3. **Aviso no dialog de cancelamento** quando a reserva já tem um `Payment`
+   `PAID`: "Esta reserva já está paga — o cancelamento não gera reembolso
+   automático." Não inventa nenhuma política nova (reembolso, crédito,
+   prazo) — só descreve honestamente o que o sistema já faz hoje (nada:
+   `BookingsService.cancel` nunca tocou em `Payment`, auditado nesta fase).
+   **Pendência explícita, não resolvida aqui**: se/quando o produto quiser
+   uma política de reembolso de verdade, é uma fase própria — fora de
+   escopo da Fase 26 por decisão do prompt.
+
+### O que foi confirmado como já correto (nenhuma mudança)
+- "Confirmação automática": o `PaymentStatusBadge` (verde, com ícone de
+  check, texto "Pago") já aparece automaticamente via polling de 5s assim
+  que o webhook aplica `PAID` — sem botão de confirmar, sem página de
+  confirmação separada. Considerado suficiente pra clareza exigida (item
+  11/13 do prompt) sem adicionar uma tela nova.
+- Nenhum mass assignment possível: `PaymentsController` continua sem
+  `@Body()` em nenhuma rota.
+- IDOR: o novo endpoint de resumo também foi testado (usuário A nunca vê
+  o status de pagamento de uma reserva do usuário B).
+
+### Testes adicionados
+- Backend: 1 novo `describe` em `payments.service.spec.ts`
+  (`getLatestPaymentStatusesForUser`, 4 casos) + 1 novo `describe` e2e em
+  `payments.e2e-spec.ts` (3 casos, incluindo IDOR do endpoint novo).
+- Frontend: 1 novo teste em `minhas-reservas/page.test.tsx` (badge de
+  pagamento aparece/some corretamente) + 1 novo teste em
+  `minhas-reservas/[bookingId]/page.test.tsx` (aviso de reembolso no
+  dialog de cancelamento).
+
+### Testes automatizados (números reais, após todas as mudanças)
+- Backend unit: **388/388** (30 suítes)
+- Backend e2e: **314/336** — única falha continua sendo
+  `invitation-flow.e2e-spec.ts` (22 testes), pré-existente e não
+  relacionada (mesma causa confirmada desde a Fase 23).
+- Frontend unit: **130/130** (19 suítes)
+- Lint: 0 erros, 1 aviso pré-existente
+- Typecheck: limpo
+- Build: verde
+
+### Teste manual em produção
+Ver commit de deploy — verificação feita contra dados reais já existentes
+da Fase 25 (o pagamento de R$1 aprovado, e a tentativa órfã que expirou),
+**sem gerar nenhuma cobrança nova**.
+
+### Pendências reais (nenhuma inventada)
+- Política de cancelamento/reembolso pra reservas já pagas — hoje não
+  existe nenhuma (nem reembolso, nem bloqueio de cancelamento); a Fase 26
+  só tornou isso visível na UI, não implementou uma política nova.
+- Testes de componente ainda faltando (pré-existente, não é regressão
+  desta fase): `apps/web/src/app/arenas/[arenaId]/page.tsx` (escolha de
+  quadra) e alguns componentes (`arena-card`, `court-card`,
+  `dashboard-date-nav`) não têm `.test.tsx` próprio.
+- `PAYMENT_SANDBOX_TEST_PAYER_NAME` (variável órfã da Fase 24 no Railway)
+  continua sem uso — segue não sendo urgente remover.
 
 ---
 
