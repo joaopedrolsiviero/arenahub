@@ -59,6 +59,24 @@
 > próprio Mercado Pago, não um bug do ArenaHub. Decisão consciente:
 > **pausar aqui em vez de fingir uma validação que não aconteceu.** Ver
 > Seção 5 ("Pagamentos") para o passo a passo exato de como retomar.
+>
+> **Fase 24 (migração pra Orders API) — TENTADA e REVERTIDA deliberadamente,
+> produção usa a Payments API (clássica) de novo**: ver Seção 0.3 pro
+> relato completo. Resumo: a Orders API tem, sim, um mecanismo oficial de
+> auto-aprovação de PIX em sandbox (`payer.first_name: "APRO"` + um Test
+> User genuíno) — **comprovado real, com evidência ao vivo** (pedido
+> transicionou de `action_required`/`waiting_transfer` pra
+> `processed`/`accredited` em segundos, via chamada real à API). Mas essa
+> validação exige uma credencial de teste que **só aceita `payer.email`
+> terminado em `@testuser.com`** — rejeitando qualquer cliente real com
+> `400`. Não existe, nesta conta, uma credencial que sirva ao mesmo tempo
+> pra (a) aceitar clientes reais e (b) permitir a auto-aprovação de teste.
+> Além disso, a assinatura do webhook da Orders API nunca validou
+> corretamente (ver Seção 0.3) apesar de o secret estar comprovadamente
+> correto. Migrar teria quebrado o PIX pra clientes reais — revertido de
+> volta pra Payments API (a mesma validada desde a Fase 17/23), confirmada
+> funcionando de novo (criação real 201, QR real, webhook de criação
+> aceito com `200`) antes de fechar a fase.
 
 ---
 
@@ -113,6 +131,70 @@ produção (`"Unsupported route path... /v1/*"`). Funcionava (o Nest converte
 automaticamente), mas poluía o log sem necessidade. Corrigido para `forRoutes('{*path}')`
 (sintaxe nomeada que a versão atual já espera direto), revalidado pela suíte e2e
 inteira (o middleware de correlação/segurança é exercitado em todo teste).
+
+---
+
+## 0.3. Fase 24 (migração pra Orders API) — tentada, revertida, causa raiz documentada
+
+**Resultado: NO-GO pra migração (código voltou pra Payments API); evidência real
+de aprovação automática em sandbox foi obtida separadamente.** Ver relatório
+final da fase (entregue no chat) para a classificação completa nos 20 itens
+exigidos pelo prompt. Resumo técnico:
+
+**Por que migrar**: a Payments API clássica (usada desde a Fase 17) não tem
+nenhum mecanismo oficial de sandbox pra simular a aprovação de um PIX de
+teste — confirmado via documentação oficial. Era exatamente o gap que
+bloqueou a confirmação de `PAID` na Fase 23.
+
+**O que foi encontrado, com evidência real**:
+- A Orders API (`/v1/orders`) **tem** esse mecanismo: `payer.first_name:
+  "APRO"` + um Test User genuíno do Mercado Pago (criado via
+  `POST /users/test_user`) faz um pedido PIX transicionar sozinho de
+  `action_required`/`waiting_transfer` pra `processed`/`accredited` em
+  poucos segundos — sem nenhuma ação manual. **Confirmado ao vivo, duas
+  vezes**, inclusive uma vez através do próprio `MercadoPagoPaymentProviderService`
+  do ArenaHub (não só via `curl` direto).
+- A Orders API **rejeita credenciais `TEST-` categoricamente**, em qualquer
+  chamada (`401 invalid_credentials`, mensagem oficial: "Test credentials
+  are not supported, use test users with production credentials..."). Isso
+  só foi descoberto testando contra a API real — a documentação não deixa
+  isso óbvio de antemão.
+- A única combinação que de fato funcionou (criar uma aplicação nova,
+  `Checkout Transparente via Orders`, usando a credencial da aba "Teste"
+  dela) tem uma restrição que **inviabiliza uso em produção real**: essa
+  credencial exige `payer.email` terminado em `@testuser.com` pra
+  **qualquer** criação de pedido — um cliente real do ArenaHub, com e-mail
+  de verdade, recebe `400 invalid_email_for_sandbox`.
+- A assinatura do webhook (`X-Signature`) da Orders API **nunca validou
+  corretamente**, apesar de exaustivamente investigado: manifesto
+  reproduzido byte a byte conforme a documentação oficial; secret
+  regenerado do zero (eliminando cópia obsoleta); confirmado, via cálculo
+  HMAC independente, que o app rodando em produção usava exatamente o
+  mesmo secret configurado no Railway; hipótese de case-sensitivity do ID
+  testada e descartada; hipótese de encoding do secret (string vs. bytes
+  decodificados de hex) testada e descartada; espera de propagação
+  testada e descartada. Causa raiz não identificada — aparenta ser uma
+  particularidade não documentada do produto "Webhooks" mais novo do
+  Mercado Pago (distinto da tela clássica de notificações por IPN), não
+  um erro no código do ArenaHub.
+
+**Decisão**: migrar teria deixado o PIX real quebrado pra todo cliente
+(nenhuma credencial disponível serve simultaneamente pra clientes reais E
+pra validação de sandbox). Revertido via commit `1f273ee` — o provider
+voltou a ser exatamente o da Fase 23 (`/v1/payments`), sem nenhuma mudança
+de schema, de `PaymentsService` ou de `PaymentsWebhookService` (a
+abstração `PaymentProvider` se manteve estável o tempo todo). Restaurado
+`PAYMENT_API_KEY`/`PAYMENT_WEBHOOK_SECRET` pra os valores da aplicação
+original, e **revalidado ao vivo depois do revert**: criação de pagamento
+real (`201`, `pending`, QR/`ticket_url` reais) e webhook de criação aceito
+com `200` (assinatura válida) — o mesmo comportamento documentado como
+funcionando desde a Fase 23.
+
+**Pendência real pra uma futura tentativa de migração**: só faz sentido
+retomar a Orders API se (a) o suporte do Mercado Pago confirmar por que a
+assinatura do webhook não bate mesmo com o secret certo, e (b) existir uma
+credencial de teste que aceite e-mails de clientes reais nas chamadas de
+criação (hoje não existe, nesta conta, uma combinação assim).
 
 ---
 
