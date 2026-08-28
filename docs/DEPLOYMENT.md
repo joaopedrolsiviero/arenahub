@@ -1347,6 +1347,70 @@ bubbly-simplicity` do lado do Railway.
 
 ---
 
+## 18. Handoff — Fase 24 (troca de máquina, 2026-08-28)
+
+Sessão trocando de máquina ao final da Fase 24. Estado real pra quem
+retomar não repetir investigação já feita — ver Seção 0.3 pro relato
+técnico completo.
+
+### Estado da produção agora (confirmado ao vivo antes de encerrar)
+- **Provider de pagamento**: Payments API clássica (`/v1/payments`), a
+  mesma validada desde a Fase 17/23 — **não** a Orders API (tentada e
+  revertida nesta fase).
+- **`PAYMENT_API_KEY`** (Railway, serviço `api`): restaurado pra
+  credencial de teste (`TEST-...`) da aplicação **original** do Mercado
+  Pago — a mesma usada desde a Fase 23. **Não** é a credencial da
+  aplicação nova `arenahub2` (essa só serve pra experimentos com Orders
+  API, nunca deixe configurada em produção — rejeita e-mail de cliente
+  real).
+- **`PAYMENT_WEBHOOK_SECRET`** (Railway): restaurado pro secret do
+  webhook da aplicação **original**, cadastrado apontando pra
+  `https://api-production-34e0.up.railway.app/v1/webhooks/payments/mercadopago`.
+  Revalidado com uma chamada real: pagamento real criado, webhook de
+  criação recebido e aceito com `200`.
+- **`PAYMENT_SANDBOX_TEST_PAYER_NAME`**: variável que chegou a existir no
+  Railway durante os experimentos desta fase, mas **não é lida por nenhum
+  código depois do revert** (só existia na implementação da Orders API,
+  que foi revertida) — inofensiva se ainda estiver configurada, pode ser
+  removida por limpeza, não é urgente.
+- Nenhuma migration nova, nenhuma mudança de schema.
+
+### Coisas que existem na conta do Mercado Pago, sem uso em produção
+- Uma aplicação nova, `arenahub2` (tipo "Checkout Transparente via
+  Orders"), com um webhook cadastrado que **nunca validou
+  corretamente** (Bug 2 da Seção 14 do relatório da Fase 24). Pode ficar
+  ou ser removida — não afeta nada em produção.
+- Um Test User (`test_user_...@testuser.com`) criado via
+  `POST /users/test_user` — usado como e-mail de uma conta de teste do
+  Clerk (Development) pra validar a auto-aprovação da Orders API. Também
+  pode ficar.
+
+### Se uma futura sessão quiser retomar a migração pra Orders API
+Não repita a investigação do zero — ela já foi longa e bem documentada
+(Seção 0.3 e relatório final da Fase 24, seções 5/7/14/18). Resumo do que
+falta resolver antes de tentar de novo:
+1. Descobrir por que a assinatura do webhook (`X-Signature`) da Orders
+   API nunca bate, mesmo com o secret confirmado correto (considere abrir
+   chamado com o suporte oficial do Mercado Pago).
+2. Encontrar (ou confirmar que não existe) uma credencial desta conta que
+   aceite `payer.email` de cliente real **e** permita a auto-aprovação de
+   sandbox via `payer.first_name: "APRO"` — hoje essas duas coisas são
+   mutuamente exclusivas.
+
+### Continuidade de código/ambiente local (pouco a fazer desta vez)
+Sem migrations novas e sem mudança de schema — um `git pull` simples é
+suficiente. Rotina padrão de sempre ao trocar de máquina:
+```bash
+git pull
+pnpm install
+pnpm --filter @arenahub/api prisma generate
+```
+Docker local (Postgres/Redis) só precisa estar rodando se for trabalhar
+com os testes e2e ou o backend localmente — nada mudou nesse setup nesta
+fase.
+
+---
+
 ## Troubleshooting
 
 | Sintoma | Causa provável | Onde olhar |
@@ -1361,3 +1425,5 @@ bubbly-simplicity` do lado do Railway.
 | Login funciona mas qualquer chamada autenticada ao backend retorna 404 "Usuário autenticado ainda não sincronizado" | Webhook `user.created`/`user.updated` do Clerk não está cadastrado (ou está com o Signing Secret errado) para o ambiente do Clerk realmente em uso | Cadastrar/corrigir o webhook nesse ambiente específico (Seção 8) — cada endpoint tem seu próprio Signing Secret, nunca reaproveite o de outro endpoint |
 | Cliente legítimo recebe `429` num endpoint de negócio | Limite dedicado (Fase 18, Seção 5.1) atingido — verificar se é abuso real ou um limite calibrado baixo demais para o uso real do produto | `@Throttle()` no controller do endpoint em questão |
 | `429` acontece "cedo demais" com múltiplas instâncias rodando | Rate limiting é por instância (em memória) — o limite efetivo multiplica pelo número de réplicas (Fase 18, Seção 5.1) | Reduzir réplicas, ou migrar o storage do throttler para Redis antes de escalar horizontalmente |
+| Cliente real recebe erro ao tentar pagar PIX, `PAYMENT_API_KEY` começa com `APP_USR-` | Credencial da aplicação `arenahub2` (só-teste, exige `payer.email` `@testuser.com`) configurada por engano em produção | Trocar `PAYMENT_API_KEY` de volta pra credencial `TEST-...` da aplicação original (Seção 18) |
+| Webhook do Mercado Pago sempre `403`, secret conferido e correto | Conhecido só pra Orders API (`/v1/orders`) — causa raiz nunca identificada apesar de investigação exaustiva (Fase 24, Seção 0.3) | Não reproduz na Payments API clássica (`/v1/payments`), que é a que está em produção — se voltar a acontecer nela, é um bug novo, investigar do zero |
