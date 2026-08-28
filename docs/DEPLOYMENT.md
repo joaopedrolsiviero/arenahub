@@ -50,15 +50,35 @@
 > cancelada/inexistente/de outro usuário, degradação graciosa sem
 > credencial) também validada ao vivo.
 >
-> **O que ficou de fora**: a confirmação real de `PAID` via pagamento
-> efetivamente completado. As contas de teste "comprador" do Mercado Pago
-> só conseguem pagar PIX pelo aplicativo de celular (a interface web
-> bloqueia `Copia e Cola` deliberadamente) — e o app, ao logar com uma
-> conta de teste, exige verificação de documento que falha (conta fake,
-> sem CPF real por trás). Isso é uma limitação da ferramenta de sandbox do
-> próprio Mercado Pago, não um bug do ArenaHub. Decisão consciente:
-> **pausar aqui em vez de fingir uma validação que não aconteceu.** Ver
-> Seção 5 ("Pagamentos") para o passo a passo exato de como retomar.
+> **O que ficou de fora nesta sessão**: a confirmação real de `PAID` via
+> pagamento efetivamente completado — bloqueada pela mesma limitação do
+> sandbox de teste do Mercado Pago descrita acima. **Resolvido na Fase 25**
+> (ver abaixo) usando credencial de produção real em vez de insistir no
+> sandbox.
+>
+> **Fase 25 (Confirmação Automática de Pagamento Real) — GO, comprovado ao
+> vivo com dinheiro real (2026-08-28)**: com a Payments API já validada
+> (Fase 23) e a máquina de estados do webhook já auditada (idempotente,
+> nunca confia no corpo, sempre reconsulta o Mercado Pago — já era assim
+> desde a Fase 17, nenhuma mudança de arquitetura foi necessária), o
+> objetivo era só fechar a prova que faltava: **um pagamento real chegando
+> a `approved` e o ArenaHub reconhecendo isso sozinho**. O sandbox de teste
+> continuou bloqueado pela mesma limitação da Fase 23/24 (conta de teste
+> não completa verificação de documento no app), então — com autorização
+> explícita do usuário — a credencial de `PAYMENT_API_KEY`/
+> `PAYMENT_WEBHOOK_SECRET` em produção foi trocada de teste (`TEST-...`)
+> para **produção real** (`APP_USR-...`), e um PIX de **R$1,00** foi pago de
+> verdade. Achado real no caminho: a conta precisava de uma **chave PIX
+> ativada** (erro do Mercado Pago `"Collector user without key enabled for
+> QR render"`) — resolvido pelo usuário ativando uma chave na própria
+> conta, não um bug de código. Depois disso: pagamento criado, webhook
+> recebido, assinatura validada, `PaymentsService` consultou o Mercado Pago
+> de verdade e aplicou `PAID` sozinho, frontend refletiu "confirmado", e o
+> estado sobreviveu a um reload completo da página — tudo sem qualquer
+> aprovação manual. **Decisão de produto**: a credencial de produção
+> **permanece ativa deliberadamente** (não foi revertida pra `TEST-...`) —
+> a partir de agora, qualquer pagamento real no ArenaHub gera cobrança de
+> verdade. Ver Seção 19 para o relatório completo.
 >
 > **Fase 24 (migração pra Orders API) — TENTADA e REVERTIDA deliberadamente,
 > produção usa a Payments API (clássica) de novo**: ver Seção 0.3 pro
@@ -817,38 +837,28 @@ a ponta com as credenciais de teste — não fingir que essa validação já aco
 > vivo: QR Code e copia-e-cola aparecem corretamente na reserva em
 > produção depois de "Pagar com PIX".
 >
-> **O que ficou pendente — bloqueio da ferramenta de teste, não do
-> ArenaHub**: para fechar o ciclo (confirmar `PAID` de verdade via
-> webhook), é preciso efetivamente pagar o PIX de teste com uma conta
-> "compradora" do Mercado Pago. A interface **web** do Mercado Pago recusa
-> pagar via Pix Copia e Cola ("Abra o app no celular pra pagar" — bloqueio
-> deliberado deles, não nosso). No **app** de celular, a conta de teste
-> compradora criada no painel de developers pede verificação de documento
-> ao logar — e falha, porque é uma conta fake sem CPF real por trás. Sem
-> outra forma de completar um pagamento de teste disponível nesta sessão,
-> a decisão foi **pausar aqui em vez de fingir uma validação que não
-> aconteceu**. Webhook de **criação** foi recebido e teve a assinatura
-> verificada com sucesso (confirmado nos logs reais da Railway); o webhook
-> de **aprovação** nunca chegou a ser exercitado porque nenhum pagamento
-> real/de teste foi efetivamente completado.
+> **RESOLVIDO na Fase 25** (2026-08-28) — ver Seção 19 para o relatório
+> completo. Resumo: o sandbox nunca foi destravado (mesmo bloqueio de
+> sempre), mas com autorização explícita do usuário a credencial de
+> produção real (`APP_USR-...`) foi ativada e um PIX de R$1,00 foi pago de
+> verdade, fechando o ciclo completo `approved → webhook → PAID`
+> automaticamente. A credencial de produção permanece ativa por decisão de
+> produto (não foi revertida pra `TEST-...`).
 >
-> **Retomar de onde parou** (quando houver uma forma de completar um
-> pagamento de teste — app funcionando com outra conta de teste, ou
-> aceitar usar um valor real pequeno):
-> 1. Criar uma reserva → "Pagar com PIX" → QR Code e copia-e-cola já
->    funcionam, não precisa investigar essa parte de novo.
-> 2. Pagar de fato (app do Mercado Pago com conta de teste funcional, ou
->    PIX real de baixo valor).
-> 3. Confirmar que o webhook de aprovação chega e o status muda pra `PAID`
->    — nunca aceitar só a palavra do frontend como prova, sempre reconferir
->    via `GET .../payment` (ou, melhor ainda, direto no banco — `railway
->    connect` exige uma chave SSH registrada antes, `railway ssh keys add`
->    ou `railway ssh keys github`, não configurado nesta sessão).
-> 4. Depois de `PAID` confirmado: idempotência sob concorrência real,
->    webhook duplicado/fora de ordem/inválido, e os estados
->    `REJECTED`/`EXPIRED` — tudo isso já tem cobertura e2e com provider
->    fake (`test/payments.e2e-spec.ts`), só falta a confirmação com o
->    gateway de verdade.
+> Texto original desta seção, mantido como histórico do que foi tentado
+> antes da Fase 25:
+>
+> Para fechar o ciclo (confirmar `PAID` de verdade via webhook), é preciso
+> efetivamente pagar o PIX de teste com uma conta "compradora" do Mercado
+> Pago. A interface **web** do Mercado Pago recusa pagar via Pix Copia e
+> Cola ("Abra o app no celular pra pagar" — bloqueio deliberado deles, não
+> nosso). No **app** de celular, a conta de teste compradora criada no
+> painel de developers pede verificação de documento ao logar — e falha,
+> porque é uma conta fake sem CPF real por trás. Webhook de **criação** foi
+> recebido e teve a assinatura verificada com sucesso (confirmado nos logs
+> reais da Railway); o webhook de **aprovação** nunca chegou a ser
+> exercitado porque nenhum pagamento real/de teste foi efetivamente
+> completado.
 
 ### 5.1. Rate limiting (Fase 18) — em memória, NUNCA distribuído
 
@@ -1408,6 +1418,108 @@ pnpm --filter @arenahub/api prisma generate
 Docker local (Postgres/Redis) só precisa estar rodando se for trabalhar
 com os testes e2e ou o backend localmente — nada mudou nesse setup nesta
 fase.
+
+---
+
+## 19. Fase 25 — Confirmação Automática de Pagamento Real (2026-08-28)
+
+### Objetivo
+Comprovar de ponta a ponta que, quando o Mercado Pago aprova um pagamento
+de verdade, o ArenaHub reconhece isso **automaticamente**, sem qualquer
+aprovação manual do OWNER/ADMIN — usando a Payments API já validada
+(Fase 17/23), sem migrar para Orders API (tentativa da Fase 24, revertida).
+
+### O que já estava implementado (auditoria, nenhuma mudança precisou)
+- **`Booking` nunca depende de `Payment`** (decisão documentada desde a
+  Fase 4) — toda reserva já nasce `CONFIRMED`, independente de pagamento.
+  Não existe, e não foi criado, um estado de "reserva pendente de
+  aprovação". Confirmado explicitamente com o usuário antes de qualquer
+  código (a interpretação literal do prompt da fase sugeria o contrário).
+- Webhook (`payments-webhook.service.ts`): valida assinatura HMAC-SHA256
+  (`timingSafeEqual`), deduplica por `providerEventId` (claim-first),
+  **nunca confia no `status` do corpo** — sempre chama
+  `paymentProvider.getPaymentStatus()` pra buscar o estado real antes de
+  aplicar qualquer transição.
+- Máquina de estados (`PaymentsService.applyProviderStatus`): só transiciona
+  a partir de `PENDING` (estados terminais protegidos — evento antigo nunca
+  reverte um `PAID`/`FAILED`/`CANCELLED`/`EXPIRED`), concorrência tratada
+  (`updateMany` condicional + índice único parcial "um PAID por Booking"),
+  `Booking` cancelada antes da aprovação vira `CANCELLED` em vez de `PAID`.
+- `PaymentsController`: **nenhum `@Body()` em nenhuma rota** — estruturalmente
+  impossível o cliente forjar `amount`/`status`/`payer.email`; tudo vem do
+  `Booking.total` congelado e do `User` resolvido via JWT do Clerk.
+- Frontend (`useBookingPayment`): já faz polling de 5s **só enquanto
+  `PENDING`**, para sozinho ao atingir qualquer estado terminal — nenhum
+  polling agressivo precisou ser adicionado.
+
+### O que foi adicionado nesta fase
+- 2 casos de teste e2e explícitos que faltavam (Caso 2 — status `PENDING`
+  do provider nunca é tratado como pago; Caso 3 — `FAILED`/recusado nunca
+  vira `PAID`), + 1 unit test equivalente. Nenhuma mudança de comportamento,
+  só cobertura formal do que o código já fazia.
+
+### Teste real de ponta a ponta — GO, com dinheiro real
+O sandbox de teste continuou bloqueado pela mesma limitação da Fase 23/24
+(conta de teste "comprador" nunca completa a verificação de documento no
+app do Mercado Pago). Com autorização explícita do usuário, o caminho foi
+outro: usar uma credencial de **produção real**.
+
+1. `PAYMENT_API_KEY`/`PAYMENT_WEBHOOK_SECRET` (Railway, serviço `api`)
+   trocados de teste (`TEST-...`) para produção (`APP_USR-...`) — ambos
+   colados direto no dashboard do Railway pelo usuário, nunca vistos pelo
+   Claude.
+2. **Primeira tentativa: `400`** — `"Collector user without key enabled
+   for QR render"`. Causa real: a conta do Mercado Pago não tinha nenhuma
+   chave PIX ativada (requisito da própria conta pra receber PIX via API
+   em produção, não um bug de código). Resolvido pelo usuário ativando uma
+   chave PIX na conta.
+3. **Segunda tentativa: pagamento criado com sucesso** — mas o secret de
+   webhook configurado era o de **modo de teste**, não o de **modo de
+   produção** (são cadastros/secrets separados no painel do Mercado Pago).
+   O pagamento foi pago de verdade (R$1,00) mas o webhook nunca validou —
+   ficou como uma cobrança real recebida sem confirmação no ArenaHub (o
+   dinheiro não se perdeu, ficou no saldo da própria conta do usuário).
+   Corrigido cadastrando o webhook na aba "Modo de produção" e atualizando
+   o secret.
+4. **Terceira tentativa (nova Booking, novo Payment): sucesso completo**.
+   Evidência real, passo a passo:
+   - `Payment` criado no Mercado Pago real (log:
+     `Pagamento criado no Mercado Pago em 1025ms`).
+   - Usuário pagou R$1,00 de verdade pelo próprio banco.
+   - Webhook chegou (`POST /v1/webhooks/payments/mercadopago` → `200`,
+     assinatura válida).
+   - `MercadoPagoPaymentProviderService`: `Status consultado no Mercado
+     Pago em 273ms` — o backend confirmou o `approved` consultando o
+     Mercado Pago diretamente, nunca confiando no corpo do webhook.
+   - `Payment` mudou pra `PAID` automaticamente — nenhuma ação manual do
+     OWNER/ADMIN em nenhum momento.
+   - Frontend, após reload manual da página (`Ctrl+F5`), continuou
+     mostrando o pagamento confirmado — estado vem sempre do backend.
+
+### Limpeza pós-teste
+- Log de debug temporário (capturava o corpo do erro `400` do Mercado
+  Pago pra diagnóstico) revertido — nunca logou credencial, só a resposta
+  de erro do provider.
+- **Decisão de produto do usuário**: a credencial de **produção real
+  permanece ativa** deliberadamente (não foi revertida pra `TEST-...`) —
+  a partir de 2026-08-28, qualquer pagamento real no ArenaHub gera
+  cobrança de verdade. Próximo pagamento real só deve ser iniciado pelo
+  usuário.
+- `PAYMENT_SANDBOX_TEST_PAYER_NAME` (variável órfã da Fase 24, sem uso no
+  código) continua no Railway, inofensiva — segue não sendo urgente
+  remover.
+
+### Testes automatizados (números reais, após todas as mudanças)
+- Backend unit: **384/384** (30 suítes)
+- Backend e2e: **311/333** — a única falha é `invitation-flow.e2e-spec.ts`
+  (22 testes), problema pré-existente do ambiente local, confirmado
+  reproduzindo até no commit já publicado antes de qualquer mudança desta
+  fase (`git stash` + teste direto no baseline, Fase 23). `payments.e2e-spec.ts`:
+  **27/27** (25 anteriores + 2 novos desta fase).
+- Frontend unit: **128/128** (19 suítes)
+- Lint: 0 erros, 1 aviso pré-existente (`no-img-element` no QR Code)
+- Typecheck: limpo
+- Build: verde
 
 ---
 

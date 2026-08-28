@@ -51,7 +51,8 @@ function mapMercadoPagoStatus(status: string | undefined): ProviderPaymentStatus
  * Usa `fetch` nativo, sem SDK novo — mesma filosofia de dependências
  * mínimas já seguida em `OpenAiAiProviderService` (Fase 12) e
  * `MetaWhatsAppProviderService` (Fase 16). Validado contra a API real de
- * sandbox na Fase 23 — ver docs/DEPLOYMENT.md.
+ * sandbox na Fase 23 e contra produção real (pagamento de R$1 aprovado de
+ * ponta a ponta) na Fase 25 — ver docs/DEPLOYMENT.md.
  */
 @Injectable()
 export class MercadoPagoPaymentProviderService extends PaymentProvider {
@@ -92,12 +93,8 @@ export class MercadoPagoPaymentProviderService extends PaymentProvider {
       });
 
       if (!response.ok) {
-        // DEBUG TEMPORÁRIO (Fase 25) — remover depois de identificar a causa
-        // do 400 em produção. Só vai pro log do servidor, nunca pra resposta
-        // HTTP. Corpo do erro do Mercado Pago não contém credenciais.
-        const debugBody = await response.text().catch(() => '<unreadable>');
         this.logger.error(
-          `Mercado Pago respondeu ${response.status} em ${Date.now() - startedAt}ms. DEBUG body: ${debugBody}`,
+          `Mercado Pago respondeu ${response.status} em ${Date.now() - startedAt}ms.`,
         );
         throw new PaymentProviderError();
       }
