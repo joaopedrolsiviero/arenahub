@@ -528,6 +528,30 @@ describe('Pagamentos (e2e)', () => {
       expect(updated.paidAt).not.toBeNull();
     });
 
+    it('status PENDING/in_process do provider: Payment continua PENDING, nunca é tratado como pago (Fase 25 Caso 2)', async () => {
+      const { payment, booking } = await createPendingPaymentWithWebhookId(100);
+      fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PENDING');
+
+      await sendWebhook(payment.providerPaymentId!).expect(200);
+
+      const unchanged = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+      expect(unchanged.status).toBe('PENDING');
+      expect(unchanged.paidAt).toBeNull();
+      const bookingRow = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+      expect(bookingRow.status).toBe('CONFIRMED');
+    });
+
+    it('status FAILED (recusado) do provider: Payment vira FAILED, nunca PAID (Fase 25 Caso 3)', async () => {
+      const { payment } = await createPendingPaymentWithWebhookId(110);
+      fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'FAILED');
+
+      await sendWebhook(payment.providerPaymentId!).expect(200);
+
+      const updated = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+      expect(updated.status).toBe('FAILED');
+      expect(updated.paidAt).toBeNull();
+    });
+
     it('evento duplicado (mesmo id de notificação) só processa uma vez', async () => {
       const { payment } = await createPendingPaymentWithWebhookId(43);
       fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PAID');

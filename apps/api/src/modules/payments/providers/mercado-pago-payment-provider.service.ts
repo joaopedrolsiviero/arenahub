@@ -92,8 +92,12 @@ export class MercadoPagoPaymentProviderService extends PaymentProvider {
       });
 
       if (!response.ok) {
+        // DEBUG TEMPORÁRIO (Fase 25) — remover depois de identificar a causa
+        // do 400 em produção. Só vai pro log do servidor, nunca pra resposta
+        // HTTP. Corpo do erro do Mercado Pago não contém credenciais.
+        const debugBody = await response.text().catch(() => '<unreadable>');
         this.logger.error(
-          `Mercado Pago respondeu ${response.status} em ${Date.now() - startedAt}ms.`,
+          `Mercado Pago respondeu ${response.status} em ${Date.now() - startedAt}ms. DEBUG body: ${debugBody}`,
         );
         throw new PaymentProviderError();
       }

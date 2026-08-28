@@ -307,6 +307,21 @@ describe('PaymentsService', () => {
       });
     });
 
+    it('PENDING -> FAILED aplica normalmente (pagamento recusado pelo Mercado Pago, Fase 25 Caso 3)', async () => {
+      prisma.$transaction = jest.fn((callback: (tx: unknown) => unknown) => callback(tx));
+      tx.payment.findUnique.mockResolvedValue(paymentRow());
+      tx.booking.findUnique.mockResolvedValue({ id: 'booking-1', status: 'CONFIRMED' });
+
+      await service.applyProviderStatus('payment-1', 'FAILED', {
+        failureReason: 'cc_rejected_other',
+      });
+
+      expect(tx.payment.updateMany).toHaveBeenCalledWith({
+        where: { id: 'payment-1', status: 'PENDING' },
+        data: { status: 'FAILED', paidAt: null, failureReason: 'cc_rejected_other' },
+      });
+    });
+
     it('PAID é terminal: um evento FAILED posterior é ignorado, nunca reverte pra FAILED', async () => {
       tx.payment.findUnique.mockResolvedValue(paymentRow({ status: 'PAID' }));
 
