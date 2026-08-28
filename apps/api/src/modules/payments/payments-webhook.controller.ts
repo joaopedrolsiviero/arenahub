@@ -5,9 +5,12 @@ import {
   Headers,
   HttpCode,
   HttpStatus,
+  Logger,
   Post,
+  Req,
 } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
+import type { Request } from 'express';
 import { PaymentsWebhookService } from './payments-webhook.service';
 
 // Convenção espelhada do webhook do WhatsApp (Fase 16) e do Clerk (Fase 2):
@@ -25,6 +28,8 @@ import { PaymentsWebhookService } from './payments-webhook.service';
 @SkipThrottle()
 @Controller('webhooks/payments/mercadopago')
 export class PaymentsWebhookController {
+  private readonly logger = new Logger(PaymentsWebhookController.name);
+
   constructor(private readonly webhookService: PaymentsWebhookService) {}
 
   @Post()
@@ -33,7 +38,13 @@ export class PaymentsWebhookController {
     @Body() body: unknown,
     @Headers('x-signature') signature: string | undefined,
     @Headers('x-request-id') requestId: string | undefined,
+    @Req() req: Request,
   ): Promise<{ received: true }> {
+    // DIAGNÓSTICO TEMPORÁRIO (Fase 24) — remover depois de confirmar a causa
+    // raiz do 403 na Orders API. Nunca loga o secret.
+    this.logger.warn(
+      `[DIAG] url=${req.originalUrl} query=${JSON.stringify(req.query)} x-signature=${signature} x-request-id=${requestId} body=${JSON.stringify(body)}`,
+    );
     const parsed = this.webhookService.parseNotification(body);
     // Falha ao entender o payload E falha de assinatura levam ao MESMO erro
     // genérico (item 8.2/8.3 do prompt) — nunca dar pistas de qual parte
