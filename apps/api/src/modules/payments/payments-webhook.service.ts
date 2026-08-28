@@ -93,19 +93,10 @@ export class PaymentsWebhookService {
     const expectedHex = createHmac('sha256', secret).update(manifest).digest('hex');
     const provided = Buffer.from(v1, 'hex');
     const expected = Buffer.from(expectedHex, 'hex');
-    const matches = provided.length === expected.length && timingSafeEqual(provided, expected);
-
-    // DIAGNÓSTICO TEMPORÁRIO (Fase 24) — remover depois de confirmar a causa
-    // raiz do 403 na Orders API. Nunca loga o secret; só manifestos e hex
-    // (dados já públicos no próprio request do provider).
-    if (!matches) {
-      const manifestRaw = `id:${providerPaymentId};request-id:${requestId};ts:${ts};`;
-      const expectedHexRaw = createHmac('sha256', secret).update(manifestRaw).digest('hex');
-      this.logger.warn(
-        `[DIAG] assinatura não bateu. providerPaymentId=${providerPaymentId} manifest(lower)=${manifest} v1_recebido=${v1} hex_esperado(lower)=${expectedHex} hex_esperado(raw)=${expectedHexRaw} bateria_com_raw=${expectedHexRaw === v1}`,
-      );
+    if (provided.length !== expected.length) {
+      return false;
     }
-    return matches;
+    return timingSafeEqual(provided, expected);
   }
 
   /**
