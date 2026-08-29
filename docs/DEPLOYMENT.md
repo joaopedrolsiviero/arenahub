@@ -1624,9 +1624,34 @@ migration; Payments API preservada integralmente.
 - Build: verde
 
 ### Teste manual em produção
-Ver commit de deploy — verificação feita contra dados reais já existentes
-da Fase 25 (o pagamento de R$1 aprovado, e a tentativa órfã que expirou),
-**sem gerar nenhuma cobrança nova**.
+Verificação feita contra dados reais já existentes da Fase 25 (o pagamento
+de R$1 aprovado), **sem gerar nenhuma cobrança nova**: usuário confirmou
+visualmente que o badge "Pago" passou a aparecer em "Minhas reservas" ao
+lado do badge "Confirmada" da reserva.
+
+### Incidente real da Railway durante o deploy (2026-08-29)
+O primeiro deploy desta fase (commit `0ee8501`) **travou em "BUILDING" e
+nunca foi promovido** — o container antigo (Fase 25) continuou servindo
+tráfego o tempo todo (por isso `/v1/health/ready` respondia normal mesmo
+com o código novo nunca tendo entrado no ar; health check sozinho não é
+prova de que o código certo está rodando). `curl` direto na rota nova
+(`GET /v1/users/me/payments`) devolvendo `404` em vez de `401` foi o que
+expôs o problema de verdade.
+
+Causa confirmada via `status.railway.com`: incidente ativo da própria
+Railway, **"Deployments slow to start"** (Degraded Performance,
+`Investigating`, iniciado 28/08 23:59 UTC, múltiplas regiões) — não
+relacionado ao código do ArenaHub. Duas tentativas de redeploy adicionais
+também ficaram lentas (uma chegou a levar mais de 30min entre build e
+promoção), até a terceira tentativa (`91efecb8`) finalmente completar e
+ser promovida com sucesso. Confirmado depois via boot log real
+(`MyPaymentsController {/v1/users/me/payments}: mapped`) e `curl` (`401`,
+não mais `404`) — nunca só pelo health check.
+
+**Lição registrada**: depois de qualquer deploy que adicione uma rota
+nova, verificar a rota específica (ou o boot log), não só
+`/v1/health/ready` — um health check verde não prova que o deployment
+certo está ativo quando a plataforma tem um incidente de promoção lenta.
 
 ### Pendências reais (nenhuma inventada)
 - Política de cancelamento/reembolso pra reservas já pagas — hoje não
