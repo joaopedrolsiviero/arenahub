@@ -16,6 +16,13 @@ const NAV_ITEMS = [
 // administrativa do dashboard (item 65: fluxos separados desde a Fase 6).
 export function SiteHeader() {
   const pathname = usePathname();
+  // Só o pathname (nunca a query string) — `usePathname()` sozinho não
+  // exige Suspense (diferente de `useSearchParams()`, que forçaria bailout
+  // de páginas estáticas como /dashboard/nova-arena). O header é um link
+  // genérico de "Entrar"; preservar a seleção exata (data/horário) já
+  // acontece no lugar que importa de verdade — `signInHref` em
+  // BookingSummaryCard e em RequireAuth, ambos com query completa.
+  const redirectUrl = encodeURIComponent(pathname);
 
   return (
     <header className="sticky top-0 z-20 border-b border-border/70 bg-background/85 backdrop-blur-md">
@@ -56,6 +63,18 @@ export function SiteHeader() {
               <UserButton />
             </div>
           </nav>
+        </Show>
+
+        {/* Fase 29 — arena/quadra/disponibilidade agora são navegáveis sem
+            conta; o header precisa oferecer "Entrar" pra quem ainda não
+            autenticou, preservando a página atual via redirect_url. */}
+        <Show when="signed-out">
+          <Link
+            href={`/sign-in?redirect_url=${redirectUrl}`}
+            className={buttonVariants({ variant: 'default', size: 'sm' })}
+          >
+            Entrar
+          </Link>
         </Show>
       </div>
     </header>

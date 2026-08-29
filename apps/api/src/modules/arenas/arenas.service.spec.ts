@@ -3,6 +3,7 @@ import { ArenaRole, Prisma, Sport } from '@prisma/client';
 import { ArenasService } from './arenas.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ArenaMembersService } from '../arena-members/arena-members.service';
+import { OperatingHoursService } from '../operating-hours/operating-hours.service';
 import { UsersService } from '../users/users.service';
 
 describe('ArenasService', () => {
@@ -13,6 +14,7 @@ describe('ArenasService', () => {
     arenaMember: { findMany: jest.Mock };
   };
   let arenaMembersService: { listMembers: jest.Mock };
+  let operatingHoursService: { hasAnyForArena: jest.Mock };
   let usersService: { findByClerkId: jest.Mock };
   let service: ArenasService;
 
@@ -29,11 +31,13 @@ describe('ArenasService', () => {
       arenaMember: { findMany: jest.fn() },
     };
     arenaMembersService = { listMembers: jest.fn() };
+    operatingHoursService = { hasAnyForArena: jest.fn().mockResolvedValue(false) };
     usersService = { findByClerkId: jest.fn().mockResolvedValue({ id: 'user-internal-1' }) };
 
     service = new ArenasService(
       prisma as unknown as PrismaService,
       arenaMembersService as unknown as ArenaMembersService,
+      operatingHoursService as unknown as OperatingHoursService,
       usersService as unknown as UsersService,
     );
   });
@@ -96,7 +100,8 @@ describe('ArenasService', () => {
       prisma.arena.findUnique.mockResolvedValue({
         id: 'arena-1',
         name: 'Arena Central',
-        courts: [{ id: 'court-1', name: 'Quadra 1' }],
+        timezone: 'America/Sao_Paulo',
+        courts: [{ id: 'court-1', name: 'Quadra 1', isActive: false, pricePerSlot: undefined }],
       });
       arenaMembersService.listMembers.mockResolvedValue([
         { id: 'member-1', role: ArenaRole.OWNER },
@@ -104,8 +109,86 @@ describe('ArenasService', () => {
 
       const result = await service.findOne('arena-1');
 
-      expect(result.courts).toEqual([{ id: 'court-1', name: 'Quadra 1' }]);
+      expect(result.courts).toEqual([
+        { id: 'court-1', name: 'Quadra 1', isActive: false, pricePerSlot: undefined },
+      ]);
       expect(result.members).toEqual([{ id: 'member-1', role: ArenaRole.OWNER }]);
+    });
+
+    // Fase 28, Caso 6/7: "arena pronta" é SEMPRE derivado (nunca lido de uma
+    // coluna) — estes casos provam a derivação nos dois sentidos, incompleta
+    // e completa, e que cada item do checklist é reportado individualmente
+    // (não só o booleano final).
+    it('Fase 28: arena sem quadra ativa/preço e sem horários é reportada como incompleta, item a item', async () => {
+      prisma.arena.findUnique.mockResolvedValue({
+        id: 'arena-1',
+        name: 'Arena Central',
+        timezone: 'America/Sao_Paulo',
+        courts: [],
+      });
+      arenaMembersService.listMembers.mockResolvedValue([]);
+      operatingHoursService.hasAnyForArena.mockResolvedValue(false);
+
+      const result = await service.findOne('arena-1');
+
+      expect(result.setupStatus).toEqual({
+        hasBasicInfo: true,
+        hasActiveCourtWithPricing: false,
+        hasOperatingHours: false,
+        isReady: false,
+      });
+    });
+
+    it('Fase 28: quadra ativa com preço R$0 (default do schema) nunca conta como "configurada"', async () => {
+      prisma.arena.findUnique.mockResolvedValue({
+        id: 'arena-1',
+        name: 'Arena Central',
+        timezone: 'America/Sao_Paulo',
+        courts: [{ id: 'court-1', isActive: true, pricePerSlot: new Prisma.Decimal(0) }],
+      });
+      arenaMembersService.listMembers.mockResolvedValue([]);
+      operatingHoursService.hasAnyForArena.mockResolvedValue(true);
+
+      const result = await service.findOne('arena-1');
+
+      expect(result.setupStatus.hasActiveCourtWithPricing).toBe(false);
+      expect(result.setupStatus.isReady).toBe(false);
+    });
+
+    it('Fase 28: quadra inativa com preço válido nunca conta como "configurada" (só quadra ATIVA)', async () => {
+      prisma.arena.findUnique.mockResolvedValue({
+        id: 'arena-1',
+        name: 'Arena Central',
+        timezone: 'America/Sao_Paulo',
+        courts: [{ id: 'court-1', isActive: false, pricePerSlot: new Prisma.Decimal(50) }],
+      });
+      arenaMembersService.listMembers.mockResolvedValue([]);
+      operatingHoursService.hasAnyForArena.mockResolvedValue(true);
+
+      const result = await service.findOne('arena-1');
+
+      expect(result.setupStatus.hasActiveCourtWithPricing).toBe(false);
+      expect(result.setupStatus.isReady).toBe(false);
+    });
+
+    it('Fase 28: quadra ativa com preço válido + horários configurados => arena pronta', async () => {
+      prisma.arena.findUnique.mockResolvedValue({
+        id: 'arena-1',
+        name: 'Arena Central',
+        timezone: 'America/Sao_Paulo',
+        courts: [{ id: 'court-1', isActive: true, pricePerSlot: new Prisma.Decimal(50) }],
+      });
+      arenaMembersService.listMembers.mockResolvedValue([]);
+      operatingHoursService.hasAnyForArena.mockResolvedValue(true);
+
+      const result = await service.findOne('arena-1');
+
+      expect(result.setupStatus).toEqual({
+        hasBasicInfo: true,
+        hasActiveCourtWithPricing: true,
+        hasOperatingHours: true,
+        isReady: true,
+      });
     });
   });
 
@@ -159,13 +242,21 @@ describe('ArenasService', () => {
         timezone: 'America/Sao_Paulo',
         createdAt: new Date(),
         updatedAt: new Date(),
-        courts: [{ id: 'court-1', name: 'Quadra 1', sport: Sport.BEACH_VOLLEYBALL }],
+        courts: [
+          {
+            id: 'court-1',
+            name: 'Quadra 1',
+            sport: Sport.BEACH_VOLLEYBALL,
+            pricePerSlot: new Prisma.Decimal(50),
+          },
+        ],
       };
       prisma.arena.findUnique.mockResolvedValue(arena);
+      operatingHoursService.hasAnyForArena.mockResolvedValue(true);
 
       const result = await service.discoverOne('arena-1');
 
-      expect(result).toEqual(arena);
+      expect(result).toEqual({ ...arena, isReady: true });
       const [[call]] = prisma.arena.findUnique.mock.calls as [
         [{ select: { courts: { where: { isActive: boolean } } } }],
       ];
@@ -192,6 +283,49 @@ describe('ArenasService', () => {
         [{ select: Record<string, unknown> }],
       ];
       expect(call.select).not.toHaveProperty('whatsappPhoneNumberId');
+    });
+
+    // Fase 28, Caso 11: cliente precisa de um sinal claro de "esta arena
+    // ainda está sendo configurada" — nunca o checklist granular (isso é
+    // informação do OWNER), só o booleano final.
+    it('Fase 28: isReady=false quando não há quadra com preço válido, mesmo com horários configurados', async () => {
+      prisma.arena.findUnique.mockResolvedValue({
+        id: 'arena-1',
+        name: 'Arena Central',
+        slug: 'arena-central',
+        description: null,
+        phone: null,
+        email: null,
+        timezone: 'America/Sao_Paulo',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        courts: [],
+      });
+      operatingHoursService.hasAnyForArena.mockResolvedValue(true);
+
+      const result = await service.discoverOne('arena-1');
+
+      expect(result.isReady).toBe(false);
+    });
+
+    it('Fase 28: isReady=false quando há quadra com preço válido mas nenhum horário configurado', async () => {
+      prisma.arena.findUnique.mockResolvedValue({
+        id: 'arena-1',
+        name: 'Arena Central',
+        slug: 'arena-central',
+        description: null,
+        phone: null,
+        email: null,
+        timezone: 'America/Sao_Paulo',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        courts: [{ id: 'court-1', pricePerSlot: new Prisma.Decimal(50) }],
+      });
+      operatingHoursService.hasAnyForArena.mockResolvedValue(false);
+
+      const result = await service.discoverOne('arena-1');
+
+      expect(result.isReady).toBe(false);
     });
   });
 

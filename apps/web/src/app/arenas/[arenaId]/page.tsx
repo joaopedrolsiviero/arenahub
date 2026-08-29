@@ -5,20 +5,29 @@ import { useDiscoverArena } from '@/hooks/use-api';
 import { CourtCard } from '@/components/court-card';
 import { SiteHeader } from '@/components/site-header';
 import { LoadingState, ErrorState, EmptyState } from '@/components/async-state';
-import { RequireAuth } from '@/components/require-auth';
+import { ApiError } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
 
 const SPORT_LABEL: Record<string, string> = {
   BEACH_VOLLEYBALL: 'Vôlei de praia',
 };
 
-function ArenaDetail({ arenaId }: { arenaId: string }) {
-  const { data: arena, isPending, isError } = useDiscoverArena(arenaId);
+export function ArenaDetail({ arenaId }: { arenaId: string }) {
+  const { data: arena, isPending, isError, error } = useDiscoverArena(arenaId);
+  const notFound = error instanceof ApiError && error.status === 404;
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-8 sm:px-6">
       {isPending ? <LoadingState label="Carregando arena…" /> : null}
-      {isError ? <ErrorState message="Não foi possível carregar esta arena." /> : null}
+      {isError ? (
+        <ErrorState
+          message={
+            notFound
+              ? 'Esta arena não existe ou não está mais disponível.'
+              : 'Não foi possível carregar esta arena. Tente novamente.'
+          }
+        />
+      ) : null}
 
       {arena ? (
         <>
@@ -38,8 +47,13 @@ function ArenaDetail({ arenaId }: { arenaId: string }) {
 
           <div className="flex flex-col gap-2.5">
             <p className="text-sm font-semibold">Quadras</p>
-            {arena.courts.length === 0 ? (
-              <EmptyState message="Nenhuma quadra disponível nesta arena no momento." />
+            {!arena.isReady ? (
+              // Fase 28, item 16 — nunca uma jornada quebrada (quadra sem
+              // preço, ou sem nenhum horário de funcionamento, levando a uma
+              // disponibilidade sempre vazia sem explicação): um sinal claro
+              // de que a arena ainda está em configuração, distinto de
+              // "nenhuma quadra cadastrada" ou de um erro.
+              <EmptyState message="Esta arena ainda está sendo configurada pelo proprietário. Volte em breve." />
             ) : (
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 {arena.courts.map((court) => (
@@ -54,6 +68,8 @@ function ArenaDetail({ arenaId }: { arenaId: string }) {
   );
 }
 
+// Fase 29 — sem RequireAuth: um visitante sem conta precisa conseguir ver a
+// arena antes de autenticar (login só é exigido pra criar a Booking).
 export default function ArenaDetailPage({
   params,
 }: {
@@ -61,9 +77,9 @@ export default function ArenaDetailPage({
 }) {
   const { arenaId } = use(params);
   return (
-    <RequireAuth>
+    <>
       <SiteHeader />
       <ArenaDetail arenaId={arenaId} />
-    </RequireAuth>
+    </>
   );
 }

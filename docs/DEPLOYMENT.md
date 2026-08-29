@@ -1734,19 +1734,144 @@ DST em NY usada pelo teste de timezone, recalculada pro próximo ciclo), nunca a
 negócio enfraquecida pra acomodar um teste desatualizado.
 
 ### Teste real
-**Nenhum teste com dinheiro real foi executado nesta fase.** Toda a implementação foi
-validada com `FakePaymentProvider` (mocks) e o Postgres local de desenvolvimento — nenhuma
-chamada real ao Mercado Pago (criação, consulta ou refund) foi feita. Um teste real de
-ponta a ponta (pagar um PIX de baixo valor → cancelar → confirmar reembolso de verdade no
-Mercado Pago) depende de autorização explícita do usuário antes de ser executado, mesmo
-processo já usado na Fase 25.
+Toda a implementação e todos os testes automatizados desta fase usaram `FakePaymentProvider`
+(mocks) e o Postgres local de desenvolvimento — nenhuma chamada real ao Mercado Pago foi feita
+durante a implementação em si. **Atualização (pós-autorização explícita do usuário, mesmo dia):**
+o teste real de ponta a ponta foi executado e confirmado **GO** com dinheiro real, seguindo
+exatamente o mesmo processo já usado na Fase 25:
+
+```
+R$ 1,00 real → PIX pago → Mercado Pago approved → webhook validado → ArenaHub Payment PAID
+→ cancelamento pelo fluxo normal → refund solicitado → Mercado Pago confirma o refund
+→ ArenaHub Payment REFUNDED → Booking CANCELLED → reload confirma o estado persistido
+```
+
+Reembolso confirmado como **100% integral** (R$ 1,00, sem taxa/comissão retida), sem refund
+duplicado e sem cobrança duplicada. Nenhuma alteração manual no banco foi feita para simular
+qualquer estado — todos os estados (`PAID`, `REFUNDED`, `CANCELLED`) foram alcançados
+exclusivamente pelo código real reagindo a respostas reais do Mercado Pago.
 
 ### Pendências reais (nenhuma inventada)
-- Teste real de ponta a ponta (dinheiro real) — aguardando autorização.
 - Deploy desta fase — aguardando autorização (commit/push e deploy Railway/Vercel ainda não
   feitos).
 - Reembolso parcial, política por arena, cupons — explicitamente fora de escopo desta fase
   (mesma lista de exclusões do prompt).
+
+---
+
+## 22. Fase 28 — Onboarding e Configuração Inicial da Arena (2026-08-29)
+
+### Objetivo
+Um OWNER novo consegue criar e configurar sua arena (dados básicos, timezone, quadra, preço,
+duração, horário de funcionamento) só usando o produto — sem SQL manual, sem intervenção
+externa — e entender claramente quando ela está pronta pra receber reservas. Nenhuma mudança em
+pagamentos/Mercado Pago/refund (fora de escopo, confirmado abaixo).
+
+### O que já existia (auditoria — nenhuma reimplementação)
+CRUD completo de Arena/Court/OperatingHours, RBAC (OWNER/ADMIN), isolamento entre arenas e
+descoberta pública já estavam implementados e testados desde as Fases 3-7. A lacuna real era de
+PRODUTO, não de API: não havia formulário de criação de arena no frontend, a criação de quadra só
+coletava o nome, e nada informava "o que falta configurar" nem "esta arena ainda não está pronta".
+
+### Como testar a configuração mínima de uma arena nova
+1. Criar conta e ir em "Painel administrativo" (`/dashboard`) → "Criar minha arena" (ou
+   "Nova arena" no cabeçalho, sempre visível).
+2. Preencher nome, slug (sugerido automaticamente) e timezone (sugestão detectada do navegador) →
+   `Criar arena`. Isso já leva direto pra `/dashboard/:arenaId/quadras`.
+3. Criar a primeira quadra já com preço e duração no mesmo formulário.
+4. Ir em "Horários" e configurar ao menos um intervalo em algum dia da semana.
+5. Voltar ao dashboard da arena — o card "Configure sua arena" deve virar "Sua arena está pronta".
+6. Confirmar como cliente: `/arenas/:arenaId` deve mostrar a quadra com preço, e a disponibilidade
+   (`/arenas/:arenaId/courts/:courtId`) deve ter horários livres.
+
+### Definição de "arena pronta" (`ArenaSetupStatus`)
+Sempre calculada em tempo de leitura (`GET /arenas/:arenaId`), nunca uma coluna no banco:
+`hasBasicInfo` (nome+timezone, obrigatórios desde a criação) `AND` `hasActiveCourtWithPricing`
+(pelo menos uma `Court.isActive` com `pricePerSlot > 0`) `AND` `hasOperatingHours` (pelo menos uma
+linha em `ArenaOperatingHours`). `GET /arenas/discover/:arenaId` (público) expõe só o booleano
+final `isReady` — o checklist granular é informação do OWNER, nunca do cliente.
+
+### Testes automatizados (números reais, após todas as mudanças)
+- Backend unit: **410/410** (era 404/404 ao final da Fase 27 — 6 novos casos em
+  `arenas.service.spec.ts`, cobrindo a derivação de `setupStatus`/`isReady` nos dois sentidos).
+- Backend e2e: **322/344** — única falha é `invitation-flow.e2e-spec.ts`, pré-existente e não
+  relacionada (mesma suíte que já falhava antes desta fase). Inclui a nova suíte
+  `onboarding-journey.e2e-spec.ts` (7/7) provando a jornada completa OWNER→CLIENTE pelos endpoints
+  reais, sem pagamento.
+- Frontend unit: **159/159** (era 133/133 — 26 novos casos: página de criação de arena, checklist
+  do dashboard, lista/criação/edição de quadras, página pública da arena).
+- Lint (backend e frontend): limpo. Typecheck (backend e frontend): limpo. Build (backend e
+  frontend): limpo.
+
+### Pagamentos — confirmação explícita
+`PaymentProvider`, Mercado Pago, webhook, refund, credenciais e o fluxo PIX **não foram tocados**
+nesta fase. Nenhum arquivo de `apps/api/src/modules/payments/**` foi alterado.
+
+### Pendências reais (nenhuma inventada)
+- Commit/push/deploy desta fase — aguardando autorização explícita (não realizados).
+- Buffer (minutos entre reservas) continua só editável depois da criação da quadra, não no
+  formulário de criação — decisão deliberada (default 0 já é o esperado na maioria dos casos, ver
+  `docs/ARCHITECTURE.md`).
+
+## 23. Fase 29 — Experiência do Cliente e Jornada de Reserva de Ponta a Ponta (2026-08-29)
+
+### Objetivo
+Jornada do cliente (visitante → arena → quadra → data → horário → resumo → login → reserva →
+pagamento → confirmação → minhas reservas → detalhes → cancelamento) revisada e ajustada só onde
+havia lacuna real de UX — sem tocar Mercado Pago, sem alterar a máquina de estados de
+Payment/Booking, sem alterar a política de refund da Fase 27.
+
+### Auditoria — a maior lacuna real era de autorização, não de UX
+A auditoria inicial encontrou que `GET /arenas/discover`, `GET /arenas/discover/:arenaId` e
+`GET .../availability` exigiam Clerk (qualquer usuário autenticado) desde a Fase 6 — um visitante
+sem conta não conseguia ver nenhuma arena. Confirmado explicitamente com o usuário antes de abrir
+esses três endpoints pra acesso anônimo (mudança de fronteira de autorização — ver
+`docs/ARCHITECTURE.md`, Fase 29, pra detalhes técnicos). Criar a Booking continua exigindo login.
+O restante da auditoria (tela de pagamento, "Minhas reservas", detalhe da reserva, badges de
+status) confirmou que a cópia e os estados já batiam com o esperado desde as Fases 17/26/27 — só
+3 gaps reais de polimento foram implementados (indicador de auto-atualização no PIX pendente, QR
+code responsivo, afordance "Ver detalhes" nos cards de reserva).
+
+### Como testar a preservação de contexto através do login
+1. Sem estar logado, abra `/arenas` → escolha uma arena pronta → escolha uma quadra → escolha
+   data e horário. Tudo isso funciona sem conta.
+2. No resumo, o botão é "Entrar para confirmar reserva" (não "Confirmar reserva").
+3. Clique nele — vai pro `/sign-in` com a seleção codificada na URL (`redirect_url`).
+4. Depois de logar, você volta EXATAMENTE pra mesma quadra/data/horário, já com "Confirmar
+   reserva" disponível e a seleção restaurada sozinha.
+
+### Testes automatizados (números reais, após todas as mudanças)
+- Backend unit: **410/410** (sem mudança — nenhum teste unitário novo nesta fase, só e2e).
+- Backend e2e: **324/346** — única falha é `invitation-flow.e2e-spec.ts`, pré-existente e não
+  relacionada. 3 casos novos confirmando acesso anônimo aos endpoints reabertos; 1 teste de
+  segurança pré-existente que assumia 401 em `GET .../availability` foi ajustado pra refletir a
+  nova política (a mudança de comportamento é intencional, não um teste "consertado pra passar").
+- Frontend unit: **162/162** (era 159/159 — 3 novos casos: link de entrar com `redirect_url`
+  correto, nunca chama `createBooking` a partir dele, restauração da seleção a partir da URL).
+- Lint (backend e frontend): limpo. Typecheck (backend e frontend): limpo. Build (backend e
+  frontend): limpo.
+
+### Teste manual real (ambiente local, sem dinheiro real)
+Jornada completa executada de ponta a ponta num navegador real: visitante anônimo → lista de
+arenas → detalhe da arena → quadra → horário → resumo → clique em "Entrar para confirmar
+reserva" → login → retorno automático pra mesma seleção → "Confirmar reserva" → Booking criada →
+tela "Esta reserva ainda não foi paga" com "Pagar com PIX" → "Minhas reservas" mostrando a
+reserva com a affordance "Ver detalhes" → cancelamento (reserva não paga, sem reembolso) →
+reload confirmando o estado "Cancelada" persistido pelo backend. **"Pagar com PIX" não foi
+clicado** — nenhuma cobrança real foi gerada, conforme instrução explícita desta fase.
+
+### Pagamentos — confirmação explícita
+`PaymentProvider`, Mercado Pago, webhook, refund, credenciais e o fluxo PIX **não foram
+alterados** nesta fase. Nenhum arquivo de `apps/api/src/modules/payments/**` foi tocado. Nenhuma
+transação financeira real foi executada.
+
+### Banco de dados
+Nenhuma migration nesta fase — nenhuma alteração de schema Prisma.
+
+### Pendências reais (nenhuma inventada)
+- Commit/push/deploy desta fase — aguardando autorização explícita (não realizados).
+- Endereço/localização da arena: não existe no modelo `Arena` hoje (só nome/descrição/contato) —
+  não inventado, mencionado no prompt da fase como "caso já exista no domínio".
 
 ---
 

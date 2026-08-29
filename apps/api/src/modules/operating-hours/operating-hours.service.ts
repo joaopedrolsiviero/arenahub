@@ -41,6 +41,19 @@ export class OperatingHoursService {
     });
   }
 
+  // Fase 28 — usado só por ArenasService pra compor "arena pronta"
+  // (setupStatus). `findFirst` em vez de `findMany`/`count`: mais barato
+  // (o Postgres para na primeira linha), e só o booleano importa aqui, nunca
+  // o conteúdo. Sem checar existência da arena pelo mesmo motivo de
+  // `getRawIntervalsForArena` — o chamador já validou.
+  async hasAnyForArena(arenaId: string): Promise<boolean> {
+    const row = await this.prisma.arenaOperatingHours.findFirst({
+      where: { arenaId },
+      select: { id: true },
+    });
+    return row !== null;
+  }
+
   // Substituição atômica completa da semana (item 15-16 da Fase 5): valida
   // tudo antes de tocar o banco, depois apaga e recria dentro da mesma
   // transação — nunca deixa a configuração pela metade sob falha parcial.

@@ -3,6 +3,7 @@ import { ArenaRole, Prisma, Sport } from '@prisma/client';
 import type { Court } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ArenaMembersService, ArenaMemberWithUser } from '../arena-members/arena-members.service';
+import { OperatingHoursService } from '../operating-hours/operating-hours.service';
 import { UsersService } from '../users/users.service';
 import { CreateArenaDto } from './dto/create-arena.dto';
 import { UpdateArenaDto } from './dto/update-arena.dto';
@@ -31,9 +32,33 @@ export interface ArenaSummary extends ArenaFields {
   role: ArenaRole;
 }
 
+// Fase 28 — deliberadamente DERIVADO em cada leitura, nunca persistido
+// (`Arena.isSetupComplete` foi considerado e descartado: tudo aqui já é
+// calculável a partir de dados que já existem — Court.isActive/pricePerSlot
+// e a presença de ArenaOperatingHours — então uma coluna redundante só
+// criaria uma segunda fonte de verdade pra manter sincronizada). Cada campo
+// é exposto separadamente (não só `isReady`) pra alimentar o checklist do
+// dashboard sem o frontend precisar recalcular a mesma lógica sozinho.
+export interface ArenaSetupStatus {
+  // Sempre true hoje — nome e timezone já são obrigatórios na criação da
+  // arena (CreateArenaDto). Mantido explícito (não hardcoded `true` na
+  // resposta) porque é exatamente o item "✓ Dados básicos" do checklist, e
+  // documenta a intenção mesmo que hoje seja trivial.
+  hasBasicInfo: boolean;
+  // Pelo menos uma Court ativa com pricePerSlot > 0 — preço zerado (default
+  // do schema) nunca conta como "configurado", só como "ainda não definido".
+  hasActiveCourtWithPricing: boolean;
+  // Pelo menos uma linha em ArenaOperatingHours — zero linhas = arena
+  // fechada todo dia (comportamento já existente desde a Fase 5), nunca
+  // reservável de fato mesmo com quadra e preço configurados.
+  hasOperatingHours: boolean;
+  isReady: boolean;
+}
+
 export interface ArenaDetail extends ArenaFields {
   members: ArenaMemberWithUser[];
   courts: Court[];
+  setupStatus: ArenaSetupStatus;
 }
 
 // Visão pública de descoberta (Fase 6) — nunca inclui `members`/`role`
@@ -66,6 +91,12 @@ export interface CourtPublic {
 // precisa refletir isso, não só a intenção em prosa.
 export interface ArenaDiscoveryDetail extends Omit<ArenaFields, 'whatsappPhoneNumberId'> {
   courts: CourtPublic[];
+  // Fase 28 — só o booleano final, nunca o checklist granular
+  // (`ArenaSetupStatus`) exposto ao público: o motivo exato de uma arena
+  // não estar pronta é informação operacional do OWNER, não do cliente.
+  // Usado pra distinguir "esta arena ainda está sendo configurada" de um
+  // erro genérico na página pública.
+  isReady: boolean;
 }
 
 @Injectable()
@@ -73,6 +104,7 @@ export class ArenasService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly arenaMembersService: ArenaMembersService,
+    private readonly operatingHoursService: OperatingHoursService,
     private readonly usersService: UsersService,
   ) {}
 
@@ -123,10 +155,35 @@ export class ArenasService {
       throw new NotFoundException('Arena não encontrada.');
     }
 
-    const members = await this.arenaMembersService.listMembers(arenaId);
+    const [members, hasOperatingHours] = await Promise.all([
+      this.arenaMembersService.listMembers(arenaId),
+      this.operatingHoursService.hasAnyForArena(arenaId),
+    ]);
     const { courts, ...fields } = arena;
+    const setupStatus = this.computeSetupStatus(fields, courts, hasOperatingHours);
 
-    return { ...fields, courts, members };
+    return { ...fields, courts, members, setupStatus };
+  }
+
+  // Fase 28 — única implementação da regra "o que falta pra essa arena
+  // aceitar reservas de verdade"; reutilizada tanto pelo checklist
+  // administrativo (`findOne`) quanto pelo sinal público (`discoverOne`),
+  // nunca duas versões da mesma lógica.
+  private computeSetupStatus(
+    arena: Pick<ArenaFields, 'name' | 'timezone'>,
+    courts: Pick<Court, 'isActive' | 'pricePerSlot'>[],
+    hasOperatingHours: boolean,
+  ): ArenaSetupStatus {
+    const hasBasicInfo = Boolean(arena.name) && Boolean(arena.timezone);
+    const hasActiveCourtWithPricing = courts.some(
+      (court) => court.isActive && court.pricePerSlot.greaterThan(0),
+    );
+    return {
+      hasBasicInfo,
+      hasActiveCourtWithPricing,
+      hasOperatingHours,
+      isReady: hasBasicInfo && hasActiveCourtWithPricing && hasOperatingHours,
+    };
   }
 
   // Descoberta pública (Fase 6) — deliberadamente separado de
@@ -186,7 +243,14 @@ export class ArenasService {
       throw new NotFoundException('Arena não encontrada.');
     }
 
-    return arena;
+    // `courts` aqui já veio filtrado `isActive: true` no select acima —
+    // basta checar preço, mesma regra de `computeSetupStatus` (sem
+    // reimplementar o `.some(isActive && pricePerSlot>0)` duas vezes).
+    const hasOperatingHours = await this.operatingHoursService.hasAnyForArena(arenaId);
+    const isReady =
+      arena.courts.some((court) => court.pricePerSlot.greaterThan(0)) && hasOperatingHours;
+
+    return { ...arena, isReady };
   }
 
   async update(arenaId: string, dto: UpdateArenaDto): Promise<ArenaFields> {

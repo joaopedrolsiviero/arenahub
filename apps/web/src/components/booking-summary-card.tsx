@@ -1,6 +1,8 @@
+import Link from 'next/link';
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
 import { formatCurrencyBRL, formatDateTimeInZone, formatTimeInZone } from '@/lib/format';
+import { cn } from '@/lib/utils';
 import type { AvailabilitySlot, CourtPublic } from '@/lib/types';
 
 function Row({ label, value, emphasis = false }: { label: string; value: string; emphasis?: boolean }) {
@@ -22,12 +24,20 @@ export function BookingSummaryCard({
   timezone,
   isSubmitting,
   onConfirm,
+  signInHref,
 }: {
   court: CourtPublic;
   slot: AvailabilitySlot;
   timezone: string;
   isSubmitting: boolean;
   onConfirm: () => void;
+  // Fase 29 — visitante sem conta chega até aqui (arena/quadra/data/horário
+  // são públicos), mas criar a reserva continua exigindo login. Quando
+  // presente, troca o botão de confirmar por um link de entrar que preserva
+  // a seleção via query string (arenaId/courtId/data/horário já estão na
+  // própria URL desta página — ver CourtBooking) e volta exatamente pra cá
+  // depois do login, através do parâmetro `redirect_url` do Clerk.
+  signInHref?: string;
 }) {
   return (
     <Card className="border-2 border-brand/25">
@@ -42,9 +52,15 @@ export function BookingSummaryCard({
         <Row label="Total" value={formatCurrencyBRL(court.pricePerSlot)} emphasis />
       </CardContent>
       <CardFooter>
-        <Button type="button" size="lg" className="w-full" disabled={isSubmitting} onClick={onConfirm}>
-          {isSubmitting ? 'Confirmando…' : 'Confirmar reserva'}
-        </Button>
+        {signInHref ? (
+          <Link href={signInHref} className={cn(buttonVariants({ size: 'lg' }), 'w-full')}>
+            Entrar para confirmar reserva
+          </Link>
+        ) : (
+          <Button type="button" size="lg" className="w-full" disabled={isSubmitting} onClick={onConfirm}>
+            {isSubmitting ? 'Confirmando…' : 'Confirmar reserva'}
+          </Button>
+        )}
       </CardFooter>
     </Card>
   );

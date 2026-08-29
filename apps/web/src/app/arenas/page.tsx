@@ -4,7 +4,6 @@ import { useDiscoverArenas } from '@/hooks/use-api';
 import { ArenaCard } from '@/components/arena-card';
 import { SiteHeader } from '@/components/site-header';
 import { LoadingState, ErrorState, EmptyState } from '@/components/async-state';
-import { RequireAuth } from '@/components/require-auth';
 
 function ArenasList() {
   const { data: arenas, isPending, isError } = useDiscoverArenas();
@@ -35,11 +34,15 @@ function ArenasList() {
   );
 }
 
+// Fase 29 — sem RequireAuth: um visitante sem conta precisa conseguir
+// navegar arena → quadra → data → horário → resumo antes de autenticar
+// (login só é exigido pra criar a Booking). Backend acompanha essa decisão
+// (GET /arenas/discover sem guard, ver arenas.controller.ts).
 export default function ArenasPage() {
   return (
-    <RequireAuth>
+    <>
       <SiteHeader />
       <ArenasList />
-    </RequireAuth>
+    </>
   );
 }

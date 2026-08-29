@@ -1,15 +1,18 @@
 'use client';
 
 import { Suspense, use, useEffect } from 'react';
+import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useDashboard, useMyAdminArenas } from '@/hooks/use-api';
+import { useArena, useDashboard, useMyAdminArenas } from '@/hooks/use-api';
 import { DashboardHeader } from '@/components/dashboard-header';
 import { DashboardDateNav } from '@/components/dashboard-date-nav';
 import { DashboardSummaryCards } from '@/components/dashboard-summary';
 import { UpcomingBookings } from '@/components/upcoming-bookings';
 import { BookingTimelineCard } from '@/components/booking-timeline';
-import { LoadingState, ErrorState } from '@/components/async-state';
+import { ArenaSetupChecklist } from '@/components/arena-setup-checklist';
+import { LoadingState, ErrorState, EmptyState } from '@/components/async-state';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
 import { RequireAuth } from '@/components/require-auth';
 import { ApiError } from '@/lib/api';
 
@@ -20,6 +23,7 @@ export function DashboardOverview({ arenaId }: { arenaId: string }) {
 
   const { data: adminArenas } = useMyAdminArenas();
   const { data: dashboard, isPending, isError, error } = useDashboard(arenaId, dateParam);
+  const { data: arena } = useArena(arenaId);
 
   // Sem ?date na URL: o backend já resolveu "hoje no timezone da arena"
   // (item 14 da Fase 7) — só refletimos essa escolha na URL depois,
@@ -75,6 +79,12 @@ export function DashboardOverview({ arenaId }: { arenaId: string }) {
         adminArenas={adminArenas ?? []}
       />
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-5 px-4 py-6 sm:px-6">
+        {/* Sinal de onboarding mais importante da tela (item 13/14) — vem
+            antes de qualquer outra coisa, inclusive do nav de data. */}
+        {arena?.setupStatus ? (
+          <ArenaSetupChecklist arenaId={arenaId} setupStatus={arena.setupStatus} />
+        ) : null}
+
         <div className="flex flex-wrap items-center justify-between gap-3">
           <DashboardDateNav
             date={dashboard.date}
@@ -98,16 +108,27 @@ export function DashboardOverview({ arenaId }: { arenaId: string }) {
             antes da lista de próximas reservas, que é só um recorte dela. */}
         <div className="flex flex-col gap-3">
           <p className="text-sm font-semibold">Ocupação por quadra</p>
-          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-            {dashboard.courts.map((court) => (
-              <BookingTimelineCard
-                key={court.id}
-                court={court}
-                operatingHours={dashboard.operatingHours}
-                timezone={dashboard.arena.timezone}
-              />
-            ))}
-          </div>
+          {dashboard.courts.length === 0 ? (
+            <EmptyState
+              message="Nenhuma quadra cadastrada ainda."
+              action={
+                <Link href={`/dashboard/${arenaId}/quadras`}>
+                  <Button type="button">Adicionar primeira quadra</Button>
+                </Link>
+              }
+            />
+          ) : (
+            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+              {dashboard.courts.map((court) => (
+                <BookingTimelineCard
+                  key={court.id}
+                  court={court}
+                  operatingHours={dashboard.operatingHours}
+                  timezone={dashboard.arena.timezone}
+                />
+              ))}
+            </div>
+          )}
         </div>
 
         <UpcomingBookings bookings={dashboard.upcomingBookings} timezone={dashboard.arena.timezone} />

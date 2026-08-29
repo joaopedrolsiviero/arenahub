@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
+import { PlusIcon } from 'lucide-react';
 import { ArenaSelector } from '@/components/arena-selector';
 import type { AdminArena } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -56,6 +57,17 @@ export function DashboardHeader({
             currentArenaId={arenaId}
             onChange={(newArenaId) => router.push(`/dashboard/${newArenaId}`)}
           />
+          {/* Fase 28, item 21 — sempre visível, não só quando há mais de uma
+              arena: um OWNER de arena única também pode querer administrar
+              uma segunda. */}
+          <Link
+            href="/dashboard/nova-arena"
+            title="Criar nova arena"
+            className="flex size-7 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            <PlusIcon className="size-4" />
+            <span className="sr-only">Criar nova arena</span>
+          </Link>
         </div>
         <nav className="flex gap-1">
           {NAV_ITEMS.map((item) => {

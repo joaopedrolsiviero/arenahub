@@ -2913,6 +2913,101 @@ testar em cada uma — mas a definição geral vale para todas.
   em relação à data real de execução foram ajustadas para o futuro (nunca a regra de negócio
   enfraquecida para acomodar um teste). Ver relatório da fase para os números reais.
 
+### Fase 28 — Onboarding e Configuração Inicial da Arena ✅ concluída (implementação e testes; deploy pendente de autorização)
+- **Objetivo:** um OWNER novo consegue criar/configurar sua arena, quadras, preço, duração e
+  horários — e entender claramente quando ela está pronta pra receber reservas — usando só o
+  produto (nunca SQL manual). Nenhuma mudança em `Booking`/`Payment`/Mercado Pago (fora de escopo
+  desta fase por decisão explícita).
+- **Auditoria prévia confirmou** que quase todo o CRUD necessário já existia (arenas, courts,
+  operating-hours, RBAC) — a lacuna real era de PRODUTO: não havia NENHUM formulário de criação de
+  arena no frontend (`POST /arenas` só era alcançável fora do produto), a criação de quadra só
+  coletava o nome (preço/duração exigiam um segundo passo depois), e nada em lugar nenhum informava
+  ao OWNER "o que falta configurar" nem ao cliente "esta arena ainda não está pronta".
+- **"Arena pronta" é SEMPRE derivado, nunca uma coluna nova** — decisão deliberada (`Arena.
+  isSetupComplete` foi considerado e descartado): `ArenasService.computeSetupStatus` calcula, a
+  cada leitura de `GET /arenas/:arenaId`, `{ hasBasicInfo, hasActiveCourtWithPricing,
+  hasOperatingHours, isReady }` a partir de dados que já existem (nome/timezone da arena sempre
+  obrigatórios na criação; pelo menos um `Court.isActive && pricePerSlot > 0`; pelo menos uma linha
+  em `ArenaOperatingHours`, via `OperatingHoursService.hasAnyForArena`, novo `findFirst` barato).
+  `GET /arenas/discover/:arenaId` (público) expõe só `isReady` (booleano final) — o checklist
+  granular é informação operacional do OWNER, nunca do cliente. Nenhuma coluna nova, nenhum job
+  recalculando nada.
+- **Nenhum sistema de publicação/visibilidade foi criado** (considerado e descartado, item 17 do
+  prompt) — uma arena incompleta continua listada em `GET /arenas/discover`, só a página de detalhe
+  do cliente mostra "esta arena ainda está sendo configurada" em vez da lista de quadras quando
+  `isReady === false`. `Court.isActive` (existente) e a nova `isReady` (derivada) nunca são
+  confundidos — são conceitos independentes.
+- **Frontend — `POST /arenas` finalmente alcançável pelo produto**: novo formulário em
+  `/dashboard/nova-arena` (nome, slug auto-sugerido a partir do nome mas editável, timezone com
+  sugestão via `Intl.DateTimeFormat().resolvedOptions().timeZone` + seletor `Intl.
+  supportedValuesOf('timeZone')` reaproveitado da tela de configurações existente — nenhum catálogo
+  próprio de timezone). Sempre acessível (não só no estado vazio): um OWNER pode administrar mais de
+  uma arena.
+- **Criação de quadra passou a coletar preço e duração no mesmo formulário** (`POST .../courts` já
+  aceitava esses campos como opcionais desde sempre — nenhum endpoint novo) — reduz a jornada
+  "criar quadra → configurar preço" pra um único passo.
+- **Checklist de configuração no dashboard** (`ArenaSetupChecklist`, novo componente) — cada item
+  aponta pra tela administrativa que já resolve aquele item; vira um banner "sua arena está pronta"
+  quando `isReady === true`. `EmptyState` (componente compartilhado) ganhou um slot `action`
+  opcional, reaproveitado em todo estado vazio com uma próxima ação óbvia (zero quadras no dashboard
+  e na tela de quadras) — sem inventar um segundo componente por tela.
+- **Dependências:** Fase 3 (Arena/Court/RBAC), Fase 5 (ArenaOperatingHours, "sem linha = fechado"),
+  Fase 6 (descoberta pública), Fase 7 (dashboard).
+- **Critério de conclusão:** testes novos cobrindo a derivação de `setupStatus`/`isReady` nos dois
+  sentidos (incompleta e completa, inclusive quadra inativa ou com preço R$0 nunca contando como
+  configurada), as telas de criação de arena/quadra e o checklist do dashboard, e um teste e2e de
+  ponta a ponta (`onboarding-journey.e2e-spec.ts`) provando que a configuração feita pelo OWNER
+  pelos endpoints reais realmente habilita a jornada do cliente até a criação de uma Booking (sem
+  pagamento real — fora de escopo). Nenhum teste pré-existente foi removido. Ver relatório da fase
+  para os números reais. Commit/push/deploy aguardando autorização explícita, conforme pedido.
+
+### Fase 29 — Experiência do Cliente e Jornada de Reserva de Ponta a Ponta ✅ concluída (implementação e testes; deploy pendente de autorização)
+- **Objetivo:** UX da jornada do cliente (visitante → arena → quadra → data → horário → resumo →
+  login → reserva → pagamento → confirmação → minhas reservas → detalhes → cancelamento) — sem
+  tocar Mercado Pago, sem alterar a máquina de estados de Payment/Booking, sem alterar a política de
+  refund da Fase 27.
+- **Decisão arquitetural real desta fase — descoberta/disponibilidade deixaram de exigir
+  autenticação** (`GET /arenas/discover`, `GET /arenas/discover/:arenaId`,
+  `GET .../availability`): antes exigiam `ClerkAuthGuard` de classe (herança da Fase 6 — "qualquer
+  usuário autenticado", nunca verdadeiramente público). A auditoria inicial encontrou que um
+  visitante sem conta literalmente não conseguia ver nenhuma arena — contradizia a jornada pedida
+  ("visitante → arena → ... → login"). Confirmado explicitamente com o usuário antes de alterar
+  (mudança de fronteira de autorização, não só de UI). `ArenasController` teve o guard de classe
+  removido e movido pra `@UseGuards` por rota (`create`/`findAll`/`findOne`/`update` continuam
+  exigindo `ClerkAuthGuard`, na mesma ordem de antes com `ArenaAccessGuard`); `AvailabilityController`
+  ficou sem nenhum guard. Criar a Booking continua exigindo login — a única coisa que mudou é até
+  onde um visitante consegue chegar sem conta. Throttle por IP (já existente) continua protegendo
+  contra varredura em massa, agora a única linha de defesa nesse ponto (antes era redundante com a
+  autenticação).
+- **Contexto de seleção preservado através do login** (item novo, `arenaId`/`courtId`/`date`/`slot`
+  nunca em estado local): a página de quadra sincroniza a seleção de horário pra um parâmetro `slot`
+  na URL (mesmo padrão já usado pra `date`); quando o visitante confirma sem estar logado, o botão
+  vira um link "Entrar para confirmar reserva" apontando pra
+  `/sign-in?redirect_url=<url completa com date+slot>` — `redirect_url` é a convenção nativa do
+  Clerk, lida automaticamente pelo componente `<SignIn/>`, sem nenhuma prop extra. Ao voltar
+  autenticado, a página restaura a seleção a partir da URL (ajuste de estado durante o render,
+  nunca um `useEffect` com `setState` — padrão recomendado pelo React, evita um round-trip de
+  render extra). Testado manualmente de ponta a ponta em ambiente local (ver relatório da fase).
+- **`RequireAuth`/`SiteHeader`** ganharam a mesma preservação de contexto (`redirect_url`) pra todo
+  fluxo que ainda exige login de tela inteira (`/minhas-reservas`, `/dashboard/*`).
+- **UX de pagamento/cancelamento**: nenhuma mudança na integração Mercado Pago em si — só
+  polimento visual (indicador de "atualizando automaticamente" no PIX pendente, já que o polling de
+  5s existia mas era silencioso; QR code responsivo em vez de tamanho fixo; afordance explícita
+  "Ver detalhes" nos cards de "Minhas reservas" pra descoberta em touch/mobile, já que antes
+  dependia só de hover). Toda a máquina de estados de Payment (`PENDING`/`PAID`/`FAILED`/
+  `EXPIRED`/`REFUNDING`/`REFUNDED`/`CANCELLED`) já tinha texto real e distinto por estado desde as
+  Fases 17/26/27 — auditoria confirmou que a cópia já batia com o esperado, sem necessidade de
+  redesenho.
+- **Dependências:** Fase 6 (descoberta pública, `ArenaAccessGuard`), Fase 17/23/25 (pagamento PIX),
+  Fase 26 (jornada do cliente, badges de status), Fase 27 (cancelamento/refund), Fase 28
+  (`isReady`, checklist).
+- **Critério de conclusão:** testes novos e2e confirmando acesso anônimo aos três endpoints
+  reabertos, testes de frontend cobrindo a preservação de seleção através do login (link de entrar
+  com `redirect_url` correto, restauração da seleção a partir da URL). Nenhum teste pré-existente
+  removido; um teste de segurança que assumia 401 em `GET .../availability` foi corrigido pra
+  refletir a nova política (a mudança em si, não um teste "consertado pra passar"). Ver relatório
+  da fase para os números reais. Commit/push/deploy aguardando autorização explícita.
+
 ---
 
 ## Riscos técnicos identificados

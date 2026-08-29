@@ -96,6 +96,22 @@ export function useMyBooking(bookingId: string | undefined) {
 
 // --- Fase 7: Dashboard operacional (área administrativa) ---
 
+// Fase 28 — cria a arena e já invalida "minhas arenas administradas" (a
+// própria criação, no backend, torna o usuário OWNER na mesma transação —
+// ver ArenasService.create), então a lista já reflete a arena nova sem
+// precisar de um reload.
+export function useCreateArena() {
+  const getToken = useToken();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (dto: Parameters<typeof api.createArena>[1]) =>
+      api.createArena(await getToken(), dto),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['admin-arenas'] });
+    },
+  });
+}
+
 export function useMyAdminArenas() {
   const getToken = useToken();
   return useQuery({

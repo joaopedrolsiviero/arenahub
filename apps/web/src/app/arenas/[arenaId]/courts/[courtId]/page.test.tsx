@@ -1,5 +1,6 @@
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { useAuth } from '@clerk/nextjs';
 import { CourtBooking } from './page';
 import { useDiscoverArena, useAvailability, useCreateBooking } from '../../../../../hooks/use-api';
 import { ApiError } from '../../../../../lib/api';
@@ -10,7 +11,16 @@ let searchParamsValue = new URLSearchParams();
 
 jest.mock('next/navigation', () => ({
   useRouter: () => ({ push, replace }),
+  usePathname: () => '/arenas/arena-1/courts/court-1',
   useSearchParams: () => searchParamsValue,
+}));
+
+// Fase 29 — signed-in por padrão nos testes existentes (mesmo espírito do
+// mock de `Show` em outros arquivos: assume autenticado a menos que um
+// teste específico sobrescreva). Testes de visitante sem conta sobrescrevem
+// `mockedUseAuth` explicitamente.
+jest.mock('@clerk/nextjs', () => ({
+  useAuth: jest.fn(() => ({ userId: 'user-1', isLoaded: true })),
 }));
 
 jest.mock('../../../../../hooks/use-api', () => ({
@@ -22,6 +32,7 @@ jest.mock('../../../../../hooks/use-api', () => ({
 const mockedUseDiscoverArena = useDiscoverArena as jest.Mock;
 const mockedUseAvailability = useAvailability as jest.Mock;
 const mockedUseCreateBooking = useCreateBooking as jest.Mock;
+const mockedUseAuth = useAuth as unknown as jest.Mock;
 
 const arena = {
   id: 'arena-1',
@@ -133,5 +144,57 @@ describe('CourtBookingPage — fluxo de confirmação de reserva', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /Selecionar horário 10:00/ }));
     expect(await screen.findByRole('button', { name: /Confirmando/ })).toBeDisabled();
+  });
+
+  // Fase 29, Parte 5 — visitante sem conta chega até o resumo (arena,
+  // quadra, data, horário são públicos desde esta fase), mas confirmar a
+  // reserva continua exigindo login. Em vez do botão de confirmar, vê um
+  // link de entrar que preserva a seleção via query string.
+  describe('Fase 29 — visitante sem conta no momento de confirmar', () => {
+    beforeEach(() => {
+      mockedUseAuth.mockReturnValue({ userId: null, isLoaded: true });
+    });
+
+    it('mostra "Entrar para confirmar reserva" em vez do botão de confirmar, preservando data e horário na URL de retorno', async () => {
+      renderPage();
+
+      fireEvent.click(await screen.findByRole('button', { name: /Selecionar horário 10:00/ }));
+
+      expect(screen.queryByRole('button', { name: 'Confirmar reserva' })).not.toBeInTheDocument();
+      const signInLink = await screen.findByRole('link', { name: /entrar para confirmar reserva/i });
+      const href = signInLink.getAttribute('href')!;
+      expect(href.startsWith('/sign-in?redirect_url=')).toBe(true);
+      const redirectTarget = decodeURIComponent(href.replace('/sign-in?redirect_url=', ''));
+      expect(redirectTarget).toContain('/arenas/arena-1/courts/court-1');
+      expect(redirectTarget).toContain('date=2026-09-07');
+      expect(redirectTarget).toContain('slot=2026-09-07T13%3A00%3A00.000Z');
+    });
+
+    it('nunca chama createBooking a partir do link de entrar (login continua sendo o único caminho pra autenticar)', async () => {
+      renderPage();
+
+      fireEvent.click(await screen.findByRole('button', { name: /Selecionar horário 10:00/ }));
+      await screen.findByRole('link', { name: /entrar para confirmar reserva/i });
+
+      expect(mutateAsync).not.toHaveBeenCalled();
+    });
+  });
+
+  // Fase 29 — cobre a volta do login: o usuário escolheu um horário antes de
+  // autenticar, foi mandado pro /sign-in, e voltou pra ESTA MESMA URL (com
+  // `slot` na query, gravado por handleSelectSlot antes do redirect). A
+  // seleção precisa reaparecer sozinha, sem o usuário escolher de novo.
+  it('Fase 29: restaura a seleção a partir do parâmetro `slot` na URL (retorno do login)', async () => {
+    // Usuário já autenticado (voltou do /sign-in) — reafirma explicitamente
+    // porque o describe anterior sobrescreveu mockedUseAuth com signed-out.
+    mockedUseAuth.mockReturnValue({ userId: 'user-1', isLoaded: true });
+    searchParamsValue = new URLSearchParams({
+      date: '2026-09-07',
+      slot: '2026-09-07T13:00:00.000Z',
+    });
+    renderPage();
+
+    expect(await screen.findByText('Resumo da reserva')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Confirmar reserva' })).toBeInTheDocument();
   });
 });

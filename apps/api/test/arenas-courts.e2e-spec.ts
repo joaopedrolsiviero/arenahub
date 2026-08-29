@@ -214,6 +214,31 @@ describe('Arenas & Courts (e2e)', () => {
         .set(...authHeader('token-a'))
         .expect(404);
     });
+
+    // Fase 28, Caso 6: arena recém-criada (sem quadra, sem horário) —
+    // setupStatus reporta cada item individualmente, nunca só o booleano
+    // final.
+    it('Fase 28: setupStatus reporta arena incompleta item a item quando não há quadra nem horário', async () => {
+      const response = await request(app.getHttpServer())
+        .get(`/v1/arenas/${createdArenaIds[0]}`)
+        .set(...authHeader('token-a'))
+        .expect(200);
+
+      const arena = asArenaBody(response) as ArenaBody & {
+        setupStatus: {
+          hasBasicInfo: boolean;
+          hasActiveCourtWithPricing: boolean;
+          hasOperatingHours: boolean;
+          isReady: boolean;
+        };
+      };
+      expect(arena.setupStatus).toEqual({
+        hasBasicInfo: true,
+        hasActiveCourtWithPricing: false,
+        hasOperatingHours: false,
+        isReady: false,
+      });
+    });
   });
 
   describe('PATCH /v1/arenas/:arenaId', () => {

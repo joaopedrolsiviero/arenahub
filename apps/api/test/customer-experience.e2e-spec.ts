@@ -51,6 +51,7 @@ interface DiscoveryDetailBody {
   timezone: string;
   courts: { id: string; name: string; isActive?: unknown }[];
   members?: unknown;
+  isReady: boolean;
 }
 
 interface MyBookingBody {
@@ -172,8 +173,16 @@ describe('Customer experience — discovery & minhas reservas (e2e)', () => {
   });
 
   describe('GET /v1/arenas/discover', () => {
-    it('exige autenticação (401)', async () => {
-      await request(app.getHttpServer()).get('/v1/arenas/discover').expect(401);
+    // Fase 29 — decisão explícita: um visitante sem conta precisa conseguir
+    // navegar arena → quadra → data → horário → resumo antes de autenticar.
+    // Login só é exigido pra criar a Booking (BookingsController), nunca
+    // pra ler descoberta/disponibilidade pública. Antes desta fase, exigia
+    // ClerkAuthGuard (qualquer usuário logado) — ver ARCHITECTURE.md.
+    it('funciona SEM token (visitante anônimo, Fase 29)', async () => {
+      const response = await request(app.getHttpServer()).get('/v1/arenas/discover').expect(200);
+
+      const arenas = response.body as DiscoverySummaryBody[];
+      expect(arenas.find((a) => a.id === arenaId)).toBeDefined();
     });
 
     it('não exige ArenaMember e nunca inclui role/members', async () => {
@@ -205,6 +214,17 @@ describe('Customer experience — discovery & minhas reservas (e2e)', () => {
       expect(courtIds).toContain(activeCourtId);
       expect(courtIds).not.toContain(inactiveCourtId);
       expect(body.courts[0]?.isActive).toBeUndefined();
+      // Fase 28, Caso 10: quadra ativa com preço válido + semana inteira
+      // configurada (fixture acima) => pronta pro cliente reservar.
+      expect(body.isReady).toBe(true);
+    });
+
+    it('Fase 29: funciona SEM token (visitante anônimo)', async () => {
+      const response = await request(app.getHttpServer())
+        .get(`/v1/arenas/discover/${arenaId}`)
+        .expect(200);
+
+      expect((response.body as DiscoveryDetailBody).isReady).toBe(true);
     });
 
     it('404 para arena inexistente', async () => {

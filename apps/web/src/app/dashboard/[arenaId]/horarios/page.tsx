@@ -191,6 +191,19 @@ export function OperatingHoursEditor({ arenaId }: { arenaId: string }) {
         {isPending ? <LoadingState label="Carregando horários…" /> : null}
         {isError ? <ErrorState message="Não foi possível carregar o horário de funcionamento." /> : null}
 
+        {/* Fase 28, item 9: explica o porquê antes de mostrar 7 dias
+            "Fechado" — sem isso, uma arena nova parece quebrada em vez de
+            só ainda não configurada. */}
+        {saved && saved.length === 0 ? (
+          <Alert role="status">
+            <AlertTitle>Sua arena está fechada em todos os dias</AlertTitle>
+            <AlertDescription>
+              Sem nenhum horário configurado, nenhum cliente consegue ver disponibilidade nem
+              reservar. Adicione ao menos um intervalo nos dias em que a arena funciona.
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
         {saved ? <OperatingHoursForm arenaId={arenaId} saved={saved} /> : null}
       </div>
     </>

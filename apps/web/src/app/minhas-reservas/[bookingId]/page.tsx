@@ -2,7 +2,7 @@
 
 import { Suspense, use, useState, useSyncExternalStore } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { CheckCircle2Icon, MapPinIcon } from 'lucide-react';
+import { CheckCircle2Icon, MapPinIcon, RefreshCwIcon } from 'lucide-react';
 import { useMyBooking, useCancelBooking, useBookingPayment, useCreateBookingPayment } from '@/hooks/use-api';
 import { LoadingState, ErrorState } from '@/components/async-state';
 import { RequireAuth } from '@/components/require-auth';
@@ -98,7 +98,10 @@ function PaymentSection({ booking }: { booking: MyBooking }) {
                 alt="QR Code do PIX"
                 width={220}
                 height={220}
-                className="mx-auto"
+                // Fase 29 — fluido em vez de fixo: continua com 220px como
+                // teto (o QR não fica maior que isso em telas largas), mas
+                // nunca estoura a largura do card num celular estreito.
+                className="mx-auto h-auto w-full max-w-[220px]"
               />
             ) : null}
 
@@ -117,6 +120,14 @@ function PaymentSection({ booking }: { booking: MyBooking }) {
                     Expira em {formatDateTimeInZone(payment.expiresAt, booking.court.arena.timezone)}
                   </p>
                 ) : null}
+                {/* Fase 29 — o polling de 5s (useBookingPayment) já existia,
+                    mas era inteiramente silencioso; sem isso o cliente não
+                    tinha nenhum sinal de que a tela se atualiza sozinha
+                    assim que o pagamento for confirmado. */}
+                <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <RefreshCwIcon className="size-3 animate-spin" aria-hidden="true" />
+                  Atualizando automaticamente…
+                </p>
               </div>
             ) : null}
 

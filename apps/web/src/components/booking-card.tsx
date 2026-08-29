@@ -1,5 +1,14 @@
 import Link from 'next/link';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardAction } from '@/components/ui/card';
+import { ChevronRightIcon } from 'lucide-react';
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardAction,
+  CardFooter,
+} from '@/components/ui/card';
 import { BookingStatusBadge } from '@/components/booking-status-badge';
 import { PaymentStatusBadge } from '@/components/payment-status-badge';
 import { formatCurrencyBRL, formatDateInZone, formatTimeInZone } from '@/lib/format';
@@ -50,6 +59,13 @@ export function BookingCard({
             {formatCurrencyBRL(booking.total)}
           </span>
         </CardContent>
+        {/* Fase 29 — pista explícita de clicabilidade: hover só existe em
+            desktop, e num celular (sem hover) o card inteiro sendo um link
+            não era óbvio por si só. */}
+        <CardFooter className="justify-end gap-0.5 text-xs font-medium text-muted-foreground">
+          Ver detalhes
+          <ChevronRightIcon className="size-3.5" aria-hidden="true" />
+        </CardFooter>
       </Card>
     </Link>
   );

@@ -148,7 +148,7 @@ function CourtForm({ arenaId, court }: { arenaId: string; court: Court }) {
   );
 }
 
-function CourtEditor({ arenaId, courtId }: { arenaId: string; courtId: string }) {
+export function CourtEditor({ arenaId, courtId }: { arenaId: string; courtId: string }) {
   const router = useRouter();
   const { data: adminArenas } = useMyAdminArenas();
   const { data: dashboard } = useDashboard(arenaId, undefined);

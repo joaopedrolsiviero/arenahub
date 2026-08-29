@@ -16,11 +16,11 @@ import { CreateArenaDto } from './dto/create-arena.dto';
 import { UpdateArenaDto } from './dto/update-arena.dto';
 
 @Controller('arenas')
-@UseGuards(ClerkAuthGuard)
 export class ArenasController {
   constructor(private readonly arenasService: ArenasService) {}
 
   @Post()
+  @UseGuards(ClerkAuthGuard)
   create(
     @Body() dto: CreateArenaDto,
     @CurrentUser() user: AuthenticatedUser,
@@ -29,15 +29,23 @@ export class ArenasController {
   }
 
   @Get()
+  @UseGuards(ClerkAuthGuard)
   findAll(@CurrentUser() user: AuthenticatedUser): Promise<ArenaSummary[]> {
     return this.arenasService.findAllForUser(user.clerkId);
   }
 
-  // Descoberta pública (Fase 6) — precisa vir ANTES de `:arenaId` na
-  // declaração, senão o Nest resolveria "discover" como valor do parâmetro
-  // `:arenaId` da rota administrativa abaixo. Só ClerkAuthGuard: não exige
-  // ArenaMember (mesmo padrão de availability/CUSTOMER desde a Fase 4) —
-  // `GET /arenas` continua sendo "minhas arenas", sem mudança de semântica.
+  // Descoberta pública (Fase 6, reaberta de verdade na Fase 29) — precisa vir
+  // ANTES de `:arenaId` na declaração, senão o Nest resolveria "discover"
+  // como valor do parâmetro `:arenaId` da rota administrativa abaixo. SEM
+  // NENHUM guard — decisão explícita da Fase 29: um visitante sem conta
+  // precisa conseguir navegar arena → quadra → data → horário → resumo antes
+  // de autenticar (login só é exigido pra criar a Booking, em
+  // BookingsController). Antes desta fase exigia ClerkAuthGuard (qualquer
+  // usuário logado, não só membro da arena); a fronteira de autorização real
+  // agora é "toda escrita exige login", nunca "toda leitura pública exige
+  // login". Throttle por IP em AvailabilityController continua protegendo
+  // contra varredura em massa, já que não há mais identidade autenticada
+  // pra usar como chave.
   @Get('discover')
   discoverAll(): Promise<ArenaDiscoverySummary[]> {
     return this.arenasService.discoverAll();
@@ -49,14 +57,14 @@ export class ArenasController {
   }
 
   @Get(':arenaId')
-  @UseGuards(ArenaAccessGuard)
+  @UseGuards(ClerkAuthGuard, ArenaAccessGuard)
   @RequireArenaRole()
   findOne(@Param('arenaId') arenaId: string): Promise<ArenaDetail> {
     return this.arenasService.findOne(arenaId);
   }
 
   @Patch(':arenaId')
-  @UseGuards(ArenaAccessGuard)
+  @UseGuards(ClerkAuthGuard, ArenaAccessGuard)
   @RequireArenaRole(ArenaRole.OWNER, ArenaRole.ADMIN)
   update(@Param('arenaId') arenaId: string, @Body() dto: UpdateArenaDto): Promise<ArenaFields> {
     return this.arenasService.update(arenaId, dto);

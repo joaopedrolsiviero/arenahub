@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import { DashboardOverview } from './page';
-import { useDashboard, useMyAdminArenas } from '../../../hooks/use-api';
+import { useArena, useDashboard, useMyAdminArenas } from '../../../hooks/use-api';
 import { ApiError } from '../../../lib/api';
 import type { DashboardResponse } from '../../../lib/types';
 
@@ -17,10 +17,12 @@ jest.mock('next/navigation', () => ({
 jest.mock('../../../hooks/use-api', () => ({
   useDashboard: jest.fn(),
   useMyAdminArenas: jest.fn(),
+  useArena: jest.fn(),
 }));
 
 const mockedUseDashboard = useDashboard as jest.Mock;
 const mockedUseMyAdminArenas = useMyAdminArenas as jest.Mock;
+const mockedUseArena = useArena as jest.Mock;
 
 const baseDashboard: DashboardResponse = {
   arena: { id: 'arena-1', name: 'Arena Central', timezone: 'America/Sao_Paulo' },
@@ -77,6 +79,7 @@ describe('DashboardOverview', () => {
     jest.clearAllMocks();
     searchParamsValue = new URLSearchParams({ date: '2026-08-20' });
     mockedUseMyAdminArenas.mockReturnValue({ data: [] });
+    mockedUseArena.mockReturnValue({ data: undefined });
   });
 
   it('mostra o estado de carregamento', () => {
@@ -147,5 +150,58 @@ describe('DashboardOverview', () => {
     render(<DashboardOverview arenaId="arena-1" />);
 
     expect(screen.getAllByText('Cliente Teste').length).toBeGreaterThan(0);
+  });
+
+  // Fase 28, Caso 6/7/8: o checklist reflete o `setupStatus` que já vem de
+  // `useArena` — a tela não recalcula nada sozinha, só exibe.
+  it('Fase 28: mostra o checklist de configuração quando a arena ainda não está pronta', () => {
+    mockedUseDashboard.mockReturnValue({ data: baseDashboard, isPending: false, isError: false });
+    mockedUseArena.mockReturnValue({
+      data: {
+        id: 'arena-1',
+        setupStatus: {
+          hasBasicInfo: true,
+          hasActiveCourtWithPricing: false,
+          hasOperatingHours: true,
+          isReady: false,
+        },
+      },
+    });
+    render(<DashboardOverview arenaId="arena-1" />);
+
+    expect(screen.getByText('Configure sua arena')).toBeInTheDocument();
+    expect(screen.getByText(/pelo menos uma quadra ativa com preço definido/i)).toBeInTheDocument();
+  });
+
+  it('Fase 28: mostra "sua arena está pronta" quando setupStatus.isReady é true', () => {
+    mockedUseDashboard.mockReturnValue({ data: baseDashboard, isPending: false, isError: false });
+    mockedUseArena.mockReturnValue({
+      data: {
+        id: 'arena-1',
+        setupStatus: {
+          hasBasicInfo: true,
+          hasActiveCourtWithPricing: true,
+          hasOperatingHours: true,
+          isReady: true,
+        },
+      },
+    });
+    render(<DashboardOverview arenaId="arena-1" />);
+
+    expect(screen.getByText(/sua arena está pronta/i)).toBeInTheDocument();
+  });
+
+  it('Fase 28: sem quadra cadastrada, mostra CTA pra adicionar a primeira', () => {
+    mockedUseDashboard.mockReturnValue({
+      data: { ...baseDashboard, courts: [] },
+      isPending: false,
+      isError: false,
+    });
+    render(<DashboardOverview arenaId="arena-1" />);
+
+    expect(screen.getByRole('link', { name: /adicionar primeira quadra/i })).toHaveAttribute(
+      'href',
+      '/dashboard/arena-1/quadras',
+    );
   });
 });

@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { AlertCircleIcon } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -27,10 +28,21 @@ export function ErrorState({
   );
 }
 
-export function EmptyState({ message }: { message: string }) {
+// `action` (Fase 28): slot opcional pra um botão/link logo abaixo da
+// mensagem — reaproveitado em todo estado vazio que tem uma próxima ação
+// óbvia (ex: "nenhuma quadra ainda" → botão de criar), em vez de cada tela
+// inventar seu próprio empty-state com CTA.
+export function EmptyState({
+  message,
+  action,
+}: {
+  message: string;
+  action?: ReactNode;
+}) {
   return (
-    <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
-      {message}
+    <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
+      <p>{message}</p>
+      {action}
     </div>
   );
 }

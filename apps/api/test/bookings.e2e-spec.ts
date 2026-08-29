@@ -310,6 +310,18 @@ describe('Bookings & Availability (e2e)', () => {
       expect(body.slots[0]?.available).toBe(false); // 09:00-10:00, coincide com a reserva
       expect(body.slots[2]?.available).toBe(true); // 11:00-12:00, livre
     });
+
+    // Fase 29 — visitante sem conta precisa conseguir ver disponibilidade
+    // real antes de autenticar; login só é exigido pra criar a Booking.
+    it('Fase 29: funciona SEM token (visitante anônimo)', async () => {
+      const response = await request(app.getHttpServer())
+        .get(`/v1/arenas/${arenaId}/courts/${courtId}/availability`)
+        .query({ from: '2026-08-20T09:00:00-03:00', to: '2026-08-20T12:00:00-03:00' })
+        .expect(200);
+
+      const body = response.body as { slots: { available: boolean }[] };
+      expect(body.slots).toHaveLength(3);
+    });
   });
 
   describe('POST /bookings/:bookingId/cancel', () => {
@@ -799,10 +811,13 @@ describe('Bookings & Availability (e2e)', () => {
   describe('Segurança — requisição sem token', () => {
     it('todas as rotas de bookings exigem autenticação (401)', async () => {
       await request(app.getHttpServer()).get(bookingsUrl()).expect(401);
-      await request(app.getHttpServer())
-        .get(`/v1/arenas/${arenaId}/courts/${courtId}/availability`)
-        .expect(401);
     });
+
+    // Fase 29 — `GET .../availability` deixou de exigir autenticação de
+    // propósito (visitante sem conta precisa ver disponibilidade real antes
+    // de logar); movido pra fora do teste acima porque não é mais uma rota
+    // que "exige autenticação" — ver caso dedicado em describe('GET
+    // /availability').
   });
 
   // Fase 13 — consolidação do ciclo de vida da reserva do CUSTOMER. A

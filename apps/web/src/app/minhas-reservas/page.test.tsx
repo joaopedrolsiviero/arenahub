@@ -10,6 +10,7 @@ jest.mock('@clerk/nextjs', () => ({
 
 jest.mock('next/navigation', () => ({
   usePathname: () => '/minhas-reservas',
+  useSearchParams: () => new URLSearchParams(),
 }));
 
 jest.mock('../../hooks/use-api', () => ({

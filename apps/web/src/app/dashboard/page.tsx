@@ -7,6 +7,7 @@ import { useMyAdminArenas } from '@/hooks/use-api';
 import { LoadingState, ErrorState, EmptyState } from '@/components/async-state';
 import { RequireAuth } from '@/components/require-auth';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
 
 function ArenaPicker() {
   const router = useRouter();
@@ -22,12 +23,27 @@ function ArenaPicker() {
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-4 px-4 py-8 sm:px-6">
-      <h1 className="font-heading text-2xl font-bold tracking-tight">Painel administrativo</h1>
+      <div className="flex items-center justify-between gap-3">
+        <h1 className="font-heading text-2xl font-bold tracking-tight">Painel administrativo</h1>
+        {/* Sempre visível (não só no estado vazio) — item 21: um OWNER pode
+            administrar mais de uma arena, então "criar arena" nunca é uma
+            ação de uso único. */}
+        <Link href="/dashboard/nova-arena" className="shrink-0">
+          <Button type="button">Nova arena</Button>
+        </Link>
+      </div>
 
       {isPending ? <LoadingState label="Carregando arenas…" /> : null}
       {isError ? <ErrorState message="Não foi possível carregar suas arenas." /> : null}
       {arenas && arenas.length === 0 ? (
-        <EmptyState message="Você não administra nenhuma arena. Fale com quem cadastrou a sua arena para receber acesso." />
+        <EmptyState
+          message="Você ainda não administra nenhuma arena."
+          action={
+            <Link href="/dashboard/nova-arena">
+              <Button type="button">Criar minha arena</Button>
+            </Link>
+          }
+        />
       ) : null}
 
       {arenas && arenas.length > 1 ? (

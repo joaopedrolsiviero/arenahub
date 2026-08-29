@@ -1,15 +1,15 @@
 'use client';
 
 import { Suspense, use, useEffect, useMemo, useState } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useRouter, useSearchParams, usePathname } from 'next/navigation';
 import { useQueryClient } from '@tanstack/react-query';
+import { useAuth } from '@clerk/nextjs';
 import { useDiscoverArena, useAvailability, useCreateBooking } from '@/hooks/use-api';
 import { AvailabilityGrid } from '@/components/availability-grid';
 import { BookingSummaryCard } from '@/components/booking-summary-card';
 import { DashboardDateNav } from '@/components/dashboard-date-nav';
 import { SiteHeader } from '@/components/site-header';
 import { LoadingState, ErrorState, EmptyState } from '@/components/async-state';
-import { RequireAuth } from '@/components/require-auth';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { formatCurrencyBRL, localDayWindowToUtc, todayInZone } from '@/lib/format';
 import { ApiError } from '@/lib/api';
@@ -17,8 +17,11 @@ import type { AvailabilitySlot } from '@/lib/types';
 
 export function CourtBooking({ arenaId, courtId }: { arenaId: string; courtId: string }) {
   const router = useRouter();
+  const pathname = usePathname();
   const searchParams = useSearchParams();
   const dateParam = searchParams.get('date');
+  const slotParam = searchParams.get('slot');
+  const { userId, isLoaded: isAuthLoaded } = useAuth();
 
   const { data: arena, isPending: isArenaPending, isError: isArenaError } = useDiscoverArena(arenaId);
   const court = arena?.courts.find((c) => c.id === courtId);
@@ -50,18 +53,32 @@ export function CourtBooking({ arenaId, courtId }: { arenaId: string; courtId: s
   const [idempotencyKey, setIdempotencyKey] = useState<string | null>(null);
   const [conflictMessage, setConflictMessage] = useState<string | null>(null);
 
+  function updateSlotParam(slot: AvailabilitySlot | null) {
+    const params = new URLSearchParams(searchParams.toString());
+    if (slot) {
+      params.set('slot', slot.startsAt);
+    } else {
+      params.delete('slot');
+    }
+    router.replace(`?${params.toString()}`);
+  }
+
   // Chave de idempotência estável para a MESMA tentativa lógica (mesmo
   // horário selecionado) — só troca quando a seleção muda, nunca a cada
-  // clique/retry (item 25-27).
+  // clique/retry (item 25-27). A seleção também vai pra URL (item novo da
+  // Fase 29): um visitante sem conta que escolhe um horário e é mandado pro
+  // login volta pra cá com a MESMA seleção, sem precisar escolher de novo.
   function handleSelectSlot(slot: AvailabilitySlot) {
     setConflictMessage(null);
     if (selectedSlot?.startsAt === slot.startsAt) {
       setSelectedSlot(null);
       setIdempotencyKey(null);
+      updateSlotParam(null);
       return;
     }
     setSelectedSlot(slot);
     setIdempotencyKey(crypto.randomUUID());
+    updateSlotParam(slot);
   }
 
   function handleDateChange(value: string) {
@@ -70,7 +87,23 @@ export function CourtBooking({ arenaId, courtId }: { arenaId: string; courtId: s
     setConflictMessage(null);
     const params = new URLSearchParams(searchParams.toString());
     params.set('date', value);
+    params.delete('slot');
     router.replace(`?${params.toString()}`);
+  }
+
+  // Restaura a seleção a partir da URL (Fase 29) — cobre exatamente o caso
+  // de ida-e-volta pelo login: `arenaId`/`courtId`/`date`/`slot` nunca saem
+  // da URL, então nunca dependem de estado local que o redirect apagaria.
+  // Ajuste de estado DURANTE o render (nunca num useEffect) — padrão
+  // recomendado pelo React pra "derivar estado de um valor que mudou": a
+  // guarda `!selectedSlot` já impede loop (falsa a partir do próprio
+  // re-render que a chamada de setState dispara).
+  if (availability && !selectedSlot && slotParam) {
+    const match = availability.slots.find((slot) => slot.startsAt === slotParam && slot.available);
+    if (match) {
+      setSelectedSlot(match);
+      setIdempotencyKey(crypto.randomUUID());
+    }
   }
 
   const createBooking = useCreateBooking(arenaId, courtId);
@@ -163,12 +196,30 @@ export function CourtBooking({ arenaId, courtId }: { arenaId: string; courtId: s
           timezone={availability.timezone}
           isSubmitting={createBooking.isPending}
           onConfirm={handleConfirm}
+          signInHref={
+            isAuthLoaded && !userId
+              ? // Construído a partir de `date`/`selectedSlot` (estado local já
+                // confirmado), nunca de `searchParams` — o `router.replace` de
+                // `updateSlotParam` é assíncrono, então a URL do navegador só
+                // reflete o `slot` mais recente depois de um re-render; ler
+                // direto do estado evita depender dessa corrida.
+                `/sign-in?redirect_url=${encodeURIComponent(
+                  `${pathname}?${new URLSearchParams({
+                    ...(date ? { date } : {}),
+                    slot: selectedSlot.startsAt,
+                  }).toString()}`,
+                )}`
+              : undefined
+          }
         />
       ) : null}
     </div>
   );
 }
 
+// Fase 29 — sem RequireAuth: um visitante sem conta precisa conseguir
+// escolher quadra/data/horário e ver o resumo antes de autenticar; login só
+// é exigido no passo de confirmar (ver `signInHref` em BookingSummaryCard).
 export default function CourtBookingPage({
   params,
 }: {
@@ -176,11 +227,11 @@ export default function CourtBookingPage({
 }) {
   const { arenaId, courtId } = use(params);
   return (
-    <RequireAuth>
+    <>
       <SiteHeader />
       <Suspense fallback={<LoadingState label="Carregando quadra…" />}>
         <CourtBooking arenaId={arenaId} courtId={courtId} />
       </Suspense>
-    </RequireAuth>
+    </>
   );
 }

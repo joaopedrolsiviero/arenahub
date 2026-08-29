@@ -7,6 +7,8 @@ const replace = jest.fn();
 
 jest.mock('next/navigation', () => ({
   useRouter: () => ({ push, replace }),
+  usePathname: () => '/dashboard',
+  useSearchParams: () => new URLSearchParams(),
 }));
 
 jest.mock('@clerk/nextjs', () => ({
@@ -36,6 +38,37 @@ describe('DashboardEntryPage', () => {
 
     expect(screen.getByText(/não administra nenhuma arena/i)).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  // Fase 28, Caso 1: sem nenhuma arena, o único caminho hoje era "fale com
+  // quem cadastrou" — agora existe um CTA real pra criar a própria arena.
+  it('Fase 28: estado vazio tem um CTA que leva pra criação de arena', () => {
+    mockedUseMyAdminArenas.mockReturnValue({ data: [], isPending: false, isError: false });
+    render(<DashboardEntryPage />);
+
+    expect(screen.getByRole('link', { name: /criar minha arena/i })).toHaveAttribute(
+      'href',
+      '/dashboard/nova-arena',
+    );
+  });
+
+  // Fase 28, item 21: "nova arena" continua acessível mesmo com múltiplas
+  // arenas já existentes — nunca uma ação de uso único.
+  it('Fase 28: link para nova arena aparece mesmo com arenas já existentes', () => {
+    mockedUseMyAdminArenas.mockReturnValue({
+      data: [
+        { id: 'arena-1', name: 'Arena Central', slug: 'a', role: 'OWNER', timezone: 'America/Sao_Paulo' },
+        { id: 'arena-2', name: 'Arena Norte', slug: 'b', role: 'ADMIN', timezone: 'America/Sao_Paulo' },
+      ],
+      isPending: false,
+      isError: false,
+    });
+    render(<DashboardEntryPage />);
+
+    expect(screen.getByRole('link', { name: /nova arena/i })).toHaveAttribute(
+      'href',
+      '/dashboard/nova-arena',
+    );
   });
 
   it('administrador de uma única arena é redirecionado direto para o dashboard dela', () => {

@@ -44,6 +44,10 @@ export interface ArenaDiscoveryDetail {
   createdAt: string;
   updatedAt: string;
   courts: CourtPublic[];
+  // Fase 28 — só o booleano final (nunca o checklist granular, que é
+  // informação do OWNER); usado pra distinguir "esta arena ainda está
+  // sendo configurada" de qualquer outro estado (erro, sem quadras no dia).
+  isReady: boolean;
 }
 
 export interface AvailabilitySlot {
@@ -100,6 +104,16 @@ export interface MyBooking {
 
 export type ArenaRole = 'OWNER' | 'ADMIN';
 
+// Fase 28 — espelha ArenaSetupStatus do backend (arenas.service.ts),
+// sempre DERIVADO pelo backend a cada leitura, nunca recalculado aqui:
+// o frontend só exibe o que já veio pronto.
+export interface ArenaSetupStatus {
+  hasBasicInfo: boolean;
+  hasActiveCourtWithPricing: boolean;
+  hasOperatingHours: boolean;
+  isReady: boolean;
+}
+
 // GET /v1/arenas ("minhas arenas administradas", Fase 3 — nunca
 // ressemantizado) — usado como fonte do seletor de arena do Dashboard.
 export interface AdminArena {
@@ -114,6 +128,9 @@ export interface AdminArena {
   // em si. `null` = arena ainda sem WhatsApp configurado.
   whatsappPhoneNumberId: string | null;
   role: ArenaRole;
+  // Fase 28 — só presente na resposta de detalhe (GET /arenas/:arenaId);
+  // ausente em GET /arenas (lista), que devolve ArenaSummary sem esse campo.
+  setupStatus?: ArenaSetupStatus;
 }
 
 export interface Court {

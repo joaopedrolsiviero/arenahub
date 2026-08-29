@@ -1,7 +1,8 @@
 'use client';
 
-import { Suspense, use, useMemo, useState } from 'react';
+import { Suspense, use, useState } from 'react';
 import { useArena, useUpdateArena, useMyAdminArenas, useDashboard } from '@/hooks/use-api';
+import { useTimezoneOptions } from '@/hooks/use-timezone-options';
 import { DashboardHeader } from '@/components/dashboard-header';
 import { LoadingState, ErrorState } from '@/components/async-state';
 import { RequireAuth } from '@/components/require-auth';
@@ -12,13 +13,6 @@ import { Label } from '@/components/ui/label';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { ApiError } from '@/lib/api';
 import type { AdminArena } from '@/lib/types';
-
-// IANA nativo do runtime — nunca um catálogo próprio de timezones (item 34
-// da Fase 7), mesma fonte de verdade que o backend usa para validar
-// (Intl.supportedValuesOf('timeZone')).
-function useTimezoneOptions(): string[] {
-  return useMemo(() => Intl.supportedValuesOf('timeZone'), []);
-}
 
 // Só monta depois que `arena` chega do servidor — estado local nasce do
 // valor inicial diretamente (sem useEffect).
@@ -122,6 +116,7 @@ function ArenaForm({ arenaId, arena }: { arenaId: string; arena: AdminArena }) {
         <CardContent className="flex flex-col gap-1.5">
           <select
             id="arena-timezone"
+            aria-label="Timezone"
             value={timezone}
             onChange={(event) => setTimezone(event.target.value)}
             className="h-8 w-fit rounded-lg border border-input bg-transparent px-2.5 text-sm"

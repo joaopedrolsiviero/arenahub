@@ -158,6 +158,13 @@ export const api = {
   getArena: (token: string | null, arenaId: string): Promise<AdminArena> =>
     request(`/arenas/${arenaId}`, { token }),
 
+  // Fase 28 — o backend continua sendo a única autoridade de validação
+  // (slug único, timezone IANA válido); o form no frontend só coleta.
+  createArena: (
+    token: string | null,
+    dto: { name: string; slug: string; timezone: string; description?: string },
+  ): Promise<AdminArena> => request('/arenas', { token, method: 'POST', body: dto }),
+
   updateArena: (
     token: string | null,
     arenaId: string,
