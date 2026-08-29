@@ -413,6 +413,9 @@ describe('BookingsService', () => {
       courtId: 'court-1',
       userId: 'user-1',
       status: BookingStatus.CONFIRMED,
+      // Sempre no futuro por padrão (Fase 27, Regra 3/4) — testes que
+      // querem exercitar o bloqueio de horário sobrescrevem explicitamente.
+      startsAt: new Date(Date.now() + 60 * 60_000),
     };
 
     it('permite que o dono da reserva cancele', async () => {
@@ -500,6 +503,47 @@ describe('BookingsService', () => {
 
       expect(result.status).toBe(BookingStatus.CANCELLED);
       expect(result.cancelledByUserId).toBe('quem-venceu-a-corrida');
+    });
+
+    // Fase 27, Regra 3/4: `now >= startsAt` bloqueia o cancelamento — nunca
+    // uma checagem de string/data local, sempre `Date.now()` real. O
+    // frontend nunca é autoridade sobre isso (item 5 do prompt).
+    it('Regra 3: bloqueia cancelamento se a reserva já começou (dono)', async () => {
+      prisma.booking.findFirst.mockResolvedValue({
+        ...existingBooking,
+        startsAt: new Date(Date.now() - 1000),
+      });
+
+      await expect(
+        service.cancel('arena-1', 'court-1', 'booking-1', 'user-1'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.booking.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('Regra 4: bloqueia cancelamento de reserva já passada, mesmo por ADMIN/OWNER — sem exceção por quem cancela', async () => {
+      prisma.booking.findFirst.mockResolvedValue({
+        ...existingBooking,
+        startsAt: new Date(Date.now() - 60 * 60_000),
+      });
+      arenaMembersService.getRole.mockResolvedValue(ArenaRole.OWNER);
+
+      await expect(
+        service.cancel('arena-1', 'court-1', 'booking-1', 'owner-1'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.booking.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('reserva já CANCELLED continua idempotente mesmo com startsAt no passado — nunca lança', async () => {
+      prisma.booking.findFirst.mockResolvedValue({
+        ...existingBooking,
+        status: BookingStatus.CANCELLED,
+        startsAt: new Date(Date.now() - 60 * 60_000),
+      });
+
+      const result = await service.cancel('arena-1', 'court-1', 'booking-1', 'user-1');
+
+      expect(result.status).toBe(BookingStatus.CANCELLED);
+      expect(prisma.booking.updateMany).not.toHaveBeenCalled();
     });
   });
 });

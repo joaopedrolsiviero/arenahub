@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { forwardRef, Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { UsersModule } from '../users/users.module';
 import { BookingsModule } from '../bookings/bookings.module';
@@ -19,7 +19,10 @@ import { MercadoPagoPaymentProviderService } from './providers/mercado-pago-paym
 // módulo nesta fase (item 14 do prompt: "não implemente pagamentos pelo
 // WhatsApp além do necessário pra manter a arquitetura preparada").
 @Module({
-  imports: [AuthModule, UsersModule, BookingsModule, PrismaModule],
+  // forwardRef (Fase 27) — BookingsModule agora importa PaymentsModule de
+  // volta (BookingsController dispara `refundIfPaid` no cancelamento); ver
+  // bookings.module.ts para a justificativa completa do ciclo.
+  imports: [AuthModule, UsersModule, forwardRef(() => BookingsModule), PrismaModule],
   controllers: [PaymentsController, MyPaymentsController, PaymentsWebhookController],
   providers: [
     PaymentsService,

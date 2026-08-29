@@ -1,6 +1,6 @@
 # ArenaHub — Deploy e Infraestrutura de Produção
 
-> Companheiro de `docs/ARCHITECTURE.md` (v0.18) — este documento é operacional
+> Companheiro de `docs/ARCHITECTURE.md` (v0.19) — este documento é operacional
 > (como implantar e operar), não arquitetural (por que o sistema é como é).
 >
 > **Status honesto (Fase 19, sessões em 2026-08-26/27 — smoke test de login
@@ -870,6 +870,12 @@ a ponta com as credenciais de teste — não fingir que essa validação já aco
 > exercitado porque nenhum pagamento real/de teste foi efetivamente
 > completado.
 
+> **Reembolso implementado na Fase 27** (ver Seção 21) — cancelar uma
+> Booking com Payment `PAID` agora aciona um reembolso real e integral via
+> `POST /v1/payments/{id}/refunds` do Mercado Pago, com os mesmos princípios
+> de idempotência (`X-Idempotency-Key`) e "nunca confiar no valor enviado
+> pelo cliente" já documentados nesta seção para a criação de pagamento.
+
 ### 5.1. Rate limiting (Fase 18) — em memória, NUNCA distribuído
 
 `@nestjs/throttler`, registrado globalmente (`ThrottlerModule.forRoot` +
@@ -1663,6 +1669,84 @@ certo está ativo quando a plataforma tem um incidente de promoção lenta.
   `dashboard-date-nav`) não têm `.test.tsx` próprio.
 - `PAYMENT_SANDBOX_TEST_PAYER_NAME` (variável órfã da Fase 24 no Railway)
   continua sem uso — segue não sendo urgente remover.
+
+---
+
+## 21. Fase 27 — Cancelamento de Reservas e Reembolso Automático (2026-08-29)
+
+### Objetivo
+Resolver a pendência deixada explícita na Fase 26: implementar uma política real de
+cancelamento + reembolso automático (via Mercado Pago) para reservas já pagas, sem migrar
+pra Orders API, sem novo estado de `Booking`, e sem executar nenhuma transação financeira
+real sem autorização explícita do usuário.
+
+### Política implementada
+- Booking `CONFIRMED` + Payment nunca confirmado (`PENDING`/`FAILED`/`CANCELLED`/`EXPIRED`),
+  cancelada antes de `startsAt` → `CANCELLED`, sem reembolso.
+- Booking `CONFIRMED` + Payment `PAID`, cancelada antes de `startsAt` → `CANCELLED` +
+  reembolso 100% integral via Mercado Pago (nunca taxa/percentual/crédito) — mesma regra pra
+  CUSTOMER, OWNER e ADMIN.
+- `now >= Booking.startsAt` sempre bloqueia o cancelamento (checado só no backend,
+  `BookingsService.cancel`).
+- Nunca um segundo refund pro mesmo Payment — protegido por CAS local
+  (`PAID`→`REFUNDING`) + `X-Idempotency-Key` estável no provider (`refund:${payment.id}`).
+
+### O que foi implementado
+1. Migration real: `PaymentStatus` ganhou `REFUNDING`/`REFUNDED`; `Payment` ganhou
+   `refundId` (`@unique`) e `refundedAt`.
+2. `PaymentProvider.refundPayment`/`getRefundStatus` (abstratos) + implementação real em
+   `MercadoPagoPaymentProviderService` — `POST /v1/payments/{id}/refunds` (corpo vazio =
+   reembolso total, conforme documentação oficial) com
+   `X-Render-In-Process-Refunds: true` (necessário pra obter `status: "in_process"` de forma
+   explícita em refund assíncrono de PIX, em vez de um `400` genérico sem essa header —
+   achado da documentação oficial, não assumido).
+3. `PaymentsService.refundIfPaid(bookingId)` — orquestração idempotente (advisory lock +
+   CAS + idempotency key estável), nunca lança (falha de refund não derruba o cancelamento).
+4. `PaymentsService.resolveRefund` — reconciliação lazy de `REFUNDING`→`REFUNDED` na leitura,
+   mesmo padrão de `resolveExpiry` (Fase 17). Nenhum webhook de refund existe (não
+   documentado pelo Mercado Pago).
+5. `BookingsService.cancel` ganhou o bloqueio `now >= startsAt`.
+6. `forwardRef()` entre `BookingsModule`/`PaymentsModule` — `BookingsController.cancel`
+   chama `refundIfPaid` depois de um cancelamento bem-sucedido, mesmo endpoint já existente.
+7. Frontend: `PaymentStatus` ganhou `REFUNDING`/`REFUNDED` (badge, seção de pagamento da
+   tela de detalhe, polling); dialog de cancelamento mostra o valor exato a ser
+   reembolsado; botão de cancelar escondido com explicação amigável quando a reserva já
+   começou.
+
+### Testes automatizados (números reais, após todas as mudanças)
+- Backend unit: **404/404** (30 suítes) — 388 baseline (Fase 26) + 16 novos
+  (`refundIfPaid`, reconciliação lazy de `REFUNDING`, bloqueio de janela de tempo em
+  `cancel`).
+- Backend e2e: **314/336** — única falha continua sendo `invitation-flow.e2e-spec.ts` (22
+  testes), pré-existente e não relacionada (mesma causa confirmada desde a Fase 23).
+- Frontend unit: **133/133** (19 suítes) — 130 baseline + 3 novos (payment section
+  REFUNDING/REFUNDED, bloqueio de cancelamento por horário).
+- Lint (API e Web): 0 erros.
+- Typecheck (API e Web): limpo.
+- Build (API e Web): verde.
+
+**Nota sobre fixtures e2e**: várias datas fixas em testes e2e (`bookings.e2e-spec.ts`,
+`customer-experience.e2e-spec.ts`, `ai.e2e-spec.ts`) haviam sido escritas com datas de 2026
+que já ficaram no passado em relação à data real de execução (hoje) — o novo bloqueio
+`now >= startsAt` corretamente passou a rejeitar cancelamento nesses cenários. Datas foram
+ajustadas pra manter o mesmo intuito de cada teste (incluindo a data real de transição de
+DST em NY usada pelo teste de timezone, recalculada pro próximo ciclo), nunca a regra de
+negócio enfraquecida pra acomodar um teste desatualizado.
+
+### Teste real
+**Nenhum teste com dinheiro real foi executado nesta fase.** Toda a implementação foi
+validada com `FakePaymentProvider` (mocks) e o Postgres local de desenvolvimento — nenhuma
+chamada real ao Mercado Pago (criação, consulta ou refund) foi feita. Um teste real de
+ponta a ponta (pagar um PIX de baixo valor → cancelar → confirmar reembolso de verdade no
+Mercado Pago) depende de autorização explícita do usuário antes de ser executado, mesmo
+processo já usado na Fase 25.
+
+### Pendências reais (nenhuma inventada)
+- Teste real de ponta a ponta (dinheiro real) — aguardando autorização.
+- Deploy desta fase — aguardando autorização (commit/push e deploy Railway/Vercel ainda não
+  feitos).
+- Reembolso parcial, política por arena, cupons — explicitamente fora de escopo desta fase
+  (mesma lista de exclusões do prompt).
 
 ---
 

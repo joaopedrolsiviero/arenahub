@@ -17,6 +17,7 @@ describe('PaymentsService', () => {
     $executeRaw: jest.Mock;
     payment: {
       findUnique: jest.Mock;
+      findUniqueOrThrow: jest.Mock;
       findFirst: jest.Mock;
       create: jest.Mock;
       updateMany: jest.Mock;
@@ -36,7 +37,12 @@ describe('PaymentsService', () => {
     user: { findUniqueOrThrow: jest.Mock };
   };
   let bookingsService: { findMyBookingDetail: jest.Mock };
-  let paymentProvider: { createPayment: jest.Mock; getPaymentStatus: jest.Mock };
+  let paymentProvider: {
+    createPayment: jest.Mock;
+    getPaymentStatus: jest.Mock;
+    refundPayment: jest.Mock;
+    getRefundStatus: jest.Mock;
+  };
   let service: PaymentsService;
 
   const myBooking = (overrides: Partial<Record<string, unknown>> = {}) => ({
@@ -81,6 +87,7 @@ describe('PaymentsService', () => {
       $executeRaw: jest.fn(),
       payment: {
         findUnique: jest.fn().mockResolvedValue(null),
+        findUniqueOrThrow: jest.fn(),
         findFirst: jest.fn().mockResolvedValue(null),
         create: jest.fn(),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
@@ -108,6 +115,8 @@ describe('PaymentsService', () => {
         qrCodeBase64: 'iVBORw0KGgo=',
       }),
       getPaymentStatus: jest.fn(),
+      refundPayment: jest.fn(),
+      getRefundStatus: jest.fn(),
     };
 
     service = new PaymentsService(
@@ -293,6 +302,55 @@ describe('PaymentsService', () => {
       });
       expect(result?.status).toBe('EXPIRED');
     });
+
+    it('REFUNDING confirmado (REFUNDED) pelo provider é reconciliado lazily na leitura (Fase 27)', async () => {
+      const refunding = paymentRow({
+        status: 'REFUNDING',
+        providerPaymentId: 'mp-123',
+        refundId: 'refund-1',
+      });
+      prisma.payment.findFirst.mockResolvedValue(refunding);
+      paymentProvider.getRefundStatus.mockResolvedValue('REFUNDED');
+      prisma.payment.updateMany.mockResolvedValue({ count: 1 });
+
+      const result = await service.getPaymentForBooking('user-1', 'booking-1');
+
+      expect(paymentProvider.getRefundStatus).toHaveBeenCalledWith('mp-123', 'refund-1');
+      expect(prisma.payment.updateMany).toHaveBeenCalledWith({
+        where: { id: 'payment-1', status: 'REFUNDING' },
+        data: { status: 'REFUNDED', refundedAt: expect.any(Date) as Date },
+      });
+      expect(result?.status).toBe('REFUNDED');
+    });
+
+    it('REFUNDING ainda em processamento: continua REFUNDING, nunca escreve no banco (Fase 27)', async () => {
+      const refunding = paymentRow({
+        status: 'REFUNDING',
+        providerPaymentId: 'mp-123',
+        refundId: 'refund-1',
+      });
+      prisma.payment.findFirst.mockResolvedValue(refunding);
+      paymentProvider.getRefundStatus.mockResolvedValue('REFUNDING');
+
+      const result = await service.getPaymentForBooking('user-1', 'booking-1');
+
+      expect(prisma.payment.updateMany).not.toHaveBeenCalled();
+      expect(result?.status).toBe('REFUNDING');
+    });
+
+    it('falha ao consultar o provider durante a leitura nunca lança — devolve o estado local (Fase 27)', async () => {
+      const refunding = paymentRow({
+        status: 'REFUNDING',
+        providerPaymentId: 'mp-123',
+        refundId: 'refund-1',
+      });
+      prisma.payment.findFirst.mockResolvedValue(refunding);
+      paymentProvider.getRefundStatus.mockRejectedValue(new Error('timeout'));
+
+      const result = await service.getPaymentForBooking('user-1', 'booking-1');
+
+      expect(result?.status).toBe('REFUNDING');
+    });
   });
 
   describe('getLatestPaymentStatusesForUser (Fase 26)', () => {
@@ -433,6 +491,131 @@ describe('PaymentsService', () => {
         where: { id: 'payment-1', status: 'PENDING' },
         data: { status: 'FAILED', failureReason: 'DUPLICATE_PAYMENT_FOR_BOOKING' },
       });
+    });
+  });
+
+  describe('refundIfPaid (Fase 27 — cancelamento e reembolso)', () => {
+    it('Regra 1: sem nenhum Payment pra Booking, é um no-op — nunca chama o provider', async () => {
+      tx.payment.findFirst.mockResolvedValue(null);
+
+      await service.refundIfPaid('booking-1');
+
+      expect(paymentProvider.refundPayment).not.toHaveBeenCalled();
+      expect(tx.payment.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('Regra 1: Payment PENDING (nunca pago) — no-op, nunca chama o provider', async () => {
+      tx.payment.findFirst.mockResolvedValue(paymentRow({ status: 'PENDING' }));
+
+      await service.refundIfPaid('booking-1');
+
+      expect(paymentProvider.refundPayment).not.toHaveBeenCalled();
+    });
+
+    it('Regra 7: Payment FAILED/CANCELLED/EXPIRED — no-op, nunca chama o provider', async () => {
+      for (const status of ['FAILED', 'CANCELLED', 'EXPIRED']) {
+        paymentProvider.refundPayment.mockClear();
+        tx.payment.findFirst.mockResolvedValue(paymentRow({ status }));
+
+        await service.refundIfPaid('booking-1');
+
+        expect(paymentProvider.refundPayment).not.toHaveBeenCalled();
+      }
+    });
+
+    it('Regra 6: Payment já REFUNDED — no-op, nunca chama o provider de novo', async () => {
+      tx.payment.findFirst.mockResolvedValue(paymentRow({ status: 'REFUNDED' }));
+
+      await service.refundIfPaid('booking-1');
+
+      expect(paymentProvider.refundPayment).not.toHaveBeenCalled();
+    });
+
+    it('Regra 2: Payment PAID — reivindica (CAS pra REFUNDING) sob advisory lock e chama o provider', async () => {
+      const paid = paymentRow({ status: 'PAID', providerPaymentId: 'mp-123' });
+      tx.payment.findFirst.mockResolvedValue(paid);
+      tx.payment.findUniqueOrThrow.mockResolvedValue({ ...paid, status: 'REFUNDING' });
+      paymentProvider.refundPayment.mockResolvedValue({ refundId: 'refund-1', status: 'REFUNDED' });
+
+      await service.refundIfPaid('booking-1');
+
+      expect(tx.$executeRaw).toHaveBeenCalled();
+      expect(tx.payment.updateMany).toHaveBeenCalledWith({
+        where: { id: 'payment-1', status: 'PAID' },
+        data: { status: 'REFUNDING' },
+      });
+      expect(paymentProvider.refundPayment).toHaveBeenCalledWith('mp-123', 'refund:payment-1');
+    });
+
+    it('Regra 2: refund confirmado (REFUNDED) pelo provider persiste refundId/refundedAt — reembolso 100% integral, sem `amount`', async () => {
+      const paid = paymentRow({ status: 'PAID', providerPaymentId: 'mp-123' });
+      tx.payment.findFirst.mockResolvedValue(paid);
+      tx.payment.findUniqueOrThrow.mockResolvedValue({ ...paid, status: 'REFUNDING' });
+      paymentProvider.refundPayment.mockResolvedValue({ refundId: 'refund-1', status: 'REFUNDED' });
+
+      await service.refundIfPaid('booking-1');
+
+      expect(prisma.payment.updateMany).toHaveBeenCalledWith({
+        where: { id: 'payment-1', status: { in: ['PAID', 'REFUNDING'] } },
+        data: { status: 'REFUNDED', refundId: 'refund-1', refundedAt: expect.any(Date) as Date },
+      });
+    });
+
+    it('refund assíncrono (in_process) marca REFUNDING com refundId — nunca REFUNDED sem confirmação real', async () => {
+      const paid = paymentRow({ status: 'PAID', providerPaymentId: 'mp-123' });
+      tx.payment.findFirst.mockResolvedValue(paid);
+      tx.payment.findUniqueOrThrow.mockResolvedValue({ ...paid, status: 'REFUNDING' });
+      paymentProvider.refundPayment.mockResolvedValue({
+        refundId: 'refund-1',
+        status: 'REFUNDING',
+      });
+
+      await service.refundIfPaid('booking-1');
+
+      expect(prisma.payment.updateMany).toHaveBeenCalledWith({
+        where: { id: 'payment-1', status: { in: ['PAID', 'REFUNDING'] } },
+        data: { status: 'REFUNDING', refundId: 'refund-1' },
+      });
+    });
+
+    it('Mercado Pago recusa o refund (status FAILED com sucesso HTTP): reverte REFUNDING -> PAID, elegível pra retry', async () => {
+      const paid = paymentRow({ status: 'PAID', providerPaymentId: 'mp-123' });
+      tx.payment.findFirst.mockResolvedValue(paid);
+      tx.payment.findUniqueOrThrow.mockResolvedValue({ ...paid, status: 'REFUNDING' });
+      paymentProvider.refundPayment.mockResolvedValue({ refundId: 'refund-1', status: 'FAILED' });
+
+      await service.refundIfPaid('booking-1');
+
+      expect(prisma.payment.updateMany).toHaveBeenCalledWith({
+        where: { id: 'payment-1', status: 'REFUNDING' },
+        data: { status: 'PAID' },
+      });
+    });
+
+    it('timeout/exceção do provider nunca lança e nunca marca REFUNDED sem confirmação — retry seguro depois', async () => {
+      const paid = paymentRow({ status: 'PAID', providerPaymentId: 'mp-123' });
+      tx.payment.findFirst.mockResolvedValue(paid);
+      tx.payment.findUniqueOrThrow.mockResolvedValue({ ...paid, status: 'REFUNDING' });
+      paymentProvider.refundPayment.mockRejectedValue(new Error('timeout'));
+
+      await expect(service.refundIfPaid('booking-1')).resolves.toBeUndefined();
+
+      const calls = prisma.payment.updateMany.mock.calls as [{ data: { status?: string } }][];
+      expect(calls.every(([call]) => call.data.status !== 'REFUNDED')).toBe(true);
+    });
+
+    it('retry sobre um Payment já REFUNDING: não reivindica de novo (CAS só roda a partir de PAID), reusa a MESMA idempotency key', async () => {
+      const refunding = paymentRow({ status: 'REFUNDING', providerPaymentId: 'mp-123' });
+      tx.payment.findFirst.mockResolvedValue(refunding);
+      tx.payment.findUniqueOrThrow.mockResolvedValue(refunding);
+      paymentProvider.refundPayment.mockResolvedValue({ refundId: 'refund-1', status: 'REFUNDED' });
+
+      await service.refundIfPaid('booking-1');
+
+      expect(tx.payment.updateMany).not.toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'payment-1', status: 'PAID' } }),
+      );
+      expect(paymentProvider.refundPayment).toHaveBeenCalledWith('mp-123', 'refund:payment-1');
     });
   });
 });

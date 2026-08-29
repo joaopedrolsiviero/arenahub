@@ -344,12 +344,22 @@ export interface ReportResponse {
 
 // Fase 17 — ciclo financeiro de uma Booking CUSTOMER, deliberadamente
 // separado do ciclo operacional (BookingStatus, acima, nunca alterado por
-// pagamento). PENDING é o único estado não-terminal — todos os outros são
-// definitivos (ver docs/ARCHITECTURE.md, Fase 17).
-export type PaymentStatus = 'PENDING' | 'PAID' | 'FAILED' | 'EXPIRED' | 'CANCELLED';
+// pagamento). PENDING é o único estado não-terminal original — todos os
+// outros são definitivos (ver docs/ARCHITECTURE.md, Fase 17). REFUNDING
+// (Fase 27) é o único outro estado não-terminal: reembolso solicitado, ainda
+// não confirmado pelo Mercado Pago (PIX pode reembolsar de forma
+// assíncrona) — nunca exibido como "reembolso concluído".
+export type PaymentStatus =
+  | 'PENDING'
+  | 'PAID'
+  | 'FAILED'
+  | 'EXPIRED'
+  | 'CANCELLED'
+  | 'REFUNDING'
+  | 'REFUNDED';
 
-// Nunca inclui `providerPaymentId`/`idempotencyKey` (IDs internos do
-// gateway/da requisição — o backend já não os expõe, ver
+// Nunca inclui `providerPaymentId`/`idempotencyKey`/`refundId` (IDs internos
+// do gateway/da requisição — o backend já não os expõe, ver
 // PaymentsService.PaymentView).
 export interface PaymentView {
   id: string;
@@ -366,4 +376,8 @@ export interface PaymentView {
   paidAt: string | null;
   expiresAt: string | null;
   createdAt: string;
+  // Fase 27 — só preenchido quando o Mercado Pago já confirmou o reembolso
+  // (`status === 'REFUNDED'`); nunca usado sozinho pra decidir o que exibir
+  // (sempre checar `status`, nunca só "refundedAt existe").
+  refundedAt: string | null;
 }

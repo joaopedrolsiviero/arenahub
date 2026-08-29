@@ -27,6 +27,20 @@ export interface PaymentProviderStatusResult {
   failureReason?: string;
 }
 
+// Fase 27 — mapeamento fechado dos estados REAIS de refund do Mercado Pago
+// (`status: "approved"`/`"in_process"`/qualquer outra coisa), documentado
+// oficialmente: reembolso de PIX pode ser assíncrono
+// (`X-Render-In-Process-Refunds: true` → `201` com `status: "in_process"`
+// em vez do `400` genérico sem esse header). REFUNDING nunca é tratado
+// como sucesso — só REFUNDED, e só depois de "approved" real.
+export type ProviderRefundStatus = 'REFUNDED' | 'REFUNDING' | 'FAILED';
+
+export interface PaymentProviderRefundResult {
+  /** ID do refund NO PROVIDER — nunca confiado sozinho, só usado pra reconsultar depois. */
+  refundId: string;
+  status: ProviderRefundStatus;
+}
+
 export class PaymentProviderError extends Error {
   constructor(message = 'Não foi possível processar o pagamento no momento.') {
     super(message);
@@ -62,4 +76,30 @@ export abstract class PaymentProvider {
     request: PaymentProviderCreateRequest,
   ): Promise<PaymentProviderCreateResult>;
   abstract getPaymentStatus(providerPaymentId: string): Promise<PaymentProviderStatusResult>;
+
+  /**
+   * Reembolso INTEGRAL (Fase 27 — MVP não tem reembolso parcial, item 26 do
+   * prompt) de um pagamento já aprovado. `idempotencyKey` deve ser ESTÁVEL
+   * por Payment (não regenerada a cada tentativa) — é ela, não um lock
+   * local, que garante ao provider que retries (timeout, retomar depois de
+   * um crash, o mesmo clique duas vezes) nunca geram um segundo refund
+   * real, mesmo que o estado local tenha ficado inconsistente no meio do
+   * caminho.
+   */
+  abstract refundPayment(
+    providerPaymentId: string,
+    idempotencyKey: string,
+  ): Promise<PaymentProviderRefundResult>;
+
+  /**
+   * Reconsulta o status de um refund já criado — necessário porque reembolso
+   * de PIX pode ficar `REFUNDING` (assíncrono) e o Mercado Pago não notifica
+   * isso por webhook (não documentado); a única forma de saber que resolveu
+   * é perguntar de novo, mesmo padrão "lazy" já usado pra expiração de PIX
+   * pendente (nunca um job/cron).
+   */
+  abstract getRefundStatus(
+    providerPaymentId: string,
+    refundId: string,
+  ): Promise<ProviderRefundStatus>;
 }

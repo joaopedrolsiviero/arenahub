@@ -4,9 +4,11 @@ import {
   PaymentProviderCreateRequest,
   PaymentProviderCreateResult,
   PaymentProviderError,
+  PaymentProviderRefundResult,
   PaymentProviderStatusResult,
   PaymentProviderTimeoutError,
   ProviderPaymentStatus,
+  ProviderRefundStatus,
 } from './payment-provider';
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -20,6 +22,15 @@ interface MercadoPagoPaymentResponse {
   point_of_interaction?: {
     transaction_data?: { ticket_url?: string; qr_code?: string; qr_code_base64?: string };
   };
+}
+
+// Formato real documentado em
+// developers.mercadopago.com.br/.../cancellations-and-refunds/refund-pix
+// (Fase 27) — `status` é o único campo que usamos; os demais (source,
+// unique_sequence_number, refund_mode, labels...) não têm uso no domínio.
+interface MercadoPagoRefundResponse {
+  id?: number;
+  status?: string;
 }
 
 // Mapeamento dos status reais da API do Mercado Pago
@@ -40,6 +51,23 @@ function mapMercadoPagoStatus(status: string | undefined): ProviderPaymentStatus
       return 'FAILED';
     case 'cancelled':
       return 'CANCELLED';
+    default:
+      return 'FAILED';
+  }
+}
+
+// Único valor de sucesso documentado é "approved". "in_process" é o caso
+// real de PIX assíncrono (Fase 27, achado da documentação oficial —
+// requer o header `X-Render-In-Process-Refunds: true`, sem ele o mesmo
+// cenário viraria só um 400 genérico). Qualquer outra coisa (rejected,
+// cancelled, ou um valor novo que a API venha a introduzir) é tratada como
+// FAILED por padrão seguro — nunca reportamos sucesso sem "approved" real.
+function mapMercadoPagoRefundStatus(status: string | undefined): ProviderRefundStatus {
+  switch (status) {
+    case 'approved':
+      return 'REFUNDED';
+    case 'in_process':
+      return 'REFUNDING';
     default:
       return 'FAILED';
   }
@@ -147,6 +175,113 @@ export class MercadoPagoPaymentProviderService extends PaymentProvider {
         // nunca uma mensagem livre — seguro pra armazenar/logar (item 25).
         failureReason: body.status === 'rejected' ? (body.status_detail ?? 'rejected') : undefined,
       };
+    } catch (error) {
+      this.rethrowMapped(error, timeoutMs, startedAt);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  /**
+   * Reembolso INTEGRAL (Fase 27) — nunca envia `amount` no corpo (a API só
+   * faz reembolso parcial quando `amount` é enviado; omitir é o jeito
+   * documentado de pedir reembolso total). `X-Render-In-Process-Refunds:
+   * true` é o que faz a API devolver `status: "in_process"` de forma
+   * explícita pra PIX assíncrono, em vez de um `400` genérico sem
+   * informação nenhuma — sem esse header não teríamos como distinguir
+   * "está processando" de "falhou de verdade".
+   */
+  async refundPayment(
+    providerPaymentId: string,
+    idempotencyKey: string,
+  ): Promise<PaymentProviderRefundResult> {
+    const apiKey = this.requireApiKey();
+    const timeoutMs = this.timeoutMs();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const startedAt = Date.now();
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/v1/payments/${providerPaymentId}/refunds`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+          // Estável por Payment (nunca regenerada a cada tentativa) — é o
+          // que garante que um retry (timeout, crash, o mesmo clique duas
+          // vezes) nunca vira um segundo refund real no Mercado Pago,
+          // mesmo que nosso próprio estado local tenha ficado inconsistente
+          // no meio do caminho (item 8/9 do prompt da Fase 27).
+          'X-Idempotency-Key': idempotencyKey,
+          'X-Render-In-Process-Refunds': 'true',
+        },
+        body: JSON.stringify({}),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        this.logger.error(
+          `Mercado Pago (refund) respondeu ${response.status} em ${Date.now() - startedAt}ms.`,
+        );
+        throw new PaymentProviderError('Não foi possível concluir o reembolso agora.');
+      }
+
+      const body = (await response.json()) as MercadoPagoRefundResponse;
+      if (!body.id) {
+        throw new PaymentProviderError('Não foi possível concluir o reembolso agora.');
+      }
+
+      const status = mapMercadoPagoRefundStatus(body.status);
+      this.logger.log(
+        `Refund ${status === 'REFUNDED' ? 'confirmado' : 'solicitado'} no Mercado Pago em ${Date.now() - startedAt}ms.`,
+      );
+      return { refundId: String(body.id), status };
+    } catch (error) {
+      this.rethrowMapped(error, timeoutMs, startedAt);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  /**
+   * Reconsulta um refund já criado — necessário porque um refund `REFUNDING`
+   * (PIX assíncrono) não gera webhook (não documentado pelo Mercado Pago);
+   * a única forma de saber que resolveu é perguntar de novo (Fase 27).
+   */
+  async getRefundStatus(
+    providerPaymentId: string,
+    refundId: string,
+  ): Promise<ProviderRefundStatus> {
+    const apiKey = this.requireApiKey();
+    const timeoutMs = this.timeoutMs();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const startedAt = Date.now();
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/v1/payments/${providerPaymentId}/refunds/${refundId}`,
+        {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'X-Render-In-Process-Refunds': 'true',
+          },
+          signal: controller.signal,
+        },
+      );
+
+      if (!response.ok) {
+        this.logger.error(
+          `Mercado Pago (consulta de refund) respondeu ${response.status} em ${Date.now() - startedAt}ms.`,
+        );
+        throw new PaymentProviderError();
+      }
+
+      const body = (await response.json()) as MercadoPagoRefundResponse;
+      this.logger.log(
+        `Status do refund consultado no Mercado Pago em ${Date.now() - startedAt}ms.`,
+      );
+      return mapMercadoPagoRefundStatus(body.status);
     } catch (error) {
       this.rethrowMapped(error, timeoutMs, startedAt);
     } finally {

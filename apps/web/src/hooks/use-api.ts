@@ -400,6 +400,10 @@ export function useCancelBooking() {
       await queryClient.invalidateQueries({
         queryKey: ['availability', variables.arenaId, variables.courtId],
       });
+      // Fase 27 — cancelar pode ter disparado um reembolso no backend;
+      // refaz a consulta do pagamento pra refletir REFUNDING/REFUNDED sem
+      // esperar o próximo poll (que só existe enquanto PENDING/REFUNDING).
+      await queryClient.invalidateQueries({ queryKey: ['booking-payment', variables.bookingId] });
     },
   });
 }
@@ -427,8 +431,11 @@ export function useBookingPayment(bookingId: string | undefined) {
     // provider) sem nenhuma ação do próprio usuário nesta aba — refaz a
     // consulta periodicamente enquanto a tela estiver aberta, mesma
     // necessidade de "nunca reaproveitar cache antigo como se ainda fosse
-    // válido" já registrada para `useAvailability` (Fase 4).
-    refetchInterval: (query) => (query.state.data?.status === 'PENDING' ? 5_000 : false),
+    // válido" já registrada para `useAvailability` (Fase 4). REFUNDING
+    // (Fase 27) é o mesmo caso — reembolso de PIX pode ficar assíncrono, sem
+    // webhook documentado; só uma nova leitura resolve pra REFUNDED.
+    refetchInterval: (query) =>
+      query.state.data?.status === 'PENDING' || query.state.data?.status === 'REFUNDING' ? 5_000 : false,
   });
 }
 

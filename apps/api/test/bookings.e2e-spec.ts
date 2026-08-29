@@ -315,12 +315,15 @@ describe('Bookings & Availability (e2e)', () => {
   describe('POST /bookings/:bookingId/cancel', () => {
     let bookingId: string;
 
+    // Fase 27: cancelamento exige `startsAt` no futuro — ano seguinte ao
+    // resto da fixture deste arquivo (que usa 2026-08-2x), só pra nunca
+    // colidir com nenhuma outra reserva já criada na mesma quadra.
     beforeAll(async () => {
       const response = await request(app.getHttpServer())
         .post(bookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'idem-cancel-1')
-        .send({ startsAt: '2026-08-22T09:00:00-03:00' })
+        .send({ startsAt: '2027-08-22T09:00:00-03:00' })
         .expect(201);
       bookingId = asBookingBody(response).id;
     });
@@ -355,7 +358,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(bookingsUrl())
         .set(...authHeader('token-outro'))
         .set('Idempotency-Key', 'idem-cancel-2')
-        .send({ startsAt: '2026-08-22T09:00:00-03:00' })
+        .send({ startsAt: '2027-08-22T09:00:00-03:00' })
         .expect(201);
     });
   });

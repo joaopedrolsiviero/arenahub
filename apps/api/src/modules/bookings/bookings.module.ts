@@ -1,9 +1,10 @@
-import { Module } from '@nestjs/common';
+import { forwardRef, Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { ArenaMembersModule } from '../arena-members/arena-members.module';
 import { CourtsModule } from '../courts/courts.module';
 import { IdempotencyModule } from '../idempotency/idempotency.module';
 import { PrismaModule } from '../../prisma/prisma.module';
+import { PaymentsModule } from '../payments/payments.module';
 import { BookingsController } from './bookings.controller';
 import { MyBookingsController } from './my-bookings.controller';
 import { BookingsService } from './bookings.service';
@@ -11,7 +12,24 @@ import { BookingsService } from './bookings.service';
 @Module({
   // ArenaMembersModule reexporta UsersModule (Fase 3) — BookingsController
   // usa UsersService sem precisar importá-lo separadamente.
-  imports: [AuthModule, ArenaMembersModule, CourtsModule, IdempotencyModule, PrismaModule],
+  //
+  // forwardRef(PaymentsModule) (Fase 27) — PaymentsModule já importa
+  // BookingsModule (pra PaymentsService reaproveitar
+  // `findMyBookingDetail`); este import de volta é só pra
+  // BookingsController disparar `PaymentsService.refundIfPaid` depois de um
+  // cancelamento bem-sucedido, no MESMO endpoint de cancelar (nenhum
+  // endpoint novo). `BookingsService` em si continua sem conhecer
+  // PaymentsService — o ciclo existe só entre módulos/controller, nunca no
+  // domínio de Booking (docs/ARCHITECTURE.md: "Booking nunca depende de
+  // Payment").
+  imports: [
+    AuthModule,
+    ArenaMembersModule,
+    CourtsModule,
+    IdempotencyModule,
+    PrismaModule,
+    forwardRef(() => PaymentsModule),
+  ],
   controllers: [BookingsController, MyBookingsController],
   providers: [BookingsService],
   // Fase 16: WhatsAppModule reaproveita a MESMA BookingsService — nenhuma

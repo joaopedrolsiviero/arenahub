@@ -1,4 +1,4 @@
-# ArenaHub — Documento de Arquitetura Inicial (v0.18)
+# ArenaHub — Documento de Arquitetura Inicial (v0.19)
 
 > Status: **arquitetura geral aprovada**, em implementação incremental por fases (Fase 1 — Setup,
 > Fase 2 — Autenticação, Fase 3 — Arenas/Quadras, Fase 4 — Disponibilidade e Booking, Fase 5 —
@@ -7,16 +7,66 @@
 > Membros/RBAC Operacional, Fase 11 — Convites de Equipe e Transferência Segura de Ownership,
 > Fase 12 — Assistente de IA Operacional, Fase 13 — Customer Booking Lifecycle, Fase 14 —
 > Customer & Arena Client Management, Fase 15 — Operational Reports & Analytics, Fase 16 —
-> WhatsApp + Assistente de Reservas Controlado, Fase 17 — Pagamentos e Ciclo de Vida Financeiro e
-> Fase 18 — Production Readiness, Observabilidade e Hardening Final já concluídas; Fase 9 — Deploy e
-> Infraestrutura preparada, GitHub/CI validados contra um runner real, deploy real no Railway
-> bloqueado por custo (Hobby plan pago) e Vercel/Clerk produção por falta de acesso — ver Roadmap e
-> `docs/DEPLOYMENT.md`).
-> Esta revisão (v0.18) registra as decisões tomadas durante a Fase 18 — uma auditoria e hardening de
-> produção transversal (rate limiting, security headers, correlation ID, filtro global de exceções,
-> `trust proxy`, HEALTHCHECK do Docker, `WEB_APP_URL` obrigatória em produção), sem nenhuma
-> funcionalidade de produto nova. Este documento é a fonte de verdade da arquitetura até que decisões
-> aqui descritas sejam revisadas.
+> WhatsApp + Assistente de Reservas Controlado, Fase 17 — Pagamentos e Ciclo de Vida Financeiro,
+> Fase 18 — Production Readiness, Observabilidade e Hardening Final e Fase 27 — Cancelamento de
+> Reservas e Reembolso Automático já concluídas; deploy real, PIX de produção validado com dinheiro
+> real e webhook de produção configurados nas Fases 19/23/25/26 (não documentadas em detalhe neste
+> arquivo — ver `docs/DEPLOYMENT.md` e o histórico de commits para o desenho real dessas fases; as
+> decisões desta revisão pressupõem esse estado real de produção).
+> Esta revisão (v0.19) registra as decisões tomadas durante a Fase 27 — cancelamento de reservas com
+> reembolso automático e integral via Mercado Pago para reservas já pagas, incluindo dois novos
+> estados de `Payment` (`REFUNDING`/`REFUNDED`). Este documento é a fonte de verdade da arquitetura
+> até que decisões aqui descritas sejam revisadas.
+
+---
+
+## Decisões revisadas na v0.19
+
+Resumo das mudanças desta revisão (Fase 27 — Cancelamento de Reservas e Reembolso Automático).
+Detalhe completo na seção "Fase 27" do Roadmap abaixo.
+
+1. **Política de reembolso fixa de MVP: 100% integral, sem exceção** — Booking `CONFIRMED` com
+   Payment `PAID`, cancelada antes de `startsAt`, sempre gera reembolso total (nenhuma taxa, nenhum
+   percentual, nenhum crédito). A mesma regra vale para CUSTOMER, OWNER e ADMIN cancelando — nenhum
+   tratamento diferente por quem cancela. Payment nunca chegou a `PAID` (`PENDING`/`FAILED`/
+   `CANCELLED`/`EXPIRED`) nunca gera reembolso — só a Booking é cancelada.
+2. **Dois novos estados terminais/quase-terminais em `PaymentStatus`**: `REFUNDING` (reembolso
+   solicitado, ainda não confirmado — necessário porque reembolso de PIX pode ser assíncrono no
+   Mercado Pago, `status: "in_process"`) e `REFUNDED` (terminal, confirmado). `Payment` ganhou
+   `refundId` (`@unique`, ID no provider — nunca confiado sozinho, só usado pra reconsultar) e
+   `refundedAt`. `Booking.status` continua só `CONFIRMED`/`CANCELLED` — nenhum novo estado, nenhuma
+   dependência nova de `Booking` em `Payment` (invariante da Fase 17 preservada).
+3. **Janela de cancelamento (`now >= Booking.startsAt` bloqueia) implementada em
+   `BookingsService.cancel`** — checagem por instante real (`Date.now()`), nunca comparação de
+   string/data local; o frontend só espelha isso como atalho de UX (esconder/desabilitar o botão),
+   nunca como autoridade.
+4. **Ciclo entre `BookingsModule` e `PaymentsModule` introduzido deliberadamente** (`forwardRef()`
+   nos dois `imports`) — a única forma de dar ao MESMO endpoint de cancelar (`BookingsController`)
+   acesso a `PaymentsService.refundIfPaid` sem duplicar o endpoint nem mover a lógica de refund pra
+   dentro do domínio de Booking. `BookingsService` em si continua sem NENHUMA dependência de
+   `PaymentsService` — o ciclo existe só entre módulo/controller, nunca no domínio (a invariante
+   "Booking nunca depende de Payment" da Fase 17 é preservada na camada de serviço, não na de
+   módulo/orquestração).
+5. **Idempotência de refund é garantida pelo provider, não por um lock local exclusivo** — uma
+   `X-Idempotency-Key` ESTÁVEL por Payment (`refund:${payment.id}`, nunca regenerada por tentativa) é
+   o que impede um segundo reembolso real no Mercado Pago, mesmo sob retry/duplo clique/duas
+   abas/timeout. O CAS local (`PAID` → `REFUNDING`) só reduz chamadas externas redundantes; não é a
+   garantia de correção.
+6. **Reconciliação lazy de `REFUNDING`, mesmo padrão de `resolveExpiry` (Fase 17/23)** — nenhum
+   cron/job novo; a consulta de status de pagamento (`getPaymentForBooking`) reconsulta o provider e
+   resolve `REFUNDING` → `REFUNDED` sob demanda, na leitura.
+7. **Nenhum webhook de refund implementado — decisão deliberada, não uma lacuna**: a documentação
+   oficial do Mercado Pago não define um evento de webhook dedicado a reembolso (diferente do
+   evento `payment` já usado desde a Fase 23); implementar um listener especulativo seria "assumir",
+   violando a mesma regra que já rege o resto da integração ("nunca supor o contrato da API — só
+   consultar a documentação real").
+8. **Refund nunca é acionado por SQL manual, endpoint administrativo de "aprovar" ou qualquer bypass**
+   — todos os estados são alcançados só pelo fluxo real (`refundIfPaid` → `PaymentProvider.refundPayment`
+   → Mercado Pago real), mesma regra de "nunca simular sucesso" já aplicada à confirmação de
+   pagamento na Fase 25.
+9. **Nenhum teste com dinheiro real foi executado nesta fase** — implementação e testes cobrem só
+   mocks/e2e com provider fake; um teste real de ponta a ponta (pagar → cancelar → reembolso
+   confirmado) depende de autorização explícita do usuário, mesmo processo já usado na Fase 25.
 
 ---
 
@@ -1287,6 +1337,10 @@ histórico)
 > `providerPaymentId`/não existe refund), e ganhou `userId`/`arenaId` denormalizados,
 > `idempotencyKey`, `expiresAt` e `failureReason` — nenhum desses estava previsto aqui porque as
 > exigências de idempotência/multi-tenant/concorrência só ficaram claras com a fase real.
+> **Atualização Fase 27**: `refundedAt` finalmente existe (o esboço original já previa o nome, mas só
+> ganhou uso real agora), junto de `refundId` (novo, não previsto — ID do refund no provider) e dois
+> novos valores de `status`: `REFUNDING`/`REFUNDED`. Ver seção "Decisões revisadas na v0.19" e "Fase
+> 27" do Roadmap para a política completa (reembolso 100% integral, sem parcial/taxa/crédito).
 
 **Notification** (schema pronto, uso mínimo no MVP — ex: e-mail de confirmação)
 `id`, `userId`, `channel` (`EMAIL` | `SMS` | `WHATSAPP` | `PUSH`), `type`, `payload` (JSON),
@@ -2796,6 +2850,68 @@ testar em cada uma — mas a definição geral vale para todas.
   `Promise.all`), security headers, X-Request-Id (unitário + e2e), e o filtro global de exceções
   (unitário, incluindo o mapeamento de erros do Prisma). Nenhum teste pré-existente foi removido ou
   enfraquecido. Ver relatório da fase para os números reais.
+
+---
+
+> As Fases 19 (Deploy Real), 23 (Mercado Pago/PIX de ponta a ponta), 25 (Confirmação Automática de
+> Pagamento Real) e 26 (Jornada Completa do Cliente) aconteceram entre a Fase 18 e a Fase 27 abaixo,
+> mas não ganharam uma entrada própria de Roadmap neste arquivo — o desenho real delas está no
+> histórico de commits e em `docs/DEPLOYMENT.md` (que registra o estado real de produção validado:
+> deploy Railway/Vercel, PIX real aprovado com dinheiro real, webhook de produção). A Fase 27 abaixo
+> pressupõe esse estado como ponto de partida.
+
+### Fase 27 — Cancelamento de Reservas e Reembolso Automático ✅ concluída (sem teste com dinheiro real)
+- **Objetivo:** política clara e segura de cancelamento com reembolso automático e integral (Mercado
+  Pago) para reservas já pagas, mantendo `Booking` sem NENHUMA dependência de `Payment` no domínio.
+- **Regras de negócio** (fixas de MVP, sem exceção por quem cancela): Booking `CONFIRMED` +
+  Payment `PENDING`/`FAILED`/`CANCELLED`/`EXPIRED` cancelada antes de `startsAt` → só `CANCELLED`,
+  sem reembolso (nada foi confirmado). Booking `CONFIRMED` + Payment `PAID` cancelada antes de
+  `startsAt` → `CANCELLED` + reembolso 100% integral (nunca taxa/percentual/crédito). `now >=
+  startsAt` sempre bloqueia o cancelamento, checado só no backend. Nunca um segundo refund para o
+  mesmo Payment.
+- **`PaymentStatus` ganhou `REFUNDING`/`REFUNDED`** (migração real, `Payment.refundId`/`refundedAt`
+  novos) — `REFUNDING` existe porque reembolso de PIX pode ser assíncrono no Mercado Pago
+  (`status: "in_process"`, documentado oficialmente; requer o header
+  `X-Render-In-Process-Refunds: true` pra não virar um `400` genérico). Reconciliado lazily na
+  leitura (`PaymentsService.resolveRefund`), mesmo padrão de `resolveExpiry` (Fase 17) — nenhum
+  cron/job novo.
+- **`PaymentsService.refundIfPaid(bookingId)`**: sob o mesmo advisory lock por `bookingId` já usado
+  por `createPayment`, reivindica (CAS `PAID`→`REFUNDING`) e chama
+  `PaymentProvider.refundPayment` com uma `X-Idempotency-Key` ESTÁVEL (`refund:${payment.id}`) — a
+  garantia real contra reembolso duplicado é essa chave no provider, não o CAS local (que só evita
+  chamadas externas redundantes). Nunca lança — uma falha de refund nunca transforma um
+  cancelamento de Booking já bem-sucedido numa resposta de erro; fica elegível pra retry na próxima
+  chamada (idempotente de ponta a ponta).
+- **Orquestração via `forwardRef()` entre `BookingsModule` e `PaymentsModule`** —
+  `BookingsController.cancel` chama `bookingsService.cancel()` (que ganhou a checagem de janela de
+  tempo) e, em caso de sucesso (incluindo idempotente/já cancelada), chama
+  `paymentsService.refundIfPaid()`. Nenhum endpoint novo — o mesmo endpoint de cancelar já existente
+  desde a Fase 13 é reaproveitado. `BookingsService` em si continua sem importar nada de Payments —
+  o ciclo de módulos é deliberado e documentado, nunca um vazamento acidental de domínio.
+- **Nenhum webhook de refund** — não documentado pelo Mercado Pago (diferente do webhook de
+  `payment`, em uso desde a Fase 23); reconciliação é sempre por consulta lazy (item acima).
+- **Frontend**: dialog de cancelamento mostra o valor exato a ser reembolsado quando pago
+  (`payment.amount`, nunca inventado no cliente); botão de cancelar escondido e substituído por uma
+  explicação amigável quando `now >= startsAt` (leitura de `Date.now()` via `useSyncExternalStore`,
+  nunca direto no corpo do componente — regra de pureza do React); `PaymentStatusBadge` e a tela de
+  detalhe da reserva ganharam os estados `REFUNDING`/`REFUNDED`; polling (mesmo padrão do PIX
+  `PENDING`) também cobre `REFUNDING`.
+- **Explicitamente fora de escopo** (conforme o prompt): cartão, WhatsApp/chatbot, split/comissão,
+  assinaturas, crédito/carteira, reembolso parcial, política por arena, cupons, módulo financeiro
+  completo.
+- **Nenhum teste com dinheiro real foi executado nesta fase** — implementação e todos os testes
+  automatizados usam `FakePaymentProvider`/mocks; um teste real (pagar → cancelar → reembolso
+  confirmado pelo Mercado Pago) depende de autorização explícita do usuário antes de ser executado,
+  mesmo processo já usado na Fase 25.
+- **Dependências:** Fase 4 (advisory lock por recurso), Fase 13 (`BookingsService.cancel`, CAS de
+  cancelamento), Fase 17 (`PaymentsService`, `resolveExpiry`, `PaymentProvider`), Fase 23/25
+  (integração real com a API de Payments do Mercado Pago, `X-Idempotency-Key`).
+- **Critério de conclusão:** testes unitários novos cobrindo `refundIfPaid` (Regras 1/2/6/7, CAS,
+  retry, falha/timeout do provider, recusa do Mercado Pago) e a reconciliação lazy de `REFUNDING`,
+  mais o bloqueio de janela de tempo em `BookingsService.cancel` (Regra 3/4, inclusive por
+  OWNER/ADMIN). Nenhum teste pré-existente foi removido; datas de fixtures e2e que caíram no passado
+  em relação à data real de execução foram ajustadas para o futuro (nunca a regra de negócio
+  enfraquecida para acomodar um teste). Ver relatório da fase para os números reais.
 
 ---
 

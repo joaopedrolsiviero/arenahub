@@ -308,6 +308,17 @@ export class BookingsService {
       return booking;
     }
 
+    // Fase 27, Regra 3/4 — instante real (`Date.now()`), nunca comparação
+    // de string/data local: uma reserva que já começou (ou já passou) nunca
+    // pode ser cancelada, mesmo por OWNER/ADMIN. O frontend nunca é
+    // autoridade sobre isso (item 5 do prompt) — só esta checagem no
+    // backend vale.
+    if (booking.startsAt.getTime() <= Date.now()) {
+      throw new BadRequestException(
+        'Não é possível cancelar uma reserva que já começou ou já foi concluída.',
+      );
+    }
+
     await this.prisma.booking.updateMany({
       where: { id: bookingId, status: BookingStatus.CONFIRMED },
       data: {

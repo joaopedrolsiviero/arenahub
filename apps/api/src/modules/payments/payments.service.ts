@@ -8,6 +8,16 @@ import {
   ProviderPaymentStatus,
 } from './providers/payment-provider';
 
+// Estados de Payment que ainda podem representar "dinheiro que precisa
+// voltar" (Fase 27) — PAID nunca teve refund tentado; REFUNDING é uma
+// tentativa anterior que não chegou a REFUNDED (pode ter sido só
+// "in_process" no Mercado Pago, ou pode ter falhado antes de sequer
+// completar a chamada). Os dois são elegíveis pra (re)tentar o refund —
+// a segurança contra duplicidade vem da X-Idempotency-Key ESTÁVEL enviada
+// ao provider (item 8/9 do prompt), não de um lock local que só permite
+// uma tentativa.
+const REFUNDABLE_STATUSES: PaymentStatus[] = [PaymentStatus.PAID, PaymentStatus.REFUNDING];
+
 // PIX expira em 30 minutos — prazo curto e típico do método (diferente de
 // boleto/cartão), avaliado em tempo de leitura (mesmo padrão de
 // `ArenaInvitation.expiresAt`, Fase 11 — nunca um job/cron marcando
@@ -31,6 +41,9 @@ export interface PaymentView {
   paidAt: Date | null;
   expiresAt: Date | null;
   createdAt: Date;
+  // Fase 27 — nunca `refundId` (mesmo espírito de `providerPaymentId`: ID
+  // interno do gateway, sem utilidade pro cliente).
+  refundedAt: Date | null;
 }
 
 function toView(payment: Payment): PaymentView {
@@ -47,6 +60,7 @@ function toView(payment: Payment): PaymentView {
     paidAt: payment.paidAt,
     expiresAt: payment.expiresAt,
     createdAt: payment.createdAt,
+    refundedAt: payment.refundedAt,
   };
 }
 
@@ -222,7 +236,8 @@ export class PaymentsService {
     }
 
     const resolved = await this.resolveExpiry(payment);
-    return toView(resolved);
+    const reconciled = await this.resolveRefund(resolved);
+    return toView(reconciled);
   }
 
   /** Usado só pelo webhook (nunca pelo frontend/IA) para localizar o Payment local a partir do ID do provider. */
@@ -353,6 +368,164 @@ export class PaymentsService {
         return;
       }
       throw error;
+    }
+  }
+
+  /**
+   * Reembolsa integralmente o Payment mais recente de uma Booking, se houver
+   * um pra reembolsar (Fase 27, Regra 2/5/6/7) — chamado pelo cancelamento
+   * de Booking (`BookingsController`), nunca por um endpoint próprio: o
+   * MESMO endpoint de cancelar é o único ponto de entrada, e chamar de novo
+   * (retry após timeout, duplo clique, duas abas) é sempre seguro porque
+   * este método é idempotente de ponta a ponta.
+   *
+   * Nunca lança: uma falha aqui não pode transformar um cancelamento de
+   * Booking já bem-sucedido numa resposta de erro pro cliente — quem chama
+   * decide o que fazer com uma falha de refund (ela fica logada e elegível
+   * pra nova tentativa, nunca perdida).
+   */
+  async refundIfPaid(bookingId: string): Promise<void> {
+    // A chamada HTTP ao provider NUNCA pode ficar dentro da transação
+    // (item 24 do prompt) — a transação aqui só reivindica localmente
+    // (CAS PAID->REFUNDING) sob o mesmo advisory lock já usado por
+    // `createPayment`, serializando tentativas concorrentes pra MESMA
+    // Booking (duplo clique, duas abas, retry).
+    const claimed = await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${bookingId}))`;
+
+      const latest = await tx.payment.findFirst({
+        where: { bookingId },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (!latest || !REFUNDABLE_STATUSES.includes(latest.status)) {
+        // Nunca pago (Regra 1), ou pagamento nunca chegou a ser confirmado
+        // (FAILED/CANCELLED/EXPIRED — Regra 7), ou já REFUNDED — nada a fazer.
+        return null;
+      }
+
+      if (latest.status === PaymentStatus.PAID) {
+        // Reivindica a tentativa — só quem vence este CAS chama o provider
+        // "pela primeira vez"; uma segunda chamada concorrente encontra
+        // REFUNDING (não PAID) e cai direto no retry abaixo usando a MESMA
+        // idempotency key, nunca reivindicando de novo.
+        await tx.payment.updateMany({
+          where: { id: latest.id, status: PaymentStatus.PAID },
+          data: { status: PaymentStatus.REFUNDING },
+        });
+      }
+
+      return tx.payment.findUniqueOrThrow({ where: { id: latest.id } });
+    });
+
+    if (!claimed) {
+      return;
+    }
+    if (!claimed.providerPaymentId) {
+      // Estruturalmente não deveria acontecer (só chega a PAID depois de ter
+      // um providerPaymentId) — defesa em profundidade, nunca uma exceção
+      // que derrubaria o cancelamento da Booking.
+      this.logger.error(
+        `Payment ${claimed.id}: PAID/REFUNDING sem providerPaymentId — refund abortado.`,
+      );
+      return;
+    }
+
+    // Estável por Payment (nunca por tentativa) — é o que permite chamar
+    // este método de novo (retry, duas abas, timeout) sem nunca gerar um
+    // segundo refund real no Mercado Pago, mesmo que o CAS acima já tenha
+    // reivindicado ou não (item 8/9 do prompt).
+    const idempotencyKey = `refund:${claimed.id}`;
+    const startedAt = Date.now();
+    try {
+      const result = await this.paymentProvider.refundPayment(
+        claimed.providerPaymentId,
+        idempotencyKey,
+      );
+
+      if (result.status === 'REFUNDED') {
+        await this.prisma.payment.updateMany({
+          where: { id: claimed.id, status: { in: [PaymentStatus.PAID, PaymentStatus.REFUNDING] } },
+          data: {
+            status: PaymentStatus.REFUNDED,
+            refundId: result.refundId,
+            refundedAt: new Date(),
+          },
+        });
+        this.logger.log(`Payment ${claimed.id}: refund confirmado em ${Date.now() - startedAt}ms.`);
+      } else if (result.status === 'REFUNDING') {
+        await this.prisma.payment.updateMany({
+          where: { id: claimed.id, status: { in: [PaymentStatus.PAID, PaymentStatus.REFUNDING] } },
+          data: { status: PaymentStatus.REFUNDING, refundId: result.refundId },
+        });
+        this.logger.log(
+          `Payment ${claimed.id}: refund solicitado (in_process), aguardando confirmação.`,
+        );
+      } else {
+        // Mercado Pago respondeu com sucesso HTTP mas recusou o refund em si
+        // (ex: status "rejected"/"cancelled" na resposta) — reverte a
+        // reivindicação otimista pra permitir nova tentativa depois; nunca
+        // fica preso em REFUNDING sem progresso real confirmado.
+        this.logger.error(
+          `Payment ${claimed.id}: Mercado Pago recusou o refund (refundId=${result.refundId}).`,
+        );
+        await this.prisma.payment.updateMany({
+          where: { id: claimed.id, status: PaymentStatus.REFUNDING },
+          data: { status: PaymentStatus.PAID },
+        });
+      }
+    } catch (error) {
+      // Timeout, rede fora, resposta inesperada: estado local fica como
+      // está (REFUNDING, já reivindicado) — nunca marcado REFUNDED sem
+      // confirmação real, e continua elegível pra nova tentativa (mesma
+      // idempotency key) na próxima chamada a este método.
+      this.logger.error(
+        `Falha ao solicitar refund do Payment ${claimed.id}: ${
+          error instanceof Error ? error.message : 'erro desconhecido'
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Reconcilia um refund `REFUNDING` (PIX assíncrono, sem webhook
+   * documentado) ao ler o Payment — mesmo padrão "lazy" de `resolveExpiry`,
+   * nunca um job/cron. Só é chamado a partir de leitura (nunca do
+   * cancelamento em si), então uma falha aqui nunca pode quebrar a
+   * consulta: devolve o estado local e tenta de novo na próxima leitura.
+   */
+  private async resolveRefund(payment: Payment): Promise<Payment> {
+    if (
+      payment.status !== PaymentStatus.REFUNDING ||
+      !payment.refundId ||
+      !payment.providerPaymentId
+    ) {
+      return payment;
+    }
+
+    try {
+      const status = await this.paymentProvider.getRefundStatus(
+        payment.providerPaymentId,
+        payment.refundId,
+      );
+      if (status !== 'REFUNDED') {
+        // Ainda em processamento, ou o provider reportou falha nesta
+        // consulta — nunca revertido aqui (evita mudar o estado numa
+        // leitura); só `refundIfPaid` reverte pra PAID, numa nova tentativa
+        // explícita.
+        return payment;
+      }
+      const result = await this.prisma.payment.updateMany({
+        where: { id: payment.id, status: PaymentStatus.REFUNDING },
+        data: { status: PaymentStatus.REFUNDED, refundedAt: new Date() },
+      });
+      if (result.count === 1) {
+        return { ...payment, status: PaymentStatus.REFUNDED, refundedAt: new Date() };
+      }
+      // count===0: outra requisição já resolveu entre a leitura e esta
+      // atualização — relê o estado real.
+      return this.prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+    } catch {
+      return payment;
     }
   }
 

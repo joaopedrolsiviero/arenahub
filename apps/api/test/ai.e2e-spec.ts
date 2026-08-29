@@ -498,7 +498,11 @@ describe('Assistente de IA operacional (e2e)', () => {
     }
 
     it('após cancelar, a reserva sai da receita/ocupação confirmadas e entra em cancelledBookings', async () => {
-      const period = { from: '2026-08-20', to: '2026-08-20' };
+      // Dia próprio deste teste (Fase 27: cancelamento exige `startsAt` no
+      // futuro), fora de qualquer outra reserva da fixture — a asserção é
+      // sempre um delta (depois - antes) no MESMO período, então não
+      // importa qual dia real seja, só que seja consistente e sem colisão.
+      const period = { from: '2027-08-19', to: '2027-08-19' };
 
       // Preço da quadra congela no momento da CRIAÇÃO de cada reserva
       // (decisão da Fase 4) — mudar aqui não afeta as reservas já existentes
@@ -510,7 +514,7 @@ describe('Assistente de IA operacional (e2e)', () => {
         .post(`/v1/arenas/${arenaAId}/courts/${courtAId}/bookings`)
         .set(...authHeader('token-owner-a'))
         .set('Idempotency-Key', 'f13-metrics-integration-1')
-        .send({ startsAt: '2026-08-20T10:00:00-03:00' }) // fora dos horários já ocupados pela fixture (13h-20h)
+        .send({ startsAt: '2027-08-19T10:00:00-03:00' })
         .expect(201);
       const bookingId = (created.body as { id: string }).id;
 

@@ -336,8 +336,10 @@ describe('Customer experience — discovery & minhas reservas (e2e)', () => {
       });
       courtAId = courtA.id;
 
-      // 2026-03-08 é a data real da transição de DST em NY em 2026 (mesma
-      // usada pelos testes de disponibilidade/dashboard das fases 5/8/12).
+      // 2027-03-14 é a data real da transição de DST em NY em 2027 (Fase 27:
+      // cancelamento exige `startsAt` no futuro, então esta fixture usa o
+      // ciclo de DST seguinte ao usado pelos testes de disponibilidade/
+      // dashboard das fases 5/8/12, mesmo "dia seguinte à transição").
       const arenaB = await prisma.arena.create({
         data: { name: 'Arena F13 B (NY, DST)', slug: 'arena-f13-b', timezone: 'America/New_York' },
       });
@@ -383,8 +385,8 @@ describe('Customer experience — discovery & minhas reservas (e2e)', () => {
           courtId: courtBId,
           userId: userB1.id,
           type: BookingType.CUSTOMER,
-          startsAt: new Date('2026-03-09T14:00:00-04:00'),
-          endsAt: new Date('2026-03-09T15:00:00-04:00'),
+          startsAt: new Date('2027-03-15T14:00:00-04:00'),
+          endsAt: new Date('2027-03-15T15:00:00-04:00'),
           total: 80,
         },
       });
@@ -457,7 +459,7 @@ describe('Customer experience — discovery & minhas reservas (e2e)', () => {
       expect(bodyB1.court.arena.timezone).toBe('America/New_York');
       // O instante persistido (14:00 -04:00 = 18:00 UTC) volta intacto —
       // nunca recalculado com um offset fixo de -05:00.
-      expect(new Date(bodyB1.startsAt).toISOString()).toBe('2026-03-09T18:00:00.000Z');
+      expect(new Date(bodyB1.startsAt).toISOString()).toBe('2027-03-15T18:00:00.000Z');
     });
 
     it('cancelamento em Arena B (DST) funciona e libera o horário, igual à Arena A', async () => {

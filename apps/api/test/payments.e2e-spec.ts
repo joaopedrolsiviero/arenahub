@@ -11,8 +11,10 @@ import {
   PaymentProvider,
   PaymentProviderCreateRequest,
   PaymentProviderCreateResult,
+  PaymentProviderRefundResult,
   PaymentProviderStatusResult,
   ProviderPaymentStatus,
+  ProviderRefundStatus,
 } from '../src/modules/payments/providers/payment-provider';
 
 // Fase 17: Payment é só mais um ciclo de vida em cima da MESMA Booking já
@@ -65,6 +67,36 @@ class FakePaymentProvider extends PaymentProvider {
       paidAt: status === 'PAID' ? new Date() : undefined,
       failureReason: status === 'FAILED' ? 'insufficient_funds' : undefined,
     });
+  }
+
+  // Fase 27 — mesmo padrão de `nextCreateResult`/`nextCreateError`:
+  // controlável por teste, nunca dinheiro real (esta suíte roda contra
+  // Postgres real, mas o provider aqui é sempre o fake).
+  refundCalls: { providerPaymentId: string; idempotencyKey: string }[] = [];
+  nextRefundResult: PaymentProviderRefundResult = { refundId: 'refund-fake-1', status: 'REFUNDED' };
+  nextRefundError: Error | null = null;
+  private refundIdCounter = 0;
+
+  refundPayment(
+    providerPaymentId: string,
+    idempotencyKey: string,
+  ): Promise<PaymentProviderRefundResult> {
+    this.refundCalls.push({ providerPaymentId, idempotencyKey });
+    if (this.nextRefundError) {
+      const error = this.nextRefundError;
+      this.nextRefundError = null;
+      return Promise.reject(error);
+    }
+    this.refundIdCounter += 1;
+    const result = {
+      ...this.nextRefundResult,
+      refundId: `${this.nextRefundResult.refundId}-${this.refundIdCounter}`,
+    };
+    return Promise.resolve(result);
+  }
+
+  getRefundStatus(): Promise<ProviderRefundStatus> {
+    return Promise.resolve(this.nextRefundResult.status);
   }
 }
 

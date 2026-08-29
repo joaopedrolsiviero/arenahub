@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, use, useState } from 'react';
+import { Suspense, use, useState, useSyncExternalStore } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { CheckCircle2Icon, MapPinIcon } from 'lucide-react';
 import { useMyBooking, useCancelBooking, useBookingPayment, useCreateBookingPayment } from '@/hooks/use-api';
@@ -143,6 +143,23 @@ function PaymentSection({ booking }: { booking: MyBooking }) {
                 O prazo para pagar esse PIX expirou. Tente pagar novamente.
               </p>
             ) : null}
+
+            {payment.status === 'REFUNDING' ? (
+              <p className="text-sm text-muted-foreground">
+                Reembolso solicitado — aguardando confirmação do Mercado Pago. Isso pode levar
+                alguns minutos.
+              </p>
+            ) : null}
+
+            {payment.status === 'REFUNDED' ? (
+              <p className="text-sm text-muted-foreground">
+                Reembolsado integralmente
+                {payment.refundedAt
+                  ? ` em ${formatDateTimeInZone(payment.refundedAt, booking.court.arena.timezone)}`
+                  : ''}
+                .
+              </p>
+            ) : null}
           </>
         ) : null}
 
@@ -160,6 +177,36 @@ function PaymentSection({ booking }: { booking: MyBooking }) {
   );
 }
 
+// `getSnapshot` precisa devolver o MESMO valor entre notificações (senão
+// `useSyncExternalStore` re-renderiza infinitamente, já que `Date.now()`
+// muda a cada chamada) — só a callback do `subscribe` (nunca `getSnapshot`)
+// atualiza este cache, seguindo a própria orientação do React.
+let cachedNow = Date.now();
+function subscribeToClock(callback: () => void): () => void {
+  const interval = setInterval(() => {
+    cachedNow = Date.now();
+    callback();
+  }, 30_000);
+  return () => clearInterval(interval);
+}
+function getClockSnapshot(): number {
+  return cachedNow;
+}
+function getServerClockSnapshot(): number {
+  return 0;
+}
+
+// Fase 27, Regra 3/4 — `Date.now()` é impuro; `useSyncExternalStore` é o
+// jeito oficial do React de ler uma fonte externa impura durante o render
+// sem violar a regra de pureza (nunca `Date.now()` direto no corpo do
+// componente). Servidor sempre "agora = 0" (reserva nunca considerada já
+// iniciada no primeiro render/SSR) — ambos os lados concordam em "ainda não
+// começou" até este hook resolver o valor real na hidratação, sem o botão
+// de cancelar piscar.
+function useNow(): number {
+  return useSyncExternalStore(subscribeToClock, getClockSnapshot, getServerClockSnapshot);
+}
+
 export function BookingDetail({ bookingId }: { bookingId: string }) {
   const searchParams = useSearchParams();
   const justCreated = searchParams.get('created') === 'true';
@@ -175,6 +222,7 @@ export function BookingDetail({ bookingId }: { bookingId: string }) {
   // acontece hoje — nada, o Payment continua PAID mesmo com a Booking
   // cancelada).
   const { data: payment } = useBookingPayment(bookingId);
+  const now = useNow();
 
   async function handleCancel() {
     if (!booking) return;
@@ -201,7 +249,13 @@ export function BookingDetail({ bookingId }: { bookingId: string }) {
     return <ErrorState message="Reserva não encontrada." />;
   }
 
-  const canCancel = booking.status === 'CONFIRMED';
+  // Fase 27, Regra 3/4 — só um atalho de UX (esconder/desabilitar o botão
+  // com uma explicação amigável); a autoridade real é sempre o backend
+  // (`BookingsService.cancel`), que rejeita com 400 independentemente do que
+  // este cálculo local disser (relógio do cliente nunca é confiável).
+  const hasStarted = now >= new Date(booking.startsAt).getTime();
+  const canCancel = booking.status === 'CONFIRMED' && !hasStarted;
+  const cancelBlockedByTime = booking.status === 'CONFIRMED' && hasStarted;
   const datePart = formatDateInZone(booking.startsAt, booking.court.arena.timezone);
   const timePart = formatTimeInZone(booking.startsAt, booking.court.arena.timezone);
 
@@ -264,7 +318,8 @@ export function BookingDetail({ bookingId }: { bookingId: string }) {
                 {payment?.status === 'PAID' ? (
                   <>
                     {' '}
-                    Esta reserva já está paga — o cancelamento não gera reembolso automático.
+                    Esta reserva foi paga. O valor de {formatCurrencyBRL(payment.amount)} será
+                    reembolsado integralmente.
                   </>
                 ) : null}
               </AlertDialogDescription>
@@ -275,6 +330,10 @@ export function BookingDetail({ bookingId }: { bookingId: string }) {
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
+      ) : cancelBlockedByTime ? (
+        <p className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 text-center text-sm text-muted-foreground">
+          Esta reserva já começou e não pode mais ser cancelada.
+        </p>
       ) : null}
 
       <Button type="button" variant="ghost" onClick={() => router.push('/minhas-reservas')}>

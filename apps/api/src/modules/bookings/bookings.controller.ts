@@ -6,6 +6,7 @@ import {
   Headers,
   HttpCode,
   HttpStatus,
+  Logger,
   Param,
   Post,
   Query,
@@ -20,6 +21,7 @@ import { ArenaAccessGuard } from '../arena-members/arena-access.guard';
 import { RequireArenaRole } from '../arena-members/require-arena-role.decorator';
 import { UsersService } from '../users/users.service';
 import { IdempotencyService } from '../idempotency/idempotency.service';
+import { PaymentsService } from '../payments/payments.service';
 import { BookingDetailed, BookingOccupancy, BookingsService } from './bookings.service';
 import { CreateCustomerBookingDto } from './dto/create-customer-booking.dto';
 import { CreateAdminBookingDto } from './dto/create-admin-booking.dto';
@@ -40,10 +42,15 @@ import { BookingWindowQueryDto } from './dto/booking-window-query.dto';
 @Controller('arenas/:arenaId/courts/:courtId/bookings')
 @UseGuards(ClerkAuthGuard)
 export class BookingsController {
+  private readonly logger = new Logger(BookingsController.name);
+
   constructor(
     private readonly bookingsService: BookingsService,
     private readonly usersService: UsersService,
     private readonly idempotencyService: IdempotencyService,
+    // Fase 27 — só o controller conhece PaymentsService; BookingsService
+    // continua sem nenhuma dependência de Payment (docs/ARCHITECTURE.md).
+    private readonly paymentsService: PaymentsService,
   ) {}
 
   // Fase 18 (item 4): criação de reserva é o endpoint de maior valor de
@@ -200,7 +207,26 @@ export class BookingsController {
     @Param('bookingId') bookingId: string,
   ): Promise<Booking> {
     const user = await this.usersService.findByClerkId(authUser.clerkId);
-    return this.bookingsService.cancel(arenaId, courtId, bookingId, user.id);
+    const booking = await this.bookingsService.cancel(arenaId, courtId, bookingId, user.id);
+
+    // Fase 27, Regra 2/5 — mesmo endpoint pra CUSTOMER, OWNER e ADMIN
+    // (nenhuma regra diferente por quem cancela); `refundIfPaid` é
+    // idempotente (Regra 6/7), então chamar de novo numa reserva já
+    // cancelada (retry, duplo clique) é sempre seguro. Nunca deixa uma
+    // falha de refund virar erro na resposta de cancelamento — o
+    // cancelamento em si já está confirmado; o refund fica elegível pra
+    // nova tentativa na próxima chamada.
+    try {
+      await this.paymentsService.refundIfPaid(booking.id);
+    } catch (error) {
+      this.logger.error(
+        `Falha ao processar reembolso da Booking ${booking.id}: ${
+          error instanceof Error ? error.message : 'erro desconhecido'
+        }`,
+      );
+    }
+
+    return booking;
   }
 
   private assertIdempotencyKey(key: string | undefined): asserts key is string {

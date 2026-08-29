@@ -122,10 +122,10 @@ describe('BookingDetail', () => {
     );
   });
 
-  it('avisa que não há reembolso automático ao cancelar uma reserva já paga (Fase 26, item 22)', async () => {
+  it('avisa que o reembolso é integral ao cancelar uma reserva já paga (Fase 27, Regra 2)', async () => {
     mockedUseMyBooking.mockReturnValue({ data: booking, isPending: false, isError: false });
     mockedUseBookingPayment.mockReturnValue({
-      data: { status: 'PAID', paidAt: '2026-09-07T13:05:00.000Z' },
+      data: { status: 'PAID', amount: '100.00', paidAt: '2026-09-07T13:05:00.000Z' },
       isPending: false,
       isError: false,
     });
@@ -134,8 +134,52 @@ describe('BookingDetail', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Cancelar reserva' }));
 
     expect(
-      await screen.findByText(/não gera reembolso automático/i),
+      await screen.findByText(/será reembolsado integralmente/i),
     ).toBeInTheDocument();
+  });
+
+  it('Fase 27: esconde o botão de cancelar e explica quando a reserva já começou', () => {
+    mockedUseMyBooking.mockReturnValue({
+      data: { ...booking, startsAt: '2020-01-01T13:00:00.000Z', endsAt: '2020-01-01T14:00:00.000Z' },
+      isPending: false,
+      isError: false,
+    });
+    render(<BookingDetail bookingId="booking-1" />);
+
+    expect(screen.queryByRole('button', { name: /cancelar reserva/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/já começou e não pode mais ser cancelada/i)).toBeInTheDocument();
+  });
+
+  it('Fase 27: mostra "reembolso em processamento" enquanto o Payment está REFUNDING', () => {
+    mockedUseMyBooking.mockReturnValue({
+      data: { ...booking, status: 'CANCELLED' },
+      isPending: false,
+      isError: false,
+    });
+    mockedUseBookingPayment.mockReturnValue({
+      data: { status: 'REFUNDING', amount: '100.00' },
+      isPending: false,
+      isError: false,
+    });
+    render(<BookingDetail bookingId="booking-1" />);
+
+    expect(screen.getByText(/reembolso solicitado/i)).toBeInTheDocument();
+  });
+
+  it('Fase 27: mostra "reembolsado integralmente" quando o Payment está REFUNDED, nunca antes da confirmação', () => {
+    mockedUseMyBooking.mockReturnValue({
+      data: { ...booking, status: 'CANCELLED' },
+      isPending: false,
+      isError: false,
+    });
+    mockedUseBookingPayment.mockReturnValue({
+      data: { status: 'REFUNDED', amount: '100.00', refundedAt: '2026-09-01T10:00:00.000Z' },
+      isPending: false,
+      isError: false,
+    });
+    render(<BookingDetail bookingId="booking-1" />);
+
+    expect(screen.getByText(/reembolsado integralmente/i)).toBeInTheDocument();
   });
 
   it('mostra mensagem de erro amigável quando o cancelamento falha', async () => {

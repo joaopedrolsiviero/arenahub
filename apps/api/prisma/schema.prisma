@@ -449,6 +449,17 @@ enum PaymentStatus {
   // existe endpoint para "desistir" de um pagamento nesta fase, decisão
   // deliberada de escopo mínimo).
   CANCELLED
+  // Fase 27 — reembolso solicitado, ainda não confirmado pelo Mercado
+  // Pago. Necessário porque reembolso de PIX pode ser assíncrono
+  // (`status: "in_process"` na API real, confirmado na documentação
+  // oficial) — nunca soubemos supor "reembolso é sempre instantâneo".
+  // Um Payment pode ficar aqui por um tempo real antes de virar REFUNDED;
+  // nunca marcado como sucesso sem confirmação do provider.
+  REFUNDING
+  // Terminal — confirmado pelo Mercado Pago (`status: "approved"` na
+  // resposta do refund, ou reconciliado depois via consulta). Nunca um
+  // segundo refund é permitido depois disso (item 6 do prompt da Fase 27).
+  REFUNDED
 }
 
 // Fase 17: ciclo financeiro de uma Booking CUSTOMER, deliberadamente
@@ -506,6 +517,13 @@ model Payment {
   // Imagem PNG do QR Code, em base64 — potencialmente vários KB, por isso
   // @db.Text (não o VARCHAR curto default do Postgres pro Prisma String).
   qrCodeBase64 String? @db.Text
+
+  // Fase 27 — ID do refund NO PROVIDER (nunca confiado sozinho: só usado
+  // pra reconsultar o status real depois, mesmo espírito de
+  // `providerPaymentId`). `@unique` quando não nulo: nunca dois refunds
+  // locais apontando pro mesmo refund no provider.
+  refundId   String?   @unique
+  refundedAt DateTime? @db.Timestamptz(6)
 
   // Idempotência da CRIAÇÃO (item 10 do prompt) — mesma técnica
   // "claim-first" já estabelecida em IdempotencyKey/WhatsAppEvent, aplicada
