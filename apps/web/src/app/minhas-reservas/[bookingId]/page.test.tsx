@@ -254,6 +254,19 @@ describe('BookingDetail', () => {
       expect(screen.getAllByText('R$ 100,00').length).toBeGreaterThan(0);
     });
 
+    it('Fase 30: botão de copiar o código PIX usa a Clipboard API e mostra feedback', async () => {
+      const writeText = jest.fn().mockResolvedValue(undefined);
+      Object.assign(navigator, { clipboard: { writeText } });
+      mockedUseMyBooking.mockReturnValue({ data: booking, isPending: false, isError: false });
+      mockedUseBookingPayment.mockReturnValue({ data: payment, isPending: false, isError: false });
+
+      render(<BookingDetail bookingId="booking-1" />);
+      fireEvent.click(screen.getByRole('button', { name: 'Copiar código PIX' }));
+
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith('00020126-fake-pix'));
+      expect(await screen.findByRole('button', { name: 'Código copiado' })).toBeInTheDocument();
+    });
+
     it('PAID mostra confirmação e data de pagamento, sem botão de pagar', () => {
       mockedUseMyBooking.mockReturnValue({ data: booking, isPending: false, isError: false });
       mockedUseBookingPayment.mockReturnValue({

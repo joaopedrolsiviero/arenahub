@@ -1875,6 +1875,79 @@ Nenhuma migration nesta fase — nenhuma alteração de schema Prisma.
 
 ---
 
+## 24. Fase 30 — Mobile-first, UX, Acessibilidade e Polimento de Produto (2026-08-29)
+
+### Objetivo
+Fase de polimento e validação (explicitamente não de reconstrução): auditoria real em viewport
+estreito das principais telas (público, dashboard, pagamento PIX), correção só dos problemas
+reais encontrados. Nenhuma mudança em Mercado Pago, `PaymentProvider`, webhook, refund,
+idempotência, advisory lock, exclusion constraint, `BookingStatus` ou `PaymentStatus`.
+
+### Auditoria — testada em viewport real, não só lida no código
+A instrução da fase pedia explicitamente para abrir as telas em viewport estreito real e não se
+contentar em conferir classes Tailwind. O `resize_window` da ferramenta de browser não conseguiu
+emular uma largura estreita numa sessão Chrome já autenticada nesta máquina (a janela real do SO
+não encolhe abaixo da resolução atual pelas ferramentas disponíveis) — a auditoria do dashboard
+autenticado foi feita medindo as larguras reais dos elementos no DOM em produção (via
+`getBoundingClientRect`/`getComputedStyle`) e comparando contra os breakpoints exigidos (320 a
+768px), e as correções foram verificadas visualmente num harness estático servido pelo próprio
+dev server local com o CSS compilado real da build (arquivo temporário, nunca commitado). A
+jornada pública (sem autenticação) foi auditada e verificada normalmente em viewport 320/375/768px
+reais, sem essa limitação.
+
+### Problemas reais encontrados e corrigidos
+1. **`DashboardHeader` (compartilhado em todo o `/dashboard/[arenaId]/*`)**: a navegação de 8 abas
+   administrativas não tinha rolagem nem quebra de linha — medição real no DOM de produção
+   confirmou ~615px de conteúdo intrínseco em `flex-nowrap`, que não cabe em nenhuma tela de
+   celular (a menor exigida é 320px). O nome da arena também não tinha `truncate`, podendo
+   empurrar o seletor de arena e o "+" pra fora da tela com um nome longo. Corrigido com
+   `overflow-x-auto` na nav (mesma técnica já usada nas tabelas largas de `relatorios/page.tsx`) e
+   `min-w-0 truncate` no nome — vira uma faixa de abas deslizável, sem remover nenhuma aba nem
+   redesenhar a navegação.
+2. **`horarios/page.tsx`**: a linha de um intervalo de funcionamento (dois `<input type="time">` +
+   "até" + botão de remover) soma ~276px de conteúdo intrínseco contra ~256px disponíveis dentro
+   do card em 320px — mesma correção (`overflow-x-auto` + `shrink-0`).
+3. **`configuracoes/page.tsx`**: card de Contato usava `grid-cols-2` sem breakpoint (telefone/
+   e-mail ficavam com ~122px de largura útil em 320px) — alinhado ao padrão `grid-cols-1
+   sm:grid-cols-2` já usado no resto do produto.
+4. **Tela de pagamento PIX (`minhas-reservas/[bookingId]/page.tsx`, só apresentação)**: `PENDING`
+   era o único dos 7 estados de pagamento sem uma frase explicativa própria (os outros 6 já tinham
+   desde a Fase 29) — adicionada "Estamos aguardando a confirmação do pagamento."; a mensagem de
+   `FAILED` dependia de `payment.failureReason` (campo opcional) e podia nunca aparecer — passou a
+   ser incondicional; adicionado botão de copiar o código PIX (`navigator.clipboard`) ao lado do
+   input, já que selecionar ~140 caracteres pelo menu de seleção do teclado é bem menos direto em
+   celular do que no desktop. Nenhuma dessas mudanças toca `PaymentProvider`, Mercado Pago, webhook,
+   valores ou estados — só a apresentação.
+
+### Testes automatizados (números reais, após todas as mudanças)
+- Backend unit: **410/410** (sem mudança — nenhum arquivo de backend tocado nesta fase).
+- Backend e2e: **324/346** — única falha é `invitation-flow.e2e-spec.ts`, pré-existente e não
+  relacionada (confirmado idêntico ao baseline conhecido).
+- Frontend unit: **163/163** (era 162/162 — 1 caso novo cobrindo o botão de copiar o código PIX
+  via Clipboard API).
+- Lint (backend e frontend): limpo (só o warning pré-existente de `<img>` em
+  `minhas-reservas/[bookingId]/page.tsx`, já conhecido desde a Fase 29). Typecheck (backend e
+  frontend): limpo. Build (backend e frontend): limpo, mesmo mapa de rotas de antes.
+
+### Pagamentos — confirmação explícita
+`PaymentProvider`, Mercado Pago, webhook, refund, credenciais, valores e a máquina de estados de
+Payment/Booking **não foram alterados** nesta fase. Nenhum arquivo de
+`apps/api/src/modules/payments/**` (nem qualquer arquivo de `apps/api/**`) foi tocado. Nenhuma
+transação financeira real foi executada.
+
+### Banco de dados
+Nenhuma migration nesta fase — nenhuma alteração de schema Prisma, nenhum arquivo de backend
+tocado.
+
+### Pendências reais (nenhuma inventada)
+- Responsividade do dashboard autenticado foi verificada por medição real de DOM em produção e por
+  harness estático com o CSS compilado real (não numa sessão de browser autenticada redimensionada
+  para 320–768px) — limitação de ferramenta nesta máquina, não do produto; documentado acima.
+- Acessibilidade: auditoria pragmática (labels, `aria-label` em botões de ícone, foco visível,
+  hierarquia de headings, dialogs) — sem certificação WCAG completa, conforme escopo da fase.
+
+---
+
 ## Troubleshooting
 
 | Sintoma | Causa provável | Onde olhar |

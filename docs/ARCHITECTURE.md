@@ -3008,6 +3008,40 @@ testar em cada uma — mas a definição geral vale para todas.
   refletir a nova política (a mudança em si, não um teste "consertado pra passar"). Ver relatório
   da fase para os números reais. Commit/push/deploy aguardando autorização explícita.
 
+### Fase 30 — Mobile-first, UX, Acessibilidade e Polimento de Produto
+- **Objetivo:** fase de polimento e validação (não reconstrução) — auditoria real em viewport
+  estreito (320–768px) das principais telas, sem tocar arquitetura financeira, Mercado Pago,
+  `PaymentProvider`, webhook, refund, idempotência, advisory lock ou exclusion constraint.
+- **Achado real (não hipotético) — `DashboardHeader` estourava a largura em celular**: a
+  auditoria mediu no DOM em produção que a `<nav>` com as 8 abas administrativas (Dashboard,
+  Quadras, Horários, Equipe, Clientes, Relatórios, IA, Configurações) soma ~615px de conteúdo
+  intrínseco em `flex-nowrap` sem rolagem — cabe em desktop, mas não em nenhuma tela de celular.
+  Um nome de arena longo (ex.: 355px de largura intrínseca) também não tinha `truncate`, o que
+  empurraria o seletor de arena e o botão de nova arena pra fora da tela. Corrigido com
+  `overflow-x-auto` na nav (mesmo padrão já usado nas tabelas largas de `relatorios/page.tsx` —
+  vira uma faixa de abas deslizável, não um redesenho) e `min-w-0 truncate` no nome da arena.
+  Verificado visualmente em 320px e 768px reais (harness estático com o CSS compilado da própria
+  build, nunca commitado).
+- **`horarios/page.tsx`**: a linha de um intervalo de funcionamento (dois `<input type="time">`
+  nativos + "até" + botão de remover) soma ~276px de conteúdo intrínseco, o que não cabe nos
+  ~256px disponíveis dentro do card em telas de 320px (a menor exigida pela fase). Mesmo
+  tratamento: `overflow-x-auto` na linha, `shrink-0` nos elementos.
+- **`configuracoes/page.tsx`**: o card de Contato usava `grid-cols-2` sem breakpoint —
+  telefone/e-mail ficavam com ~122px de largura útil em 320px. Alinhado ao padrão já usado no
+  resto do produto (`grid-cols-1 sm:grid-cols-2`).
+- **Pagamento PIX — só apresentação, sem tocar `PaymentProvider`/estados**: `PENDING` ganhou uma
+  frase explícita ("Estamos aguardando a confirmação do pagamento.") antes do QR — os outros
+  seis estados (`PAID`/`FAILED`/`CANCELLED`/`EXPIRED`/`REFUNDING`/`REFUNDED`) já tinham frase
+  própria desde a Fase 29, `PENDING` era a exceção. A mensagem de `FAILED` estava condicionada a
+  `payment.failureReason` (campo opcional) e podia não aparecer nunca — passou a ser incondicional
+  igual aos demais estados terminais. Botão de copiar (`navigator.clipboard`) adicionado ao lado
+  do campo de copia-e-cola — selecionar ~140 caracteres num input pelo menu de seleção do teclado
+  é bem menos direto em celular do que no desktop.
+- **Dependências:** Fase 28 (onboarding/checklist), Fase 29 (jornada pública, componentes
+  compartilhados `DashboardHeader`/`PaymentSection` auditados aqui).
+- **Critério de conclusão:** ver relatório da fase para os números reais de teste e as
+  validações em produção.
+
 ---
 
 ## Riscos técnicos identificados

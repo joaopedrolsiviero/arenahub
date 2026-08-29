@@ -2,7 +2,7 @@
 
 import { Suspense, use, useState, useSyncExternalStore } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { CheckCircle2Icon, MapPinIcon, RefreshCwIcon } from 'lucide-react';
+import { CheckCircle2Icon, CheckIcon, CopyIcon, MapPinIcon, RefreshCwIcon } from 'lucide-react';
 import { useMyBooking, useCancelBooking, useBookingPayment, useCreateBookingPayment } from '@/hooks/use-api';
 import { LoadingState, ErrorState } from '@/components/async-state';
 import { RequireAuth } from '@/components/require-auth';
@@ -40,6 +40,24 @@ function PaymentSection({ booking }: { booking: MyBooking }) {
   const { data: payment, isPending, isError } = useBookingPayment(booking.id);
   const createPayment = useCreateBookingPayment(booking.id);
   const [payError, setPayError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  // Fase 30 — copiar manualmente um código PIX de ~140 caracteres selecionando
+  // texto num input é viável no desktop, mas em celular depende do menu de
+  // seleção do teclado (nem sempre óbvio). Um botão explícito com feedback
+  // visual atende ao pedido da fase ("fácil de copiar") sem tocar em nada do
+  // PaymentProvider — é só `navigator.clipboard`, puramente apresentacional.
+  async function handleCopyPix(code: string) {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard API pode não estar disponível (contexto não seguro,
+      // permissão negada); o input readOnly com seleção ao focar continua
+      // funcionando como alternativa manual, então não há erro pro usuário.
+    }
+  }
 
   async function handlePay() {
     setPayError(null);
@@ -92,6 +110,10 @@ function PaymentSection({ booking }: { booking: MyBooking }) {
               <span className="tabular text-base font-bold">{formatCurrencyBRL(payment.amount)}</span>
             </div>
 
+            {payment.status === 'PENDING' ? (
+              <p className="text-sm text-muted-foreground">Estamos aguardando a confirmação do pagamento.</p>
+            ) : null}
+
             {payment.status === 'PENDING' && payment.qrCodeBase64 ? (
               <img
                 src={`data:image/png;base64,${payment.qrCodeBase64}`}
@@ -108,13 +130,25 @@ function PaymentSection({ booking }: { booking: MyBooking }) {
             {payment.status === 'PENDING' && payment.pixCopyPaste ? (
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="pix-copy-paste">Código PIX copia e cola</Label>
-                <Input
-                  id="pix-copy-paste"
-                  readOnly
-                  value={payment.pixCopyPaste}
-                  onFocus={(event) => event.target.select()}
-                  className="font-mono text-xs"
-                />
+                <div className="flex gap-1.5">
+                  <Input
+                    id="pix-copy-paste"
+                    readOnly
+                    value={payment.pixCopyPaste}
+                    onFocus={(event) => event.target.select()}
+                    className="font-mono text-xs"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="shrink-0"
+                    aria-label={copied ? 'Código copiado' : 'Copiar código PIX'}
+                    onClick={() => handleCopyPix(payment.pixCopyPaste!)}
+                  >
+                    {copied ? <CheckIcon /> : <CopyIcon />}
+                  </Button>
+                </div>
                 {payment.expiresAt ? (
                   <p className="text-xs text-muted-foreground">
                     Expira em {formatDateTimeInZone(payment.expiresAt, booking.court.arena.timezone)}
@@ -131,16 +165,17 @@ function PaymentSection({ booking }: { booking: MyBooking }) {
               </div>
             ) : null}
 
-            {payment.status === 'PAID' && payment.paidAt ? (
+            {payment.status === 'PAID' ? (
               <p className="text-sm text-muted-foreground">
-                Pago em {formatDateTimeInZone(payment.paidAt, booking.court.arena.timezone)}
+                Pagamento confirmado.
+                {payment.paidAt
+                  ? ` Pago em ${formatDateTimeInZone(payment.paidAt, booking.court.arena.timezone)}.`
+                  : ''}
               </p>
             ) : null}
 
-            {payment.status === 'FAILED' && payment.failureReason ? (
-              <p className="text-sm text-muted-foreground">
-                Não foi possível concluir o pagamento anterior.
-              </p>
+            {payment.status === 'FAILED' ? (
+              <p className="text-sm text-muted-foreground">Pagamento não aprovado. Tente novamente.</p>
             ) : null}
 
             {payment.status === 'CANCELLED' ? (

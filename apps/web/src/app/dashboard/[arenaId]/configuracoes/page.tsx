@@ -86,7 +86,7 @@ function ArenaForm({ arenaId, arena }: { arenaId: string; arena: AdminArena }) {
         <CardHeader>
           <CardTitle>Contato</CardTitle>
         </CardHeader>
-        <CardContent className="grid grid-cols-2 gap-3">
+        <CardContent className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="arena-phone">Telefone</Label>
             <Input

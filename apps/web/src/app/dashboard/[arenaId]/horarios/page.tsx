@@ -66,26 +66,33 @@ function DayRow({
       </div>
       {dayIntervals.length === 0 ? null : (
         dayIntervals.map((interval, index) => (
-          <div key={index} className="flex items-center gap-2">
+          // overflow-x-auto (item 2/62): dois <input type="time"> nativos +
+          // "até" + botão de remover não cabem lado a lado em 320px de
+          // largura (a menor tela exigida pela Fase 30) somados ao padding
+          // do card — em vez de cortar o botão de remover, a linha vira uma
+          // faixa deslizável, mesmo padrão já usado nas tabelas largas de
+          // relatorios/page.tsx.
+          <div key={index} className="flex items-center gap-2 overflow-x-auto py-0.5">
             <input
               type="time"
               value={interval.opensAt}
               onChange={(event) => updateInterval(index, 'opensAt', event.target.value)}
               aria-label={`Abre às (${WEEKDAYS.find((w) => w.value === day)?.label})`}
-              className="h-8 rounded-lg border border-input bg-transparent px-2.5 text-sm"
+              className="h-8 shrink-0 rounded-lg border border-input bg-transparent px-2.5 text-sm"
             />
-            <span className="text-muted-foreground">até</span>
+            <span className="shrink-0 text-muted-foreground">até</span>
             <input
               type="time"
               value={interval.closesAt}
               onChange={(event) => updateInterval(index, 'closesAt', event.target.value)}
               aria-label={`Fecha às (${WEEKDAYS.find((w) => w.value === day)?.label})`}
-              className="h-8 rounded-lg border border-input bg-transparent px-2.5 text-sm"
+              className="h-8 shrink-0 rounded-lg border border-input bg-transparent px-2.5 text-sm"
             />
             <Button
               type="button"
               variant="ghost"
               size="icon-sm"
+              className="shrink-0"
               aria-label="Remover intervalo"
               onClick={() => removeInterval(index)}
             >
