@@ -79,6 +79,11 @@ export function DashboardOverview({ arenaId }: { arenaId: string }) {
         adminArenas={adminArenas ?? []}
       />
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-5 px-4 py-6 sm:px-6">
+        {/* Fase 31 — único item do menu do dashboard sem h2 próprio
+            (Quadras/Horários/Equipe/Configurações já têm o deles); sem isso
+            a navegação por cabeçalhos de leitor de tela pulava direto do h1
+            da arena pro conteúdo, sem nenhum marco pra esta página. */}
+        <h2 className="sr-only">Dashboard</h2>
         {/* Sinal de onboarding mais importante da tela (item 13/14) — vem
             antes de qualquer outra coisa, inclusive do nav de data. */}
         {arena?.setupStatus ? (

@@ -27,10 +27,12 @@ function CourtForm({ arenaId, court }: { arenaId: string; court: Court }) {
   const [slotDurationMinutes, setSlotDurationMinutes] = useState(String(court.slotDurationMinutes));
   const [bufferMinutes, setBufferMinutes] = useState(String(court.bufferMinutes));
   const [error, setError] = useState<string | null>(null);
+  const [savedMessage, setSavedMessage] = useState(false);
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
     setError(null);
+    setSavedMessage(false);
     try {
       await updateCourt.mutateAsync({
         courtId: court.id,
@@ -42,6 +44,7 @@ function CourtForm({ arenaId, court }: { arenaId: string; court: Court }) {
           bufferMinutes: Number(bufferMinutes),
         },
       });
+      setSavedMessage(true);
     } catch (submitError) {
       setError(submitError instanceof ApiError ? submitError.message : 'Não foi possível salvar.');
     }
@@ -49,6 +52,7 @@ function CourtForm({ arenaId, court }: { arenaId: string; court: Court }) {
 
   async function handleToggleActive() {
     setError(null);
+    setSavedMessage(false);
     try {
       await updateCourt.mutateAsync({ courtId: court.id, dto: { isActive: !court.isActive } });
     } catch (submitError) {
@@ -127,6 +131,11 @@ function CourtForm({ arenaId, court }: { arenaId: string; court: Court }) {
             <Alert variant="destructive" role="alert">
               <AlertTitle>Erro</AlertTitle>
               <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          ) : null}
+          {savedMessage ? (
+            <Alert role="status">
+              <AlertTitle>Quadra atualizada</AlertTitle>
             </Alert>
           ) : null}
         </CardContent>

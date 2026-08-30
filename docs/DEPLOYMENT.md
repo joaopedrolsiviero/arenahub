@@ -1948,6 +1948,104 @@ tocado.
 
 ---
 
+## 25. Fase 31 — Acessibilidade, Navegação por Teclado, Estados de Interface e Revisão de Qualidade Administrativa (2026-08-30)
+
+### Objetivo
+Auditoria de acessibilidade de teclado, foco visível, dialogs, estados de loading/erro/vazio e
+qualidade do dashboard administrativo — sem tocar Mercado Pago, RBAC, Clerk, schema ou a máquina de
+estados de Payment/Booking.
+
+### Auditoria — a maior parte do que a fase pedia já estava correta
+- **Dialogs (`Dialog`/`AlertDialog`)**: construídos sobre `@base-ui/react` 1.7.0. Confirmado nas
+  próprias declarações de tipo da biblioteca instalada (não por suposição) que o padrão já cobre
+  tudo que a fase pedia, sem nenhuma customização no app (grep confirmou zero overrides de `modal`,
+  `initialFocus`, `finalFocus` ou escape em todo o `apps/web/src`): `modal` = `true` por padrão
+  (foco preso, scroll bloqueado, ponteiro fora desabilitado); `Escape` é uma das razões nativas de
+  fechamento (`REASONS.escapeKey`); foco move pro primeiro elemento focável do popup ao abrir e
+  volta pro gatilho (ou elemento previamente focado) ao fechar, por padrão. `AlertDialog` nem
+  permite `modal: false` — sempre modal.
+- **Botões/inputs/selects/tabs compartilhados**: já têm `focus-visible:ring-3 focus-visible:ring-ring/50`
+  (ou equivalente) e `aria-label` nos botões só-ícone (confirmado por grep em todo o app — nenhum
+  faltando). `Select` (usado só no seletor de arena do header) e `Tabs` (usado na aba
+  Membros/Convites de Equipe) também são primitivas `@base-ui/react`, com navegação por setas
+  nativa, sem overrides.
+- **Erros nunca vazam detalhe interno**: confirmado em `apps/api/src/common/all-exceptions.filter.ts`
+  (Fase 18) — qualquer exceção não tratada (incluindo erros do Prisma) é sempre normalizada pra uma
+  mensagem genérica segura antes de chegar no cliente; só `HttpException`s deliberadas (já com
+  mensagem segura escrita à mão) passam com o texto original. O padrão do frontend de exibir
+  `error.message` de um `ApiError` é seguro por construção, não por sorte.
+- **`relatorios/page.tsx`**: os gráficos de barra em SVG/CSS já são `aria-hidden="true"` com uma
+  tabela textual equivalente (`<caption class="sr-only">`, `<th scope="col">`) logo abaixo — já
+  implementado numa fase anterior, nada a corrigir.
+- **Jornada pública (teclado real)**: ordem de tabulação verificada com teclas reais (Tab/Shift+Tab)
+  em `/arenas` e na página de quadra — logo → Entrar → cards de arena, e (com um horário
+  selecionado) date-nav → grade de horários em ordem cronológica → CTA de resumo, sem elemento
+  órfão ou fora de ordem.
+
+### Problemas reais encontrados e corrigidos
+1. **`quadras/[courtId]/page.tsx` (editar quadra)**: salvar preço/duração/buffer não dava nenhum
+   sinal de sucesso — o botão só voltava de "Salvando…" pra "Salvar", indistinguível de nada ter
+   acontecido. As páginas irmãs (`configuracoes`, `horarios`) já tinham esse feedback
+   (`savedMessage` + `Alert`); esta página era a exceção. Corrigido com o mesmo padrão exato
+   ("Quadra atualizada").
+2. **`dashboard/[arenaId]/page.tsx` (visão geral)**: única página do menu do dashboard sem `<h2>`
+   próprio — Quadras/Horários/Equipe/Configurações já têm; a navegação por cabeçalhos de leitor de
+   tela pulava direto do `<h1>` da arena (no header) pro conteúdo, sem nenhum marco pra esta
+   página. Corrigido com um `<h2 className="sr-only">Dashboard</h2>` — só a lacuna de
+   acessibilidade, sem alterar o visual (a página não tinha título visível antes e continua sem
+   ter, de propósito: o checklist de onboarding continua sendo o primeiro elemento visual, como já
+   documentado no código).
+
+### Limitação real de ferramental nesta máquina (não é bug do produto)
+A tecla sintética "Enter"/"Espaço" disparada pela ferramenta de automação de navegador desta sessão
+não aciona o comportamento nativo do Chromium de ativar um link/botão focado — confirmado com um
+experimento controlado: um `<button onclick>` puramente vanilla, focado e recebendo a mesma tecla
+sintética, nunca dispara o `click`; o `keydown` disparado tem `event.key` correto ("Enter") mas
+`event.code`/`keyCode` vazios, o que impede o tratamento de ação padrão do navegador (Tab/Shift+Tab
+funcionam normalmente — só a ATIVAÇÃO via tecla é afetada). Uma segunda ferramenta (extensão real do
+Chrome) não estava conectada nesta sessão para servir de alternativa. Uma tentativa de usar
+automação em nível de SO (SendKeys real do Windows) foi abortada no meio do caminho por segurança:
+o processo do Edge encontrado por PID não pôde ser confirmado visualmente como a janela correta
+antes do envio de teclas (uma captura de tela do que deveria ser a janela do Edge mostrou conteúdo
+de um jogo rodando na máquina, não o navegador — o `MainWindowTitle` do processo confirmou
+depois que a navegação real havia ido pra janela certa, mas a incerteza momentânea foi motivo
+suficiente pra interromper essa linha de teste em vez de continuar às cegas). Por isso, a ATIVAÇÃO
+de links/botões por Enter/Espaço não foi validada por tecla real nesta fase — foi validada por: (a)
+todos os elementos em questão serem `<a href>`/`<button>` nativos (ativação por teclado é garantida
+pela especificação HTML em qualquer navegador real, não depende de código do app) e (b) confirmação
+por grep de que nenhum `keydown`/`preventDefault` global interfere. Isso é documentado explicitamente
+como pendência, não maquiado como "testado".
+
+### Testes automatizados (números exatos, após todas as mudanças)
+- Backend unit: **410/410** (nenhum arquivo de backend tocado nesta fase).
+- Backend e2e: **324/346** — única falha é `invitation-flow.e2e-spec.ts`, pré-existente
+  (confirmado idêntico ao baseline da Fase 30, reproduzido isoladamente).
+- Frontend unit: **163/163** (mesmo total da Fase 30 — a correção de `quadras/[courtId]` ganhou
+  uma asserção nova dentro de um teste já existente, não um teste novo).
+- Lint (backend e frontend): limpo (só o warning pré-existente de `<img>`, já conhecido desde a
+  Fase 29). Typecheck (backend e frontend): limpo. Build (backend e frontend): limpo, mesmo mapa de
+  rotas de antes.
+
+### Segurança
+Nenhum arquivo de `apps/api/**` foi tocado nesta fase (confirmado por `git status` antes do
+commit). RBAC, `ArenaAccessGuard`, Clerk, idempotência, advisory lock, exclusion constraint e o
+filtro global de exceções não foram alterados nem precisaram ser — as duas correções desta fase são
+puramente de frontend (um `Alert` de sucesso e um `<h2 className="sr-only">`).
+
+### Pendências reais (nenhuma inventada)
+- Ativação de links/botões por Enter/Espaço não foi validada por tecla real nesta máquina (ver
+  seção de limitação de ferramental acima) — validada por HTML nativo + ausência de interferência
+  no código, não por teclado real.
+- `CardTitle` (usado em praticamente todo card do produto) renderiza um `<div>` estilizado, nunca
+  um heading semântico real — um leitor de tela não consegue pular direto pra "Pagamento",
+  "Resumo da reserva", etc. via navegação por cabeçalhos, só pelos `<h1>`/`<h2>` de página.
+  Identificado nesta auditoria mas **não alterado**: é um componente compartilhado usado em dezenas
+  de lugares, mudar seu elemento semântico é uma alteração ampla demais pra revalidar visualmente
+  em todo o produto dentro do escopo desta fase — registrado para uma fase futura dedicada, não
+  corrigido às pressas.
+
+---
+
 ## Troubleshooting
 
 | Sintoma | Causa provável | Onde olhar |

@@ -79,6 +79,10 @@ describe('CourtEditor', () => {
         },
       }),
     );
+    // Fase 31 — sem isso, salvar não dava nenhum sinal de sucesso: o botão
+    // só voltava de "Salvando…" pra "Salvar", indistinguível de nada ter
+    // acontecido (item 6 do prompt da fase).
+    expect(await screen.findByText('Quadra atualizada')).toBeInTheDocument();
   });
 
   it('alterna quadra ativa/inativa', async () => {
