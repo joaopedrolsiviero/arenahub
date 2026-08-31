@@ -769,6 +769,95 @@ precisão): a ativação real — criar o app WhatsApp Business, gerar um token 
 usuário pode realizar (mesmo padrão já usado pra ativar o Mercado Pago nas Fases 23-25). Ver
 relatório da Fase 34 para o que foi efetivamente validado.
 
+#### Atualização — Fase 34, auditoria aprofundada (2026-08-31, sem commit/push/deploy)
+
+Segunda passada, bem mais profunda que a anterior (acima) — pedida explicitamente com "não
+aguarde a configuração da Meta, avance tudo que puder de forma segura e verificável, sem simular
+testes reais". Cobriu fluxo completo, segurança (10 vetores), multi-tenant, catálogo de intenções e
+lacunas de teste. **Conclusão igual à passada anterior: nenhum bug de implementação foi
+encontrado** — o `WhatsAppModule` da Fase 16 já era correto neste nível de profundidade também.
+Todo o trabalho real foi fechar lacunas de COBERTURA DE TESTE (a implementação já tratava esses
+casos corretamente, só não havia um teste provando isso) — nenhuma linha de código de produção foi
+alterada.
+
+**Fluxo mapeado e confirmado, ponta a ponta**: webhook → `WhatsAppService.verifySignature` →
+`WhatsAppService.handleEvent` (parsing defensivo + dedup por `WhatsAppEvent`) →
+`ConversationService.handleInboundMessage` (resolve identidade por telefone, resolve arena por
+`arenaId` já vindo do webhook — nunca do texto) → `WhatsAppIntentService.interpret` (só no estado
+`IDLE`) → handlers determinísticos de disponibilidade/reserva/cancelamento (reaproveitando
+`AvailabilityService`/`BookingsService`/`IdempotencyService` reais) → `messages.ts` (templates
+fixos, nunca prosa do LLM) → `MetaWhatsAppProviderService.sendMessage`. Nenhum mock, stub ou TODO
+encontrado no caminho de produção — os únicos "fakes" existem exclusivamente em teste
+(`FakeAiProvider`/`FakeWhatsAppProvider`, trocados via `overrideProvider`, nunca registrados em
+`WhatsAppModule`).
+
+**Segurança — resultado por vetor**:
+| Vetor | Resultado |
+|---|---|
+| Assinatura da Meta (`X-Hub-Signature-256`) | HMAC-SHA256 correto, `timingSafeEqual`, rejeita sem secret configurado — confirmado |
+| Payload inválido | `JSON.parse` em `try/catch`; tipos de mensagem não suportados (imagem/áudio/documento) e mensagens sem `text.body` são descartados silenciosamente — agora com teste dedicado (antes só corretas "por acidente" de não terem sido exercitadas) |
+| Replay/duplicação | `WhatsAppEvent.providerEventId` único, claim-first — mesmo padrão do `PaymentWebhookEvent` |
+| Idempotência dupla | Evento (camada 1) + `Idempotency-Key` de negócio (`pendingActionId`, camada 2) — nunca a mesma chave gerada duas vezes por retry |
+| Autenticação/autorização interna | `userId` sempre resolvido do telefone verificado (Clerk), nunca do texto da mensagem nem da resposta do LLM |
+| Telefone → usuário → arena | `User.phone` (Clerk) + `Arena.whatsappPhoneNumberId` (`@unique` no schema) — nunca comparação de string, sempre por identificador estável |
+| IDOR | Cancelamento sempre passa pelo `userId` do contexto — `BookingsService.cancel` já valida ownership; testado com um segundo cliente tentando ver/selecionar a reserva do primeiro |
+| Cross-arena | `arenaId` vem só do `phone_number_id` do webhook, nunca do texto — testado com duas arenas reais e um sentinela de preço |
+| Reservar em nome de outro | Estruturalmente impossível — `user.id` nunca é um parâmetro que o texto da mensagem ou o LLM conseguem influenciar |
+| Exposição de PII/tokens em log | Telefone sempre mascarado (`***XXXX`); `WHATSAPP_APP_SECRET`/`WHATSAPP_VERIFY_TOKEN` (já testado desde antes) e agora também `WHATSAPP_ACCESS_TOKEN` (novo teste) confirmados como nunca aparecendo em nenhuma linha de log |
+| Prompt injection | O LLM só pode produzir um JSON fechado validado contra um enum fixo — mesmo com o "modelo" tentando devolver texto livre, instruções, ou campos extras, o pior resultado possível é `UNKNOWN`; nenhum caminho de código interpola saída do LLM na resposta ao cliente |
+| IA como autoridade de execução | Confirmado: a IA só classifica intenção — toda escrita de domínio (criar reserva, cancelar) é decidida e validada pelo backend, nunca pela IA |
+
+**Multi-tenant — já corretamente modelado, nada precisou mudar**: `Arena.whatsappPhoneNumberId` já
+é `String? @unique` no schema — a relação `WhatsApp Phone Number Id → Arena` já é 1:1 ao nível do
+banco desde a Fase 16, e o webhook (uma única URL compartilhada) já resolve a arena de destino só
+por esse campo. Isso já suporta múltiplas arenas, cada uma com seu próprio número — confirmado com
+duas arenas reais na suíte e2e (`whatsapp.e2e-spec.ts`). **O que falta não é modelagem, é produto**:
+hoje só há uma tela (`/dashboard/[arenaId]/configuracoes`) pra um OWNER colar o `phone_number_id`
+manualmente; para operar em escala, será necessário automatizar a criação do número/token via
+Embedded Signup da própria Meta (fluxo OAuth que evita o dono da arena precisar mexer no painel de
+developers) — isso é trabalho de produto/integração futura, não uma correção de bug.
+
+**Catálogo de intenções (todas as 9 já implementadas — nenhuma nova)**:
+| Intenção | Entrada esperada | Dados extraídos | Serviço chamado | Validações | Resposta | Falhas possíveis |
+|---|---|---|---|---|---|---|
+| `CHECK_AVAILABILITY` | "tem horário amanhã às 19h?" | `datePhrase`, `timePhrase` (frase bruta) | `AvailabilityService.getAvailability` | Data/hora reconhecidas por `nlp.util`; se não, pede esclarecimento | Lista de quadras disponíveis ou "nenhuma disponível" | Frase de data/hora não reconhecida → pede de novo, nunca adivinha |
+| `CREATE_BOOKING` | "quero reservar amanhã às 19h" | `datePhrase`, `timePhrase` | `AvailabilityService` → `BookingsService.createCustomerBooking` (após confirmação) | Quadra revalidada contra o banco antes de confirmar; preço sempre do banco; confirmação exige frase inequívoca | Resumo pra confirmar, depois "reserva confirmada" | Sem disponibilidade; conflito de concorrência (409 → mensagem amigável); confirmação expirada (TTL 15min) |
+| `LIST_MY_BOOKINGS` | "minhas reservas" | nenhum | `BookingsService.findMyBookings` (filtrado por arena+futuras+confirmadas) | Escopo sempre limitado à arena do número que respondeu | Lista numerada ou "nenhuma reserva" | Nenhuma conhecida |
+| `GET_MY_BOOKING` | "minha reserva de sábado" | `datePhrase` opcional | Mesmo de `LIST_MY_BOOKINGS`, filtrado por data | Idem acima | Lista filtrada | Nenhuma conhecida |
+| `CANCEL_BOOKING` | "cancelar" / "cancelar sábado" | `datePhrase` opcional | `BookingsService.cancel` (após seleção+confirmação) | Reservas listadas só as do próprio usuário nesta arena; ownership garantido por `BookingsService.cancel` | Lista pra escolher, resumo, depois "cancelada" | Nenhuma reserva encontrada; seleção fora do intervalo; confirmação expirada |
+| `GET_ARENA_INFO` | "endereço?", "qual o telefone?" | nenhum | `Arena` já carregada no contexto | Nenhuma (dado já validado do banco) | Nome/descrição/telefone da arena | Nenhuma conhecida |
+| `GET_COURTS` | "quais quadras vocês têm?" | nenhum | `ArenasService.discoverOne` | Nenhuma | Lista de quadras ativas | Nenhuma conhecida |
+| `GET_PRICES` | "quanto custa?" | nenhum | `ArenasService.discoverOne` | Nenhuma | Lista de preços por quadra | Nenhuma conhecida |
+| `UNKNOWN` | Qualquer mensagem não classificável (incluindo tentativas de prompt injection) | nenhum | Nenhum | N/A | Mensagem de ajuda genérica | É o "fail-safe" — nunca um erro técnico cru |
+
+Mensagens ambíguas (ex: "acho que sim", "pode ser", "19h então") são tratadas por
+`isConfirmation`/`isDenial` (item 17, `nlp.util.ts`) como NEM confirmação NEM negação — o cliente é
+sempre reperguntado, nunca uma suposição arriscada.
+
+**Testes novos desta passada** (todos adicionando cobertura pra comportamento que a implementação
+já tinha — nenhuma correção de bug):
+- `whatsapp.service.spec.ts`: mensagem de tipo não suportado (imagem) ignorada; mensagem de texto
+  sem `text.body` ignorada; remetente sem nenhum dígito (`from` malformado) ignorado.
+- `intent.service.spec.ts`: timeout da OpenAI (`AiTimeoutError`, distinto de indisponibilidade
+  genérica) também degrada pra `UNKNOWN`.
+- `conversation.service.spec.ts`: quadra genuinamente excluída do banco (não só desativada) durante
+  `SELECTING_COURT` reseta a conversa, nunca lança.
+- `meta-whatsapp-provider.service.spec.ts`: `WHATSAPP_ACCESS_TOKEN` nunca aparece em nenhuma linha
+  de log, em sucesso, 4xx, 5xx, timeout ou erro de rede.
+
+**Números reais depois desta passada**: backend unit **430/430** (era 424 — 6 casos novos, todos
+WhatsApp), backend e2e **349/349** (19/19 suítes, inalterado — nenhum cenário novo exigia um teste
+de integração real além dos já existentes), lint/typecheck/build limpos nos dois apps.
+
+**Ainda pendente (dependência externa, não do ArenaHub)**: criar o app WhatsApp Business real no
+Meta for Developers, gerar token de acesso permanente, configurar o webhook real no painel apontando
+pra `https://api-production-34e0.up.railway.app/v1/webhooks/whatsapp`, configurar
+`WHATSAPP_ACCESS_TOKEN`/`WHATSAPP_APP_SECRET`/`WHATSAPP_VERIFY_TOKEN` no Railway, e validar uma
+conversa real (mensagem → resposta) com um número de teste da Meta. Nenhum desses passos foi
+simulado como concluído — ver relatório da Fase 34 (entregue no chat) para o procedimento exato.
+Sem commit/push/deploy nesta passada (instrução explícita) — as 4 mudanças de arquivo (só specs)
+ficam locais até autorização.
+
 ### Pagamentos (Fase 17) — gateway, webhook, idempotência e limitações
 
 **Provedor**: Mercado Pago (PIX), chamado via `fetch` nativo (`MercadoPagoPaymentProviderService`) —
@@ -2160,6 +2249,91 @@ vazar detalhe. Isolamento entre arenas testado: resolução de quadra continua s
   da fase: nunca inventar conteúdo/imagem sem dado real).
 - Endereço/localização, comodidades, formas de pagamento aceitas: não existem no modelo `Arena`
   hoje — não criados (lacuna de produto, decisão fora do escopo desta fase).
+
+---
+
+## 27. Fase 35 — Fechamento do Fluxo Real do Cliente (2026-08-31)
+
+**Resultado: BLOCKED**, escopo estreito — não por bug, mas porque o item "autenticação real não
+pôde ser validada nesta sessão" (critério explícito de BLOCKED do próprio prompt da fase) se
+aplica: não há credenciais reais de teste do Clerk disponíveis nesta sessão, e a automação de
+navegador pra completar um login real do Clerk já falhou repetidamente em tentativas anteriores
+deste projeto (documentado nas Fases 21/22). Tudo o mais que a fase pediu foi auditado, corrigido
+onde necessário, testado e verificado — ver detalhes abaixo. Ver relatório final da fase (entregue
+no chat) para a classificação completa.
+
+**Auditoria — conclusão principal**: o fluxo completo (descoberta → arena → quadra → data/horário →
+login → retorno com contexto → confirmação → Booking → Payment → PIX → "minhas reservas" →
+cancelamento) **já estava, na esmagadora maioria, implementado e testado corretamente** pelas Fases
+17, 28, 29, 32 e 33. Isso incluiu, já confirmado por código e teste antes desta fase:
+- Preservação de contexto (arena/quadra via path, data/horário via query string) através do
+  redirect de login — reconstituída automaticamente ao retornar, sem depender de estado local que
+  o redirect apagaria (`court-booking.tsx`, testado em `page.test.tsx`).
+- Todas as proteções de `Booking` (advisory lock, EXCLUDE constraint, Idempotency-Key,
+  disponibilidade, timezone, autorização) intactas e testadas com concorrência real
+  (`Promise.all` contra Postgres real).
+- `GET /v1/users/me/bookings`/`/:bookingId` sempre resolvidos do usuário autenticado (Clerk),
+  nunca de parâmetro/query/body — confirmado sem nenhuma vulnerabilidade de IDOR.
+- Fluxo de pagamento PIX (criação, QR Code, copia-e-cola, polling de 5s enquanto `PENDING`, estados
+  `PAID`/`FAILED`/`EXPIRED`/`CANCELLED`/`REFUNDING`/`REFUNDED`) já implementado e exibido
+  corretamente em `minhas-reservas/[bookingId]/page.tsx`.
+- "Minhas reservas" já com abas Próximas/Histórico/Canceladas, mostrando status de reserva e de
+  pagamento lado a lado.
+- Cancelamento pelo cliente já com dialog de confirmação, aviso de reembolso integral quando
+  aplicável, e o backend como única autoridade (`BookingsService.cancel`).
+
+**Bug real encontrado e corrigido**: `handleConfirm` (em `court-booking.tsx`) tratava um `401`
+(sessão expirada entre a seleção do horário e o clique em "Confirmar reserva") como uma falha
+genérica — mostrava "Não foi possível confirmar a reserva. Tente novamente.", mas o próximo clique
+falharia exatamente do mesmo jeito (o token continua inválido), deixando o cliente preso. Corrigido
+para redirecionar pro login (`/sign-in?redirect_url=...`) preservando a mesma seleção de data/
+horário, reaproveitando a mesma fórmula de URL já usada pelo link "Entrar para confirmar reserva"
+(extraída pra uma função `signInUrl()` compartilhada, eliminando a duplicação que existia antes).
+Testado (`page.test.tsx`, novo caso).
+
+**Teste novo (backend, e2e)**: `onboarding-journey.e2e-spec.ts` — que já provava
+descoberta→disponibilidade→criação de Booking pelo cliente — ganhou os passos 7-9, encadeando a
+MESMA reserva num pagamento PIX real (provider fake, nunca dinheiro real) e confirmando IDOR (outro
+cliente nunca vê nem cria pagamento pra reserva alheia, 404 nunca 403). Antes, essa cadeia completa
+só existia espalhada em suítes separadas (`bookings.e2e-spec.ts`/`payments.e2e-spec.ts`) — agora há
+um teste único provando que os pedaços realmente se conectam.
+
+**Validação real em produção (o que pôde ser feito sem credenciais)**: navegador real contra
+`https://arenahub-xi.vercel.app` confirmou, com o código já publicado (antes desta fase): descoberta
+de arena → quadra → seleção de horário → link "Entrar para confirmar reserva" construído
+corretamente (`redirect_url` apontando pra `/arenas/{slug}/courts/{courtId}?date=...&slot=...`) →
+página real de login do Clerk carrega corretamente recebendo esse parâmetro. Confirmado também sem
+overflow horizontal em 375px (mobile), CTA "Entrar para confirmar reserva" totalmente visível e
+acessível.
+
+**O que NÃO pôde ser validado nesta sessão**: completar um login real (sem credenciais de teste
+disponíveis nem um jeito confiável de automatizar o formulário do Clerk nesta sessão — mesma
+limitação já documentada nas Fases 21/22), e portanto também não foi possível confirmar ao vivo que
+o retorno pós-login realmente restaura a seleção em produção, nem criar um Payment real através
+desse caminho específico. A MESMA lógica de restauração já está provada por teste automatizado
+(`page.test.tsx`) e por um teste e2e real de backend (Postgres real, `onboarding-journey.e2e-spec.ts`)
+— o que falta é só a confirmação visual, ao vivo, do lado do navegador.
+
+**Testes automatizados (números exatos, após todas as mudanças)**:
+- Backend unit: **430/430** (inalterado — nenhuma mudança de lógica de backend nesta fase).
+- Backend e2e: **352/352** (era 349 — 3 casos novos em `onboarding-journey.e2e-spec.ts`).
+- Frontend unit: **170/170** (era 169 — 1 caso novo, tratamento de 401).
+- Lint/typecheck/build: limpos nos dois apps (só o warning pré-existente de `<img>`, não relacionado).
+
+**Banco**: nenhuma migration — nenhuma mudança de schema foi necessária.
+
+**Git**: mudanças commitadas localmente (`fix(web): tratar sessão expirada...`), **não enviadas
+(push) pra `origin/main`** — critério de GO não foi totalmente atendido (item pendente acima), e o
+próprio prompt da fase condiciona o push a isso. Aguardando decisão do usuário: completar o login
+real por conta própria pra fechar a validação (convertendo BLOCKED em GO), ou autorizar o push
+mesmo com essa única pendência documentada.
+
+### Pendências reais (nenhuma inventada)
+- **Login real em produção não validado nesta sessão** — falta de credenciais de teste do Clerk +
+  histórico de falha ao automatizar o formulário de login (Fases 21/22). Ação recomendada: o
+  próprio usuário completar esse passo manualmente (mesmo padrão já usado com sucesso nas Fases
+  21/23 pra criar contas de teste do Clerk).
+- Commit local, push pendente de autorização.
 
 ---
 

@@ -5,6 +5,44 @@ import { App } from 'supertest/types';
 import { PrismaClient, Weekday } from '@prisma/client';
 import { AppModule } from '../src/app.module';
 import { ClerkService } from '../src/modules/auth/clerk.service';
+import {
+  PaymentProvider,
+  PaymentProviderCreateResult,
+  PaymentProviderRefundResult,
+  PaymentProviderStatusResult,
+  ProviderRefundStatus,
+} from '../src/modules/payments/providers/payment-provider';
+
+// Fase 35, item 20 — a jornada completa (descoberta → booking → PAGAMENTO)
+// nunca tinha um único teste encadeado provando que os três pedaços (já
+// cobertos separadamente por `bookings.e2e-spec.ts`/`payments.e2e-spec.ts`)
+// realmente se conectam de ponta a ponta. Provider fake (nunca dinheiro
+// real) — mesmo padrão de `FakePaymentProvider` em `payments.e2e-spec.ts`,
+// reduzido ao mínimo necessário pra esta suíte.
+class FakePaymentProvider extends PaymentProvider {
+  createPayment(): Promise<PaymentProviderCreateResult> {
+    return Promise.resolve({
+      providerPaymentId: 'mp-onboarding-fake-1',
+      checkoutUrl: 'https://mp.example/checkout/onboarding-fake',
+      pixCopyPaste: '00020126-onboarding-fake-pix',
+      qrCodeBase64: 'ZmFrZS1vbmJvYXJkaW5nLXFy',
+    });
+  }
+
+  getPaymentStatus(): Promise<PaymentProviderStatusResult> {
+    return Promise.resolve({ status: 'PENDING' });
+  }
+
+  // Não exercitados nesta suíte (fora do escopo da Fase 35) — implementados
+  // só porque a classe abstrata exige, mesmo padrão de qualquer fake mínimo.
+  refundPayment(): Promise<PaymentProviderRefundResult> {
+    return Promise.reject(new Error('refund não exercitado nesta suíte'));
+  }
+
+  getRefundStatus(): Promise<ProviderRefundStatus> {
+    return Promise.reject(new Error('refund não exercitado nesta suíte'));
+  }
+}
 
 // Fase 28, item 27 — prova de ponta a ponta de que a jornada de onboarding
 // (OWNER cria arena → quadra → preço → horário → arena pronta) realmente
@@ -49,14 +87,40 @@ interface BookingBody {
   courtId: string;
 }
 
+interface PaymentBody {
+  id: string;
+  bookingId: string;
+  status: string;
+  amount: string;
+  checkoutUrl: string | null;
+  pixCopyPaste: string | null;
+  qrCodeBase64: string | null;
+}
+
 describe('Onboarding — jornada completa OWNER → CLIENTE (e2e, Fase 28)', () => {
   let app: INestApplication<App>;
   let prisma: PrismaClient;
   let arenaId: string;
   let courtId: string;
+  let bookingId: string;
 
   beforeAll(async () => {
     prisma = new PrismaClient();
+    // Fase 35 — limpeza defensiva: se uma execução anterior falhou entre
+    // criar o Payment do passo 7 e o `afterAll` (ex: o próprio ambiente
+    // caiu no meio do teste), o Payment/Booking órfão bloquearia este
+    // `deleteMany` de usuário via FK RESTRICT. Nunca confia que o `afterAll`
+    // anterior rodou até o fim.
+    const leftoverUsers = await prisma.user.findMany({
+      where: { clerkId: { in: Object.values(TOKENS) } },
+      select: { id: true },
+    });
+    const leftoverUserIds = leftoverUsers.map((u) => u.id);
+    if (leftoverUserIds.length > 0) {
+      await prisma.payment.deleteMany({ where: { userId: { in: leftoverUserIds } } });
+      await prisma.booking.deleteMany({ where: { userId: { in: leftoverUserIds } } });
+    }
+    await prisma.arena.deleteMany({ where: { slug: 'arena-onboarding-e2e' } });
     await prisma.user.deleteMany({ where: { clerkId: { in: Object.values(TOKENS) } } });
     await prisma.user.create({ data: USER_OWNER });
     await prisma.user.create({ data: USER_CUSTOMER });
@@ -74,6 +138,8 @@ describe('Onboarding — jornada completa OWNER → CLIENTE (e2e, Fase 28)', () 
           return Promise.reject(new Error('invalid test token'));
         },
       })
+      .overrideProvider(PaymentProvider)
+      .useValue(new FakePaymentProvider())
       .compile();
 
     app = moduleFixture.createNestApplication();
@@ -86,9 +152,13 @@ describe('Onboarding — jornada completa OWNER → CLIENTE (e2e, Fase 28)', () 
 
   afterAll(async () => {
     if (arenaId) {
-      // Booking.courtId é RESTRICT (nunca cascade) — a reserva criada no
-      // passo 6b precisa ser removida antes da Arena, senão a FK barra o
-      // delete (mesma decisão de arquitetura testada em outros specs).
+      // Payment.bookingId e Booking.courtId são RESTRICT (nunca cascade) —
+      // o Payment criado no passo 7 precisa ser removido antes da Booking, e
+      // a Booking antes da Arena, senão a FK barra o delete (mesma decisão
+      // de arquitetura testada em outros specs).
+      if (bookingId) {
+        await prisma.payment.deleteMany({ where: { bookingId } });
+      }
       await prisma.booking.deleteMany({ where: { courtId } });
       await prisma.arena.deleteMany({ where: { id: arenaId } });
     }
@@ -222,5 +292,61 @@ describe('Onboarding — jornada completa OWNER → CLIENTE (e2e, Fase 28)', () 
     expect(body.status).toBe('CONFIRMED');
     expect(body.total).toBe('90'); // exatamente o pricePerSlot configurado no passo 2
     expect(body.courtId).toBe(courtId);
+    bookingId = body.id;
+  });
+
+  // Fase 35, item 20 — fecha o elo que faltava: a MESMA reserva criada no
+  // passo 6b (nunca uma nova, nunca um seed direto) segue pro pagamento,
+  // provando que Booking → Payment realmente se conectam nesta jornada
+  // ponta a ponta (provider FAKE — nunca dinheiro real; a integração real
+  // com o gateway já é validada separadamente em `payments.e2e-spec.ts`).
+  it('7. CLIENTE cria o pagamento PIX da MESMA reserva — valor exatamente igual ao total da Booking', async () => {
+    const response = await request(app.getHttpServer())
+      .post(`/v1/users/me/bookings/${bookingId}/payments`)
+      .set(...authHeader('token-customer'))
+      .set('Idempotency-Key', 'onboarding-journey-payment-1')
+      .expect(201);
+
+    const body = response.body as PaymentBody;
+    expect(body.bookingId).toBe(bookingId);
+    expect(body.status).toBe('PENDING');
+    expect(body.amount).toBe('90'); // idêntico ao total da Booking do passo 6b, nunca outro valor
+    expect(body.checkoutUrl).toBeTruthy();
+    expect(body.pixCopyPaste).toBeTruthy();
+    expect(body.qrCodeBase64).toBeTruthy();
+  });
+
+  it('8. CLIENTE consulta o pagamento e vê o MESMO estado PENDING — nunca aprovado sem confirmação real', async () => {
+    const response = await request(app.getHttpServer())
+      .get(`/v1/users/me/bookings/${bookingId}/payment`)
+      .set(...authHeader('token-customer'))
+      .expect(200);
+
+    const body = response.body as PaymentBody;
+    expect(body.bookingId).toBe(bookingId);
+    expect(body.status).toBe('PENDING'); // nunca PAID sem um webhook real confirmando
+  });
+
+  it('9. OUTRO cliente (não dono da reserva) nunca consegue ver nem criar pagamento para ela — 404, nunca 403 (IDOR)', async () => {
+    const another = { clerkId: 'user_e2e_onboarding_other', email: 'onboarding-other@example.com' };
+    await prisma.user.deleteMany({ where: { clerkId: another.clerkId } });
+    await prisma.user.create({ data: another });
+    // Reaproveita o mesmo mecanismo de resolução de token de teste do
+    // beforeAll (a closure de `ClerkService.verifySessionToken` lê `TOKENS`
+    // por referência) — só adiciona este token novo em tempo de teste.
+    TOKENS['token-other'] = another.clerkId;
+
+    await request(app.getHttpServer())
+      .get(`/v1/users/me/bookings/${bookingId}/payment`)
+      .set(...authHeader('token-other'))
+      .expect(404);
+
+    await request(app.getHttpServer())
+      .post(`/v1/users/me/bookings/${bookingId}/payments`)
+      .set(...authHeader('token-other'))
+      .set('Idempotency-Key', 'onboarding-journey-payment-idor-attempt')
+      .expect(404);
+
+    await prisma.user.deleteMany({ where: { clerkId: another.clerkId } });
   });
 });

@@ -150,6 +150,26 @@ describe('CourtBookingPage — fluxo de confirmação de reserva', () => {
     );
   });
 
+  // Fase 35, item 16 — "sessão expirada" precisa mandar de volta pro login
+  // preservando o contexto, nunca cair no "tente novamente" genérico (que
+  // falharia do mesmo jeito pra sempre, já que o token continua inválido).
+  it('trata 401 (sessão expirada) redirecionando pro login preservando data e horário, nunca "tente novamente"', async () => {
+    mutateAsync.mockRejectedValue(new ApiError(401, 'Não autorizado.'));
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Selecionar horário 10:00/ }));
+    const confirmButton = await screen.findByRole('button', { name: 'Confirmar reserva' });
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => expect(push).toHaveBeenCalledTimes(1));
+    const target = decodeURIComponent(push.mock.calls[0][0] as string);
+    expect(target).toContain('/sign-in?redirect_url=');
+    expect(target).toContain('/arenas/arena-1/courts/court-1');
+    expect(target).toContain('date=2026-09-07');
+    expect(target).toContain('slot=2026-09-07T13%3A00%3A00.000Z');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
   it('desabilita o botão de confirmar durante o envio (protege contra duplo clique)', async () => {
     mockedUseCreateBooking.mockReturnValue({ mutateAsync, isPending: true });
     renderPage();

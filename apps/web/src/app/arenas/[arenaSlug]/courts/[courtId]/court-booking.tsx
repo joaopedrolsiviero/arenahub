@@ -116,6 +116,22 @@ export function CourtBooking({ arenaId, courtId }: { arenaId: string; courtId: s
   const createBooking = useCreateBooking(arenaId, courtId);
   const queryClient = useQueryClient();
 
+  // Fase 35, item 16 — construído a partir de `date`/`selectedSlot` (estado
+  // local já confirmado), nunca de `searchParams`, pelo mesmo motivo do
+  // `signInHref` abaixo: o `router.replace` de `updateSlotParam` é
+  // assíncrono, então a URL do navegador só reflete o `slot` mais recente
+  // depois de um re-render. Reaproveitado tanto pro link "Entrar para
+  // confirmar reserva" quanto pelo tratamento de sessão expirada em
+  // `handleConfirm` — nunca duas fórmulas divergentes pra mesma URL.
+  function signInUrl(): string {
+    return `/sign-in?redirect_url=${encodeURIComponent(
+      `${pathname}?${new URLSearchParams({
+        ...(date ? { date } : {}),
+        ...(selectedSlot ? { slot: selectedSlot.startsAt } : {}),
+      }).toString()}`,
+    )}`;
+  }
+
   async function handleConfirm() {
     if (!selectedSlot || !idempotencyKey) return;
     setConflictMessage(null);
@@ -136,6 +152,13 @@ export function CourtBooking({ arenaId, courtId }: { arenaId: string; courtId: s
         // Força a grade a refletir o estado real (item 20/39-42) — o backend
         // continua sendo a única autoridade sobre disponibilidade.
         await queryClient.invalidateQueries({ queryKey: ['availability', arenaId, courtId] });
+      } else if (error instanceof ApiError && error.status === 401) {
+        // Fase 35, item 16 — a sessão expirou entre a seleção do horário e a
+        // confirmação. "Tente novamente" nunca resolveria isso (o próximo
+        // clique falharia do mesmo jeito) — manda de volta pro login
+        // preservando a mesma seleção, mesma convenção de `redirect_url` já
+        // usada no restante do fluxo.
+        router.push(signInUrl());
       } else {
         setConflictMessage('Não foi possível confirmar a reserva. Tente novamente.');
       }
@@ -211,21 +234,7 @@ export function CourtBooking({ arenaId, courtId }: { arenaId: string; courtId: s
           timezone={availability.timezone}
           isSubmitting={createBooking.isPending}
           onConfirm={handleConfirm}
-          signInHref={
-            isAuthLoaded && !userId
-              ? // Construído a partir de `date`/`selectedSlot` (estado local já
-                // confirmado), nunca de `searchParams` — o `router.replace` de
-                // `updateSlotParam` é assíncrono, então a URL do navegador só
-                // reflete o `slot` mais recente depois de um re-render; ler
-                // direto do estado evita depender dessa corrida.
-                `/sign-in?redirect_url=${encodeURIComponent(
-                  `${pathname}?${new URLSearchParams({
-                    ...(date ? { date } : {}),
-                    slot: selectedSlot.startsAt,
-                  }).toString()}`,
-                )}`
-              : undefined
-          }
+          signInHref={isAuthLoaded && !userId ? signInUrl() : undefined}
         />
       ) : null}
     </div>
