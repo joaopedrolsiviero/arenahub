@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
 import { useRouter, useSearchParams, usePathname } from 'next/navigation';
 import { useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '@clerk/nextjs';
@@ -155,7 +156,15 @@ export function CourtBooking({ arenaId, courtId }: { arenaId: string; courtId: s
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-8 sm:px-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p className="text-sm text-muted-foreground">{arena.name}</p>
+          {/* Fase 33, item 3/17 — antes era texto puro: quem escolheu a
+              quadra errada só voltava pelo botão do navegador. Uma arena com
+              mais de uma quadra precisa de um jeito óbvio de comparar. */}
+          <Link
+            href={`/arenas/${arena.slug}`}
+            className="text-sm text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+          >
+            {arena.name}
+          </Link>
           <h1 className="font-heading text-2xl font-bold tracking-tight">{court.name}</h1>
         </div>
         <div className="flex items-baseline gap-1.5 rounded-xl bg-brand/10 px-3 py-2">

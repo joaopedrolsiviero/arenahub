@@ -52,6 +52,33 @@ describe('OperatingHoursService', () => {
     });
   });
 
+  // Fase 33 — usado por `ArenasService.discoverAll` pra expor `isReady` na
+  // listagem pública sem N+1 (uma consulta pra todas as arenas de uma vez).
+  describe('hasAnyForArenas', () => {
+    it('retorna um Set só com os ids que têm pelo menos um horário configurado', async () => {
+      prisma.arenaOperatingHours.findMany.mockResolvedValue([
+        { arenaId: 'arena-1' },
+        { arenaId: 'arena-3' },
+      ]);
+
+      const result = await service.hasAnyForArenas(['arena-1', 'arena-2', 'arena-3']);
+
+      expect(result).toEqual(new Set(['arena-1', 'arena-3']));
+      expect(prisma.arenaOperatingHours.findMany).toHaveBeenCalledWith({
+        where: { arenaId: { in: ['arena-1', 'arena-2', 'arena-3'] } },
+        select: { arenaId: true },
+        distinct: ['arenaId'],
+      });
+    });
+
+    it('retorna um Set vazio sem consultar o banco quando a lista de ids está vazia', async () => {
+      const result = await service.hasAnyForArenas([]);
+
+      expect(result).toEqual(new Set());
+      expect(prisma.arenaOperatingHours.findMany).not.toHaveBeenCalled();
+    });
+  });
+
   describe('replaceForArena', () => {
     it('valida, apaga e recria dentro da mesma transação', async () => {
       tx.arenaOperatingHours.findMany.mockResolvedValue([

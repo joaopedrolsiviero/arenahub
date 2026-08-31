@@ -14,7 +14,7 @@ describe('ArenasService', () => {
     arenaMember: { findMany: jest.Mock };
   };
   let arenaMembersService: { listMembers: jest.Mock };
-  let operatingHoursService: { hasAnyForArena: jest.Mock };
+  let operatingHoursService: { hasAnyForArena: jest.Mock; hasAnyForArenas: jest.Mock };
   let usersService: { findByClerkId: jest.Mock };
   let service: ArenasService;
 
@@ -31,7 +31,10 @@ describe('ArenasService', () => {
       arenaMember: { findMany: jest.fn() },
     };
     arenaMembersService = { listMembers: jest.fn() };
-    operatingHoursService = { hasAnyForArena: jest.fn().mockResolvedValue(false) };
+    operatingHoursService = {
+      hasAnyForArena: jest.fn().mockResolvedValue(false),
+      hasAnyForArenas: jest.fn().mockResolvedValue(new Set()),
+    };
     usersService = { findByClerkId: jest.fn().mockResolvedValue({ id: 'user-internal-1' }) };
 
     service = new ArenasService(
@@ -200,9 +203,13 @@ describe('ArenasService', () => {
           name: 'Arena Central',
           slug: 'arena-central',
           description: null,
-          courts: [{ sport: Sport.BEACH_VOLLEYBALL }, { sport: Sport.BEACH_VOLLEYBALL }],
+          courts: [
+            { sport: Sport.BEACH_VOLLEYBALL, pricePerSlot: new Prisma.Decimal(50) },
+            { sport: Sport.BEACH_VOLLEYBALL, pricePerSlot: new Prisma.Decimal(50) },
+          ],
         },
       ]);
+      operatingHoursService.hasAnyForArenas.mockResolvedValue(new Set(['arena-1']));
 
       const result = await service.discoverAll();
 
@@ -213,12 +220,69 @@ describe('ArenasService', () => {
           slug: 'arena-central',
           description: null,
           sports: [Sport.BEACH_VOLLEYBALL],
+          isReady: true,
         },
       ]);
       const [[call]] = prisma.arena.findMany.mock.calls as [
         [{ select: { courts: { where: { isActive: boolean } } } }],
       ];
       expect(call.select.courts.where).toEqual({ isActive: true });
+    });
+
+    // Fase 33 — a listagem pública passou a expor `isReady` (item 2 do
+    // prompt da fase: o visitante precisa saber ANTES de clicar se a arena
+    // já aceita reservas). Mesma regra de `discoverByWhere`/
+    // `computeSetupStatus`: preço zerado nunca conta, e falta de horário
+    // configurado também deixa a arena não-pronta mesmo com preço válido.
+    it('Fase 33: isReady=false quando não há quadra com preço válido, mesmo com horários configurados', async () => {
+      prisma.arena.findMany.mockResolvedValue([
+        {
+          id: 'arena-1',
+          name: 'Arena Central',
+          slug: 'arena-central',
+          description: null,
+          courts: [{ sport: Sport.BEACH_VOLLEYBALL, pricePerSlot: new Prisma.Decimal(0) }],
+        },
+      ]);
+      operatingHoursService.hasAnyForArenas.mockResolvedValue(new Set(['arena-1']));
+
+      const result = await service.discoverAll();
+
+      expect(result[0]?.isReady).toBe(false);
+    });
+
+    it('Fase 33: isReady=false quando há quadra com preço válido mas nenhum horário configurado', async () => {
+      prisma.arena.findMany.mockResolvedValue([
+        {
+          id: 'arena-1',
+          name: 'Arena Central',
+          slug: 'arena-central',
+          description: null,
+          courts: [{ sport: Sport.BEACH_VOLLEYBALL, pricePerSlot: new Prisma.Decimal(50) }],
+        },
+      ]);
+      operatingHoursService.hasAnyForArenas.mockResolvedValue(new Set());
+
+      const result = await service.discoverAll();
+
+      expect(result[0]?.isReady).toBe(false);
+    });
+
+    it('Fase 33: nunca faz N+1 — hasAnyForArenas é chamado uma única vez, com todas as arenas de uma vez', async () => {
+      prisma.arena.findMany.mockResolvedValue([
+        { id: 'arena-1', name: 'A', slug: 'a', description: null, courts: [] },
+        { id: 'arena-2', name: 'B', slug: 'b', description: null, courts: [] },
+        { id: 'arena-3', name: 'C', slug: 'c', description: null, courts: [] },
+      ]);
+
+      await service.discoverAll();
+
+      expect(operatingHoursService.hasAnyForArenas).toHaveBeenCalledTimes(1);
+      expect(operatingHoursService.hasAnyForArenas).toHaveBeenCalledWith([
+        'arena-1',
+        'arena-2',
+        'arena-3',
+      ]);
     });
   });
 

@@ -88,6 +88,18 @@ describe('CourtBookingPage — fluxo de confirmação de reserva', () => {
     mockedUseCreateBooking.mockReturnValue({ mutateAsync, isPending: false });
   });
 
+  // Fase 33, item 3/17 — quem escolheu a quadra errada precisa de um jeito
+  // óbvio de voltar pra arena (comparar outras quadras), não só o botão do
+  // navegador.
+  it('Fase 33: nome da arena é um link de volta pra /arenas/{slug}', async () => {
+    renderPage();
+
+    expect(await screen.findByRole('link', { name: 'Arena Central' })).toHaveAttribute(
+      'href',
+      '/arenas/arena-central',
+    );
+  });
+
   it('exibe o resumo com Idempotency-Key estável ao selecionar um horário e confirma', async () => {
     mutateAsync.mockResolvedValue({ id: 'booking-1' });
     renderPage();

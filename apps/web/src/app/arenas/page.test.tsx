@@ -49,6 +49,7 @@ describe('ArenasPage (discovery)', () => {
           slug: 'arena-central',
           description: null,
           sports: ['BEACH_VOLLEYBALL'],
+          isReady: true,
         },
       ],
       isPending: false,
@@ -61,5 +62,29 @@ describe('ArenasPage (discovery)', () => {
       'href',
       '/arenas/arena-central',
     );
+    // Fase 33 — pronta pra receber reservas: sem o selo "Em breve".
+    expect(screen.queryByText('Em breve')).not.toBeInTheDocument();
+  });
+
+  // Fase 33, item 2 — o visitante precisa saber ANTES de clicar se a arena
+  // já aceita reservas.
+  it('Fase 33: mostra "Em breve" numa arena ainda não pronta', () => {
+    mockedUseDiscoverArenas.mockReturnValue({
+      data: [
+        {
+          id: 'arena-1',
+          name: 'Arena Nova',
+          slug: 'arena-nova',
+          description: null,
+          sports: [],
+          isReady: false,
+        },
+      ],
+      isPending: false,
+      isError: false,
+    });
+    render(<ArenasPage />);
+
+    expect(screen.getByText('Em breve')).toBeInTheDocument();
   });
 });

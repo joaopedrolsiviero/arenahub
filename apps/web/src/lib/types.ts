@@ -19,6 +19,10 @@ export interface ArenaDiscoverySummary {
   slug: string;
   description: string | null;
   sports: Sport[];
+  // Fase 33 — mesmo booleano de ArenaDiscoveryDetail.isReady, agora também
+  // na listagem: o visitante sabe antes de clicar se a arena já aceita
+  // reservas.
+  isReady: boolean;
 }
 
 export interface CourtPublic {

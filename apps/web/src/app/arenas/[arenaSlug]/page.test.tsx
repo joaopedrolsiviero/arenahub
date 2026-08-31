@@ -60,6 +60,9 @@ describe('ArenaDetail (público)', () => {
       'href',
       '/arenas/arena-central/courts/court-1',
     );
+    // Fase 33 — pista explícita de clicabilidade (mesmo padrão de
+    // BookingCard/ArenaCard), com o próximo passo real da jornada.
+    expect(screen.getByText('Escolher horário')).toBeInTheDocument();
   });
 
   // Fase 28, item 16/Caso 11: cliente nunca é levado a uma jornada

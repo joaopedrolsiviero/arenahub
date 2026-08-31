@@ -41,6 +41,7 @@ interface DiscoverySummaryBody {
   id: string;
   name: string;
   sports: Sport[];
+  isReady: boolean;
   role?: unknown;
   members?: unknown;
 }
@@ -197,6 +198,17 @@ describe('Customer experience — discovery & minhas reservas (e2e)', () => {
       expect(found?.sports).toEqual([Sport.BEACH_VOLLEYBALL]);
       expect(found?.role).toBeUndefined();
       expect(found?.members).toBeUndefined();
+    });
+
+    // Fase 33 — o visitante precisa saber ANTES de clicar se a arena já
+    // aceita reservas (item 2 do prompt da fase); antes só dava pra
+    // descobrir depois de entrar na página da arena.
+    it('Fase 33: expõe isReady na listagem (quadra ativa com preço + horários configurados nesta fixture)', async () => {
+      const response = await request(app.getHttpServer()).get('/v1/arenas/discover').expect(200);
+
+      const arenas = response.body as DiscoverySummaryBody[];
+      const found = arenas.find((a) => a.id === arenaId);
+      expect(found?.isReady).toBe(true);
     });
   });
 

@@ -71,6 +71,11 @@ export interface ArenaDiscoverySummary {
   slug: string;
   description: string | null;
   sports: Sport[];
+  // Fase 33 — mesmo booleano final de `ArenaDiscoveryDetail.isReady`
+  // (nunca o checklist granular, que é informação do OWNER), agora também
+  // na listagem: sem isso, o visitante só descobria que uma arena ainda
+  // está em configuração DEPOIS de clicar nela.
+  isReady: boolean;
 }
 
 // Quadra como o cliente a vê — sem `arenaId`/`isActive` (implícito: só
@@ -199,14 +204,23 @@ export class ArenasService {
         name: true,
         slug: true,
         description: true,
-        courts: { where: { isActive: true }, select: { sport: true } },
+        courts: { where: { isActive: true }, select: { sport: true, pricePerSlot: true } },
       },
       orderBy: { createdAt: 'asc' },
     });
 
+    // Uma única consulta pra todas as arenas (nunca N+1) — mesma regra de
+    // `computeSetupStatus`/`discoverByWhere`: só conta "pronta" quem tem
+    // quadra ativa com preço válido E pelo menos um horário configurado.
+    const arenasWithHours = await this.operatingHoursService.hasAnyForArenas(
+      arenas.map((arena) => arena.id),
+    );
+
     return arenas.map(({ courts, ...fields }) => ({
       ...fields,
       sports: [...new Set(courts.map((court) => court.sport))],
+      isReady:
+        courts.some((court) => court.pricePerSlot.greaterThan(0)) && arenasWithHours.has(fields.id),
     }));
   }
 

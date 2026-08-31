@@ -54,6 +54,22 @@ export class OperatingHoursService {
     return row !== null;
   }
 
+  // Fase 33 — mesma pergunta de `hasAnyForArena`, mas pra uma LISTA de
+  // arenas de uma vez (usado por `ArenasService.discoverAll` pra expor
+  // `isReady` na listagem pública sem virar N+1 — uma consulta só,
+  // independente de quantas arenas existirem, nunca uma por arena).
+  async hasAnyForArenas(arenaIds: string[]): Promise<Set<string>> {
+    if (arenaIds.length === 0) {
+      return new Set();
+    }
+    const rows = await this.prisma.arenaOperatingHours.findMany({
+      where: { arenaId: { in: arenaIds } },
+      select: { arenaId: true },
+      distinct: ['arenaId'],
+    });
+    return new Set(rows.map((row) => row.arenaId));
+  }
+
   // Substituição atômica completa da semana (item 15-16 da Fase 5): valida
   // tudo antes de tocar o banco, depois apaga e recria dentro da mesma
   // transação — nunca deixa a configuração pela metade sob falha parcial.

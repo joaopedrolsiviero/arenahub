@@ -1,5 +1,14 @@
 import Link from 'next/link';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { ChevronRightIcon } from 'lucide-react';
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardFooter,
+} from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import type { ArenaDiscoverySummary } from '@/lib/types';
 
@@ -19,6 +28,16 @@ export function ArenaCard({ arena }: { arena: ArenaDiscoverySummary }) {
         <CardHeader>
           <CardTitle className="text-base">{arena.name}</CardTitle>
           {arena.description ? <CardDescription>{arena.description}</CardDescription> : null}
+          {/* Fase 33, item 2 — antes só dava pra descobrir que uma arena
+              ainda está em configuração DEPOIS de clicar nela; item 6 da
+              fase pede exatamente isso: "saber se está pronta pra receber
+              reservas" já na listagem. Só aparece quando falta — uma arena
+              pronta não precisa de nenhum selo extra. */}
+          {!arena.isReady ? (
+            <CardAction>
+              <Badge variant="secondary">Em breve</Badge>
+            </CardAction>
+          ) : null}
         </CardHeader>
         <CardContent className="flex flex-wrap items-center gap-1.5">
           {arena.sports.map((sport) => (
@@ -27,6 +46,13 @@ export function ArenaCard({ arena }: { arena: ArenaDiscoverySummary }) {
             </Badge>
           ))}
         </CardContent>
+        {/* Mesma pista de clicabilidade já usada em BookingCard (Fase 29) —
+            hover só existe em desktop, e num celular o card inteiro sendo
+            um link não era óbvio por si só. */}
+        <CardFooter className="justify-end gap-0.5 text-xs font-medium text-muted-foreground">
+          Ver quadras
+          <ChevronRightIcon className="size-3.5" aria-hidden="true" />
+        </CardFooter>
       </Card>
     </Link>
   );
