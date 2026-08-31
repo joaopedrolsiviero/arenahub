@@ -245,5 +245,78 @@ describe('WhatsAppService', () => {
       await expect(service.handleEvent(Buffer.from(textMessagePayload()))).resolves.toBeUndefined();
       expect(conversationService.handleInboundMessage).toHaveBeenCalledTimes(1);
     });
+
+    // Fase 34, item 5 — mensagens de tipo não suportado (imagem, áudio,
+    // documento, figurinha, localização, resposta de botão interativo etc.)
+    // são fora de escopo (item 27 da Fase 16: "não implementar voz/imagem")
+    // e precisam ser ignoradas silenciosamente, nunca travar o processamento
+    // do restante do evento nem chegar em `ConversationService` sem texto.
+    it('mensagem de tipo não suportado (imagem) é ignorada, nunca chega em ConversationService', async () => {
+      const imagePayload = JSON.stringify({
+        entry: [
+          {
+            changes: [
+              {
+                value: {
+                  metadata: { phone_number_id: '1000000000' },
+                  messages: [
+                    {
+                      from: '5511999998888',
+                      id: 'wamid.IMG1',
+                      timestamp: '1700000000',
+                      type: 'image',
+                      image: { id: 'media-id-123', mime_type: 'image/jpeg' },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      await expect(service.handleEvent(Buffer.from(imagePayload))).resolves.toBeUndefined();
+      expect(conversationService.handleInboundMessage).not.toHaveBeenCalled();
+    });
+
+    it('mensagem de texto sem "text.body" (payload malformado) é ignorada, nunca lança', async () => {
+      const malformedPayload = JSON.stringify({
+        entry: [
+          {
+            changes: [
+              {
+                value: {
+                  metadata: { phone_number_id: '1000000000' },
+                  messages: [
+                    {
+                      from: '5511999998888',
+                      id: 'wamid.MALFORMED1',
+                      timestamp: '1700000000',
+                      type: 'text',
+                      // "text" ausente — a Meta nunca deveria mandar isso pra
+                      // type: "text", mas o parser nunca deve assumir sem checar.
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      await expect(service.handleEvent(Buffer.from(malformedPayload))).resolves.toBeUndefined();
+      expect(conversationService.handleInboundMessage).not.toHaveBeenCalled();
+    });
+
+    // Fase 34, item 5 — "remetente desconhecido": `normalizePhoneE164`
+    // devolve `null` quando o campo `from` não contém nenhum dígito
+    // (defesa em profundidade — a Meta sempre entrega `wa_id` numérico na
+    // prática, mas o parser nunca deve confiar nisso sem checar, item 4).
+    it('remetente sem nenhum dígito (from malformado) é ignorado, nunca chega em ConversationService', async () => {
+      await expect(
+        service.handleEvent(Buffer.from(textMessagePayload({ from: 'remetente-invalido' }))),
+      ).resolves.toBeUndefined();
+      expect(conversationService.handleInboundMessage).not.toHaveBeenCalled();
+    });
   });
 });

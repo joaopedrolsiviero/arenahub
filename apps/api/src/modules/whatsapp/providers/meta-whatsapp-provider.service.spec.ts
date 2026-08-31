@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { MetaWhatsAppProviderService } from './meta-whatsapp-provider.service';
 import { WhatsAppProviderError } from './whatsapp-provider';
 
@@ -112,5 +113,38 @@ describe('MetaWhatsAppProviderService', () => {
     const service = makeService();
 
     await expect(service.sendMessage(message)).rejects.toBeInstanceOf(WhatsAppProviderError);
+  });
+
+  // Fase 34, item 21 — o Access Token da Meta nunca pode aparecer em
+  // nenhuma linha de log, em nenhum caminho (sucesso, 4xx, 5xx, timeout,
+  // erro de rede). Mesmo espírito do teste equivalente em
+  // `whatsapp.service.spec.ts` para o app secret/verify token do webhook.
+  it('nunca loga o access token, em nenhum resultado (sucesso, erro 4xx/5xx, timeout, erro de rede)', async () => {
+    const SECRET_TOKEN = 'EAA-super-secret-access-token';
+    const logSpy = jest.spyOn(Logger.prototype, 'log');
+    const warnSpy = jest.spyOn(Logger.prototype, 'warn');
+    const errorSpy = jest.spyOn(Logger.prototype, 'error');
+
+    process.env.WHATSAPP_ACCESS_TOKEN = SECRET_TOKEN;
+    const service = makeService();
+
+    fetchMock.mockResolvedValueOnce({ ok: true, status: 200 });
+    await service.sendMessage(message);
+
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 401 });
+    await service.sendMessage(message).catch(() => undefined);
+
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 500 });
+    await service.sendMessage(message).catch(() => undefined);
+
+    fetchMock.mockRejectedValueOnce(new Error('network down'));
+    await service.sendMessage(message).catch(() => undefined);
+
+    const allCalls = [...logSpy.mock.calls, ...warnSpy.mock.calls, ...errorSpy.mock.calls].flat();
+    expect(JSON.stringify(allCalls)).not.toContain(SECRET_TOKEN);
+
+    logSpy.mockRestore();
+    warnSpy.mockRestore();
+    errorSpy.mockRestore();
   });
 });

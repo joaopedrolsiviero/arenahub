@@ -458,6 +458,31 @@ describe('ConversationService', () => {
       expect(reply).toMatch(/reservado por outra pessoa|indisponível/i);
     });
 
+    // Fase 34, item 4 — distinto do teste acima: a quadra oferecida há
+    // pouco foi de fato EXCLUÍDA do banco entre a oferta e a escolha
+    // (`CourtsService.findOne` lança `NotFoundException`, não apenas
+    // `isActive: false`). O `catch` genérico em `handleSelectingCourt` trata
+    // os dois casos da mesma forma — este teste prova que o caminho de erro
+    // real (não só o de "desativada") também nunca trava a conversa.
+    it('SELECTING_COURT: quadra genuinamente inexistente (excluída) reseta a conversa, nunca lança', async () => {
+      prisma.whatsAppConversation.findUnique.mockResolvedValue(
+        conversation({
+          state: WhatsAppConversationState.SELECTING_COURT,
+          pendingDate: '2026-08-21',
+          pendingTime: '19:00',
+          pendingOptions: [
+            { courtId: 'court-excluida', name: 'Quadra Excluída', priceBRL: 'R$ 100,00' },
+          ],
+        }),
+      );
+      courtsService.findOne.mockRejectedValue(new Error('quadra não encontrada'));
+
+      const reply = await service.handleInboundMessage('arena-1', '+5511999998888', '1');
+
+      expect(reply).toMatch(/reservado por outra pessoa|indisponível/i);
+      expect(lastUpdateData().state).toBe(WhatsAppConversationState.IDLE);
+    });
+
     it('CONFIRMING_BOOKING + "sim": cria a reserva via BookingsService com Idempotency-Key = pendingActionId', async () => {
       prisma.whatsAppConversation.findUnique.mockResolvedValue(
         conversation({

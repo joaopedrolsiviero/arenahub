@@ -1,5 +1,5 @@
 import { WhatsAppIntentService } from './intent.service';
-import { AiProviderUnavailableError } from '../ai/providers/ai-provider';
+import { AiProviderUnavailableError, AiTimeoutError } from '../ai/providers/ai-provider';
 
 describe('WhatsAppIntentService', () => {
   let aiProvider: { generate: jest.Mock };
@@ -74,6 +74,18 @@ describe('WhatsAppIntentService', () => {
 
   it('provider indisponível (sem crédito/erro de rede) vira UNKNOWN, nunca lança', async () => {
     aiProvider.generate.mockRejectedValue(new AiProviderUnavailableError());
+
+    await expect(service.interpret('oi')).resolves.toEqual({ intent: 'UNKNOWN' });
+  });
+
+  // Fase 34, item 5 — timeout da OpenAI é um erro distinto de "provider
+  // indisponível" (ver `AiTimeoutError` em `ai-provider.ts`), mas
+  // `WhatsAppIntentService.interpret` captura qualquer erro genericamente:
+  // este teste confirma que o timeout degrada pro mesmo UNKNOWN seguro, sem
+  // depender de um `catch` específico por tipo de erro que poderia
+  // acidentalmente deixar passar uma exceção não tratada.
+  it('timeout da OpenAI vira UNKNOWN, nunca lança (distinto de indisponibilidade genérica)', async () => {
+    aiProvider.generate.mockRejectedValue(new AiTimeoutError());
 
     await expect(service.interpret('oi')).resolves.toEqual({ intent: 'UNKNOWN' });
   });
