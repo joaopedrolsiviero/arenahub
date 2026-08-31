@@ -2046,6 +2046,91 @@ puramente de frontend (um `Alert` de sucesso e um `<h2 className="sr-only">`).
 
 ---
 
+## 26. Fase 32 — Descoberta Pública, SEO e Página Pública da Arena (2026-08-30)
+
+### Objetivo
+Melhorar a área pública (descoberta, página da arena, página da quadra) só onde a auditoria
+mostrou lacuna real: SEO básico, compartilhamento, indexabilidade — sem virar marketplace, sem
+tocar Mercado Pago/`PaymentProvider`/webhook/refund/`BookingStatus`/`PaymentStatus`/RBAC.
+
+### Auditoria — matriz de achados
+| Área | Estado atual | Lacuna real | Ação |
+|---|---|---|---|
+| `GET /arenas/discover*` | Já excluía members/role/whatsapp; IDOR já protegido (`findFirst({id, arenaId})`) | Nenhuma | Nenhuma |
+| Modelo `Arena` | Já tem `slug` único, obrigatório, nunca usado em rota | URL pública usava ID técnico | Rota pública passou a usar o slug (decisão confirmada com o usuário antes de implementar) |
+| `layout.tsx` raiz | `lang="en"` num produto 100% em português; sem `metadataBase`, sem OG/Twitter padrão | Real, comprovado | Corrigido |
+| `/arenas`, `/arenas/[arenaId]`, `.../courts/[courtId]` | Sem nenhuma metadata própria (só o título genérico herdado do layout) | Real | `generateMetadata` dinâmica nas duas rotas com parâmetro; estática na listagem |
+| Sitemap/robots | Não existiam | Real | `app/sitemap.ts` + `app/robots.ts` (convenção de arquivo, sem dependência nova) |
+| Busca/filtro/ordenação em `/arenas` | Não existe | Só 2 arenas reais em produção hoje (smoke test da Fase 21) — não justifica | Não implementado |
+| Imagem Open Graph | Não existe nenhuma foto real de arena/quadra no modelo | Real, mas sem dado real pra usar | Não inventada (regra explícita da fase) |
+| Endereço/lat-long/fotos/comodidades da arena | Não existem no modelo | Lacuna de produto, não de código | Não criada — decisão de produto fora do escopo desta fase |
+
+### Decisão de produto confirmada com o usuário antes de implementar
+A fase pedia explicitamente pra parar antes de mudar a estrutura de URL. Perguntado, o usuário
+escolheu trocar a URL pública canônica de `/arenas/:id` pra `/arenas/:slug` (em vez de manter só
+o ID), com o requisito explícito de nunca quebrar um link já compartilhado. Detalhes técnicos da
+implementação em `docs/ARCHITECTURE.md`, Fase 32.
+
+### Testes automatizados (números exatos, após todas as mudanças)
+- Backend unit: **412/412** (era 410/410 — 2 casos novos de `discoverBySlug`, mesma implementação
+  compartilhada de `discoverOne`).
+- Backend e2e: **326/348** (era 324/346) — única falha continua exclusiva de
+  `invitation-flow.e2e-spec.ts`, pré-existente (reproduzida isolada, idêntica ao baseline). Os 2
+  casos novos: `GET /arenas/discover/slug/:slug` sem token (200) e slug inexistente (404).
+- Frontend unit: **167/167** (era 163/163) — 4 casos novos cobrindo
+  `resolveArenaBySlugOrLegacyId` (slug direto, id legado, não encontrado, erro não-404 nunca
+  escondido); 2 asserções de href atualizadas de ID pra slug (`arenas/page.test.tsx`,
+  `arenas/[arenaSlug]/page.test.tsx`) — comportamento intencionalmente mudado, não teste
+  "consertado pra passar".
+- Lint (backend e frontend): limpo (só o warning pré-existente de `<img>`). Typecheck (backend e
+  frontend): limpo. Build (backend e frontend): limpo — precisou de `export const dynamic =
+  'force-dynamic'` em `sitemap.ts` (ver Fase 32 em ARCHITECTURE.md) pra não tentar buscar do
+  backend durante o build estático.
+
+### Segurança
+Nenhuma rota privada foi tocada. `ArenaAccessGuard`, RBAC, Clerk e a proteção das rotas
+administrativas (`GET/PATCH /arenas/:arenaId`) reconfirmadas 401 sem token, idênticas a antes. O
+único endpoint novo (`GET /arenas/discover/slug/:slug`) segue exatamente o mesmo padrão de
+`discover/:arenaId` — sem guard (decisão da Fase 29), mesma projeção de campos, mesmo 404 sem
+vazar detalhe. Isolamento entre arenas testado: resolução de quadra continua sempre escopada por
+`{id: courtId, arenaId}`, nunca `courtId` sozinho (arquivo/regra não tocados nesta fase).
+
+### Teste manual real (ambiente local)
+- `/arenas/{slug}` → 200, `/arenas/{idAntigo}` → 308 pro slug (com `Location` correto),
+  `/arenas/{inexistente}` → 404 real (não só uma mensagem de UI). Mesmo padrão testado na rota da
+  quadra, incluindo preservação de `?date=&slot=` no redirect.
+- Metadata real inspecionada no HTML servido: `<title>`, description, canonical absoluto,
+  Open Graph completo (incluindo `og:site_name`/`og:locale` herdados do layout raiz),
+  `robots: noindex` correto numa arena existente mas ainda não pronta.
+- `sitemap.xml`/`robots.txt` inspecionados: sitemap só com `/`, `/arenas` e as arenas/quadras
+  `isReady: true` (as 2 arenas de smoke test sem quadra pronta ficaram de fora, corretamente);
+  robots bloqueando `/dashboard`, `/minhas-reservas`, `/sign-in`, `/sign-up`.
+- Jornada completa: `/arenas` → arena (link já com slug) → quadra (link já com slug) → horário →
+  resumo → link "Entrar para confirmar reserva" com `redirect_url` corretamente codificado
+  apontando pra URL com slug (preservando `date`/`slot`) — a preservação de contexto através do
+  login da Fase 29 continua funcionando sem nenhuma mudança de código nela, porque `pathname`
+  reflete a URL real automaticamente.
+- Endpoints administrativos (`GET /arenas`, `GET /arenas/:id`) reconfirmados 401 sem token.
+- Viewport mobile (375px) da página da quadra reinspecionada visualmente — idêntica à Fase 30/31,
+  sem regressão (nenhum código de layout foi tocado nesta fase).
+- **Não pôde ser testado ainda**: conclusão real de uma reserva (login completo + confirmação)
+  usando a nova URL com slug — exige uma sessão autenticada, que só está disponível em produção
+  (via sessão já logada do navegador real) ou com bootstrap manual de usuário local; fica pra
+  validação em produção, depois do deploy autorizado.
+
+### Pendências reais (nenhuma inventada)
+- **Commit/push/deploy desta fase — aguardando autorização explícita do usuário** (instrução
+  explícita: implementar e testar, mas não publicar sem confirmação separada).
+  Conclusão de uma reserva completa com a nova URL (login → confirmar) ainda não testada de
+  ponta a ponta — só validável com sessão autenticada real, prevista para a validação em produção
+  depois do deploy.
+- Sem foto real de arena/quadra no modelo — nenhuma imagem Open Graph foi criada (regra explícita
+  da fase: nunca inventar conteúdo/imagem sem dado real).
+- Endereço/localização, comodidades, formas de pagamento aceitas: não existem no modelo `Arena`
+  hoje — não criados (lacuna de produto, decisão fora do escopo desta fase).
+
+---
+
 ## Troubleshooting
 
 | Sintoma | Causa provável | Onde olhar |

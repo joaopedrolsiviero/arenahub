@@ -1,5 +1,5 @@
 import { render, screen } from '@testing-library/react';
-import { ArenaDetail } from './page';
+import { ArenaDetail } from './arena-detail';
 import { useDiscoverArena } from '../../../hooks/use-api';
 
 jest.mock('../../../hooks/use-api', () => ({
@@ -53,9 +53,12 @@ describe('ArenaDetail (público)', () => {
 
     expect(screen.getByText('Arena Central')).toBeInTheDocument();
     expect(screen.getByText('A melhor arena da cidade')).toBeInTheDocument();
+    // Fase 32 — link da quadra usa o slug da arena (URL pública canônica),
+    // nunca o id técnico, mesmo a partir de um componente que só recebe
+    // `arenaId` como prop (o slug vem de dentro dos dados já carregados).
     expect(screen.getByRole('link', { name: /Quadra 1/ })).toHaveAttribute(
       'href',
-      '/arenas/arena-1/courts/court-1',
+      '/arenas/arena-central/courts/court-1',
     );
   });
 

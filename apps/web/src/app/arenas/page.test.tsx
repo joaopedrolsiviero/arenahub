@@ -56,9 +56,10 @@ describe('ArenasPage (discovery)', () => {
     });
     render(<ArenasPage />);
 
+    // Fase 32 — URL pública canônica usa o slug da arena, nunca o id técnico.
     expect(screen.getByRole('link', { name: /Arena Central/ })).toHaveAttribute(
       'href',
-      '/arenas/arena-1',
+      '/arenas/arena-central',
     );
   });
 });

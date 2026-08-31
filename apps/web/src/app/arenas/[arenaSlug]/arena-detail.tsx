@@ -1,9 +1,7 @@
 'use client';
 
-import { use } from 'react';
 import { useDiscoverArena } from '@/hooks/use-api';
 import { CourtCard } from '@/components/court-card';
-import { SiteHeader } from '@/components/site-header';
 import { LoadingState, ErrorState, EmptyState } from '@/components/async-state';
 import { ApiError } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
@@ -12,6 +10,12 @@ const SPORT_LABEL: Record<string, string> = {
   BEACH_VOLLEYBALL: 'Vôlei de praia',
 };
 
+// Fase 32 — extraído de page.tsx: continua sendo o mesmo componente cliente
+// de sempre (mesmos hooks/estado), só passou a receber `arenaId` já
+// resolvido pela rota (que agora aceita :arenaSlug), em vez de ler o
+// parâmetro direto da URL — page.tsx precisou virar Server Component pra
+// poder ter generateMetadata (obrigatório pela própria API do Next: metadata
+// só é suportada em Server Components).
 export function ArenaDetail({ arenaId }: { arenaId: string }) {
   const { data: arena, isPending, isError, error } = useDiscoverArena(arenaId);
   const notFound = error instanceof ApiError && error.status === 404;
@@ -57,7 +61,7 @@ export function ArenaDetail({ arenaId }: { arenaId: string }) {
             ) : (
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 {arena.courts.map((court) => (
-                  <CourtCard key={court.id} arenaId={arena.id} court={court} />
+                  <CourtCard key={court.id} arenaSlug={arena.slug} court={court} />
                 ))}
               </div>
             )}
@@ -65,21 +69,5 @@ export function ArenaDetail({ arenaId }: { arenaId: string }) {
         </>
       ) : null}
     </div>
-  );
-}
-
-// Fase 29 — sem RequireAuth: um visitante sem conta precisa conseguir ver a
-// arena antes de autenticar (login só é exigido pra criar a Booking).
-export default function ArenaDetailPage({
-  params,
-}: {
-  params: Promise<{ arenaId: string }>;
-}) {
-  const { arenaId } = use(params);
-  return (
-    <>
-      <SiteHeader />
-      <ArenaDetail arenaId={arenaId} />
-    </>
   );
 }

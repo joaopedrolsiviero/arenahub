@@ -3042,6 +3042,58 @@ testar em cada uma — mas a definição geral vale para todas.
 - **Critério de conclusão:** ver relatório da fase para os números reais de teste e as
   validações em produção.
 
+### Fase 32 — Descoberta Pública, SEO e Página Pública da Arena
+- **Objetivo:** auditoria e melhoria só onde havia lacuna real na área pública (descoberta,
+  página da arena, página da quadra) — SEO básico, compartilhamento, indexabilidade — sem virar
+  marketplace nem tocar pagamentos/Booking/refund/RBAC.
+- **Decisão arquitetural real desta fase — URL pública canônica passa de `/arenas/:id` para
+  `/arenas/:slug`** (`Arena.slug` já existia no schema desde a Fase 3, único e obrigatório na
+  criação, nunca tinha rota própria até aqui). Decisão tomada em conjunto com o usuário antes de
+  implementar (regra explícita da fase: mudança de estrutura de URL exige confirmação) — a opção
+  escolhida foi trocar de verdade, preservando links antigos via redirect, em vez de manter só o
+  ID.
+  - Backend: novo endpoint público `GET /arenas/discover/slug/:slug` (`ArenasService
+    .discoverBySlug`), mesma implementação de `discoverOne` por trás (refatorado num método
+    privado compartilhado, só a cláusula `where` muda) — mesmo shape de resposta, mesma ausência
+    de guard (decisão da Fase 29), nunca duas versões da mesma projeção. Endpoints de
+    disponibilidade/criação de Booking **não mudaram** — continuam recebendo o `arenaId` real,
+    resolvido uma vez na camada de rota do frontend.
+  - Frontend: `/arenas/[arenaId]` e `/arenas/[arenaId]/courts/[courtId]` viraram
+    `/arenas/[arenaSlug]/...`. Um único segmento dinâmico resolve TANTO o slug canônico QUANTO
+    um ID técnico antigo (`resolveArenaBySlugOrLegacyId` em `lib/resolve-arena.ts`): tenta por
+    slug primeiro (caminho feliz, uma requisição); se não bate, tenta pelo mesmo endpoint de
+    sempre por ID — se bater, é um link de antes da Fase 32, e a página responde com
+    `permanentRedirect` (308) pro slug, preservando courtId e query string (`date`/`slot`) no
+    caso da quadra; se nenhum dos dois bate, `notFound()` (404 real, não só uma mensagem de UI).
+    Nunca uma migration de dado — o slug já existia.
+  - `page.tsx` de ambas as rotas precisou virar Server Component (a API de metadata do Next só
+    funciona em Server Components) — a interatividade real (hooks, estado, mutations) continua
+    inteira nos componentes cliente extraídos (`arena-detail.tsx`, `court-booking.tsx`), sem
+    nenhuma mudança de comportamento nelas.
+- **SEO**: `generateMetadata` dinâmica nas duas rotas (título/descrição/OG/canonical a partir
+  SOMENTE de dados públicos reais — nome, descrição, preço, duração; nada inventado). Arena
+  encontrada mas ainda não pronta (`isReady: false`, mesmo booleano da Fase 28) recebe
+  `robots: noindex` — a página funciona, mas não há nada reservável nela ainda, então não vale
+  indexar um conteúdo que muda assim que o OWNER terminar de configurar. `metadataBase` (novo, no
+  layout raiz) resolve toda URL relativa de metadata pro domínio real de produção
+  (`lib/site-url.ts` — sem domínio próprio ainda, ver "Riscos técnicos" abaixo sobre o Clerk, o
+  próprio `.vercel.app` de produção é o domínio real hoje). `lang="en"` do `<html>` (nunca
+  corrigido desde o scaffold inicial, produto inteiro em português) virou `lang="pt-BR"`.
+- **Sitemap/robots**: `app/sitemap.ts` e `app/robots.ts` (convenção de arquivo do Next, sem nova
+  dependência). Sitemap inclui `/`, `/arenas` e só arenas/quadras com `isReady: true` (mesma regra
+  do `noindex` acima — nunca as duas fontes de verdade divergindo). `sitemap.ts` precisou de
+  `export const dynamic = 'force-dynamic'`: por padrão o Next tenta pré-renderizar esse arquivo no
+  build, e não há backend rodando durante `next build` (achado real, não hipotético — o build
+  quebrou na primeira tentativa com `ECONNREFUSED`). robots.txt bloqueia `/dashboard`,
+  `/minhas-reservas`, `/sign-in`, `/sign-up` — nunca a área pública.
+- **Busca/filtro/ordenação avaliados e descartados nesta fase**: produção tem hoje só 2 arenas
+  reais (as duas de smoke test da Fase 21) — não há dado suficiente pra justificar essa
+  funcionalidade agora; item explícito da fase era não implementar só porque parece interessante.
+- **Dependências:** Fase 3 (`Arena.slug`, nunca usado em rota até aqui), Fase 6/29 (descoberta
+  pública), Fase 28 (`isReady`).
+- **Critério de conclusão:** ver relatório da fase para os números reais de teste e as
+  validações em produção.
+
 ---
 
 ## Riscos técnicos identificados

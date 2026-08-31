@@ -235,6 +235,30 @@ describe('Customer experience — discovery & minhas reservas (e2e)', () => {
     });
   });
 
+  // Fase 32 — URL pública canônica passa a ser `/arenas/:slug`; este é o
+  // endpoint que a resolve. Mesmo shape de `discover/:arenaId`, então só
+  // cobrimos o que é específico da busca por slug (sem token, 404, e o
+  // mesmo isolamento de campos).
+  describe('GET /v1/arenas/discover/slug/:slug', () => {
+    it('retorna a arena pelo slug, sem token, com o mesmo formato de discover/:arenaId', async () => {
+      const response = await request(app.getHttpServer())
+        .get('/v1/arenas/discover/slug/arena-discovery-e2e')
+        .expect(200);
+
+      const body = response.body as DiscoveryDetailBody & { id: string };
+      expect(body.id).toBe(arenaId);
+      expect(body.timezone).toBe('America/Sao_Paulo');
+      expect(body.members).toBeUndefined();
+      expect(body.isReady).toBe(true);
+    });
+
+    it('404 para slug inexistente', async () => {
+      await request(app.getHttpServer())
+        .get('/v1/arenas/discover/slug/slug-que-nao-existe')
+        .expect(404);
+    });
+  });
+
   describe('GET /v1/users/me/bookings', () => {
     it('exige autenticação (401)', async () => {
       await request(app.getHttpServer()).get('/v1/users/me/bookings').expect(401);

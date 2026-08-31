@@ -329,6 +329,49 @@ describe('ArenasService', () => {
     });
   });
 
+  // Fase 32 — mesma implementação interna de `discoverOne` (só troca a
+  // cláusula `where`), então só cobrimos o que é realmente diferente: busca
+  // por `slug`, não por `id`, e o 404 correspondente.
+  describe('discoverBySlug', () => {
+    it('lança NotFoundException quando nenhuma arena tem esse slug', async () => {
+      prisma.arena.findUnique.mockResolvedValue(null);
+
+      await expect(service.discoverBySlug('slug-inexistente')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+
+    it('busca por slug (nunca por id) e retorna o mesmo formato de discoverOne', async () => {
+      const arena = {
+        id: 'arena-1',
+        name: 'Arena Central',
+        slug: 'arena-central',
+        description: null,
+        phone: null,
+        email: null,
+        timezone: 'America/Sao_Paulo',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        courts: [
+          {
+            id: 'court-1',
+            name: 'Quadra 1',
+            sport: Sport.BEACH_VOLLEYBALL,
+            pricePerSlot: new Prisma.Decimal(50),
+          },
+        ],
+      };
+      prisma.arena.findUnique.mockResolvedValue(arena);
+      operatingHoursService.hasAnyForArena.mockResolvedValue(true);
+
+      const result = await service.discoverBySlug('arena-central');
+
+      expect(result).toEqual({ ...arena, isReady: true });
+      const [[call]] = prisma.arena.findUnique.mock.calls as [[{ where: Record<string, unknown> }]];
+      expect(call.where).toEqual({ slug: 'arena-central' });
+    });
+  });
+
   describe('update', () => {
     it('atualiza os campos da arena', async () => {
       const updated = { id: 'arena-1', name: 'Novo nome' };

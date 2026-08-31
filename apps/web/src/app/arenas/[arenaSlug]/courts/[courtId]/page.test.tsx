@@ -1,7 +1,7 @@
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useAuth } from '@clerk/nextjs';
-import { CourtBooking } from './page';
+import { CourtBooking } from './court-booking';
 import { useDiscoverArena, useAvailability, useCreateBooking } from '../../../../../hooks/use-api';
 import { ApiError } from '../../../../../lib/api';
 

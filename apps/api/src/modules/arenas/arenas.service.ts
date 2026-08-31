@@ -211,8 +211,22 @@ export class ArenasService {
   }
 
   async discoverOne(arenaId: string): Promise<ArenaDiscoveryDetail> {
+    return this.discoverByWhere({ id: arenaId });
+  }
+
+  // Fase 32 — URL pública canônica passa a ser `/arenas/:slug` (item já
+  // existente no schema desde sempre, nunca usado como rota até aqui). Mesma
+  // forma de resposta de `discoverOne`, só muda a cláusula de busca — nunca
+  // duas implementações da mesma projeção/regra de `isReady`.
+  async discoverBySlug(slug: string): Promise<ArenaDiscoveryDetail> {
+    return this.discoverByWhere({ slug });
+  }
+
+  private async discoverByWhere(
+    where: Prisma.ArenaWhereUniqueInput,
+  ): Promise<ArenaDiscoveryDetail> {
     const arena = await this.prisma.arena.findUnique({
-      where: { id: arenaId },
+      where,
       select: {
         id: true,
         name: true,
@@ -246,7 +260,7 @@ export class ArenasService {
     // `courts` aqui já veio filtrado `isActive: true` no select acima —
     // basta checar preço, mesma regra de `computeSetupStatus` (sem
     // reimplementar o `.some(isActive && pricePerSlot>0)` duas vezes).
-    const hasOperatingHours = await this.operatingHoursService.hasAnyForArena(arenaId);
+    const hasOperatingHours = await this.operatingHoursService.hasAnyForArena(arena.id);
     const isReady =
       arena.courts.some((court) => court.pricePerSlot.greaterThan(0)) && hasOperatingHours;
 

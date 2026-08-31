@@ -9,7 +9,7 @@ const SPORT_LABEL: Record<string, string> = {
 
 export function ArenaCard({ arena }: { arena: ArenaDiscoverySummary }) {
   return (
-    <Link href={`/arenas/${arena.id}`} className="group block">
+    <Link href={`/arenas/${arena.slug}`} className="group block">
       <Card className="h-full transition-all group-hover:-translate-y-0.5 group-hover:shadow-[0_4px_20px_-6px_oklch(0.19_0.014_265_/_14%)]">
         <div className="flex aspect-[16/9] items-center justify-center overflow-hidden bg-gradient-to-br from-brand/25 via-brand/10 to-transparent">
           <span className="font-heading text-3xl font-bold tracking-tight text-foreground/15">

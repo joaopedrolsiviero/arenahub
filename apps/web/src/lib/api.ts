@@ -106,6 +106,14 @@ export const api = {
   discoverArena: (token: string | null, arenaId: string): Promise<ArenaDiscoveryDetail> =>
     request(`/arenas/discover/${arenaId}`, { token }),
 
+  // Fase 32 — URL pública canônica da arena. Mesma forma de resposta de
+  // `discoverArena`, usado tanto pelo componente cliente (`useDiscoverArena`
+  // continua resolvendo por id depois que a rota já resolveu o slug) quanto
+  // pela resolução de rota/metadata no servidor (mesma função `request`,
+  // isomórfica — `fetch` e `NEXT_PUBLIC_API_URL` funcionam nos dois lados).
+  discoverArenaBySlug: (slug: string): Promise<ArenaDiscoveryDetail> =>
+    request(`/arenas/discover/slug/${slug}`, { token: null }),
+
   getAvailability: (
     token: string | null,
     arenaId: string,

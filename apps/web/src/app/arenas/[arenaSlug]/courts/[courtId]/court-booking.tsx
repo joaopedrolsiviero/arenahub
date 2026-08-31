@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, use, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams, usePathname } from 'next/navigation';
 import { useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '@clerk/nextjs';
@@ -8,13 +8,19 @@ import { useDiscoverArena, useAvailability, useCreateBooking } from '@/hooks/use
 import { AvailabilityGrid } from '@/components/availability-grid';
 import { BookingSummaryCard } from '@/components/booking-summary-card';
 import { DashboardDateNav } from '@/components/dashboard-date-nav';
-import { SiteHeader } from '@/components/site-header';
 import { LoadingState, ErrorState, EmptyState } from '@/components/async-state';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { formatCurrencyBRL, localDayWindowToUtc, todayInZone } from '@/lib/format';
 import { ApiError } from '@/lib/api';
 import type { AvailabilitySlot } from '@/lib/types';
 
+// Fase 32 — extraído de page.tsx: continua sendo o mesmo componente cliente
+// de sempre (mesmos hooks/estado/lógica de reserva), só passou a receber
+// `arenaId` já resolvido pela rota (que agora aceita :arenaSlug), em vez de
+// ler o parâmetro direto da URL — page.tsx precisou virar Server Component
+// pra poder ter generateMetadata. `pathname` (usado em `signInHref` abaixo)
+// já reflete a URL real com o slug automaticamente, sem nenhuma mudança
+// aqui — nunca duas fontes de verdade pra mesma seleção.
 export function CourtBooking({ arenaId, courtId }: { arenaId: string; courtId: string }) {
   const router = useRouter();
   const pathname = usePathname();
@@ -214,24 +220,5 @@ export function CourtBooking({ arenaId, courtId }: { arenaId: string; courtId: s
         />
       ) : null}
     </div>
-  );
-}
-
-// Fase 29 — sem RequireAuth: um visitante sem conta precisa conseguir
-// escolher quadra/data/horário e ver o resumo antes de autenticar; login só
-// é exigido no passo de confirmar (ver `signInHref` em BookingSummaryCard).
-export default function CourtBookingPage({
-  params,
-}: {
-  params: Promise<{ arenaId: string; courtId: string }>;
-}) {
-  const { arenaId, courtId } = use(params);
-  return (
-    <>
-      <SiteHeader />
-      <Suspense fallback={<LoadingState label="Carregando quadra…" />}>
-        <CourtBooking arenaId={arenaId} courtId={courtId} />
-      </Suspense>
-    </>
   );
 }

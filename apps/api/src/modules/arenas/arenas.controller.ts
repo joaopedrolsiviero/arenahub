@@ -56,6 +56,17 @@ export class ArenasController {
     return this.arenasService.discoverOne(arenaId);
   }
 
+  // Fase 32 — URL pública canônica da arena passa a ser `/arenas/:slug`
+  // (`slug` já existia no schema, nunca tinha rota própria). Mesmo shape de
+  // resposta de `discoverOne`, sem guard (mesma decisão da Fase 29: leitura
+  // pública). Segmento extra (`slug/`) evita qualquer ambiguidade com
+  // `discover/:arenaId` acima — contagem de segmentos diferente, nunca
+  // colide na resolução de rota do Nest.
+  @Get('discover/slug/:slug')
+  discoverBySlug(@Param('slug') slug: string): Promise<ArenaDiscoveryDetail> {
+    return this.arenasService.discoverBySlug(slug);
+  }
+
   @Get(':arenaId')
   @UseGuards(ClerkAuthGuard, ArenaAccessGuard)
   @RequireArenaRole()
