@@ -56,11 +56,20 @@ export default function Home() {
             sem ligar pra ninguém.
           </p>
 
+          {/* Fase 35 — a descoberta pública (Fases 29/32/33) já não exige
+              login, mas a home não tinha nenhum caminho clicável até ela pra
+              quem está deslogado: só sobrava digitar /arenas na URL manualmente.
+              "Explorar arenas" vem primeiro (é a ação que não exige conta),
+              "Criar conta"/"Entrar" continuam disponíveis pra quem já quer se
+              identificar direto. */}
           <Show when="signed-out">
             <div className="flex flex-wrap gap-3">
-              <Link href="/sign-up" className={buttonVariants({ variant: 'default', size: 'lg' })}>
-                Criar conta
+              <Link href="/arenas" className={buttonVariants({ variant: 'default', size: 'lg' })}>
+                Explorar arenas
                 <ArrowRightIcon />
+              </Link>
+              <Link href="/sign-up" className={buttonVariants({ variant: 'outline', size: 'lg' })}>
+                Criar conta
               </Link>
               <Link href="/sign-in" className={buttonVariants({ variant: 'outline', size: 'lg' })}>
                 Entrar

@@ -31,4 +31,16 @@ describe('Home', () => {
       '/sign-up',
     );
   });
+
+  // Fase 35 — visitante sem conta precisa de um caminho clicável até a
+  // descoberta pública (Fases 29/32/33 já tornaram /arenas acessível sem
+  // login; só faltava um link até lá a partir da home).
+  it('shows a link to /arenas for a signed-out visitor, without requiring an account', () => {
+    render(<Home />);
+
+    expect(screen.getByRole('link', { name: 'Explorar arenas' })).toHaveAttribute(
+      'href',
+      '/arenas',
+    );
+  });
 });
