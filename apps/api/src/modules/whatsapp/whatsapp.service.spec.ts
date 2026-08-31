@@ -1,5 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { ForbiddenException } from '@nestjs/common';
+import { ForbiddenException, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { WhatsAppService } from './whatsapp.service';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -141,6 +141,30 @@ describe('WhatsAppService', () => {
       delete process.env.WHATSAPP_APP_SECRET;
       const body = textMessagePayload();
       expect(service.verifySignature(Buffer.from(body), signBody(body))).toBe(false);
+    });
+
+    // Fase 34, item 21 — nenhuma linha de log pode conter o app secret nem o
+    // verify token, em nenhum dos dois caminhos (assinatura válida ou
+    // rejeitada). Espiona os três níveis do Logger do Nest de uma vez.
+    it('nunca loga o app secret nem o verify token, mesmo quando a assinatura é rejeitada', () => {
+      const logSpy = jest.spyOn(Logger.prototype, 'log');
+      const warnSpy = jest.spyOn(Logger.prototype, 'warn');
+      const errorSpy = jest.spyOn(Logger.prototype, 'error');
+
+      const body = textMessagePayload();
+      service.verifySignature(Buffer.from(body), 'sha256=' + '0'.repeat(64));
+      service.verifySignature(Buffer.from(body), signBody(body));
+      expect(() => service.verifyHandshake('subscribe', 'token-errado', '12345')).toThrow();
+      service.verifyHandshake('subscribe', VERIFY_TOKEN, '12345');
+
+      const allCalls = [...logSpy.mock.calls, ...warnSpy.mock.calls, ...errorSpy.mock.calls].flat();
+      const serialized = JSON.stringify(allCalls);
+      expect(serialized).not.toContain(APP_SECRET);
+      expect(serialized).not.toContain(VERIFY_TOKEN);
+
+      logSpy.mockRestore();
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
     });
   });
 

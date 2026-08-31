@@ -726,16 +726,48 @@ persistente real fica para quando o volume de uso justificar). A superfície pú
 verificação de assinatura (só a Meta consegue produzir um POST aceito) e pela deduplicação de
 eventos — não por limite de taxa.
 
-**Sem integração real validada nesta fase**: não há credenciais reais da Meta neste ambiente
-(`WHATSAPP_ACCESS_TOKEN`/`WHATSAPP_APP_SECRET`/`WHATSAPP_VERIFY_TOKEN` de produção). Toda a
-implementação foi desenvolvida e testada (unitário e e2e contra Postgres real) usando
-`FakeWhatsAppProvider` (nunca chega a fazer uma requisição HTTP real) e o mesmo `FakeAiProvider` já
-usado pela Fase 12 — o formato das chamadas ao Graph API segue a documentação pública da Cloud API,
-mas **não foi exercitado contra a Meta de verdade**. Antes de ativar o canal em produção: criar um
-app WhatsApp Business no Meta for Developers, configurar o webhook apontando pra
-`https://<sua-api>/v1/webhooks/whatsapp`, gerar um token de acesso permanente (System User), e
-validar manualmente o fluxo completo com um número de teste — não fingir que essa validação já
-aconteceu.
+**Sem integração real validada até a Fase 16**: não havia credenciais reais da Meta naquele
+ambiente. Toda a implementação foi desenvolvida e testada (unitário e e2e contra Postgres real)
+usando `FakeWhatsAppProvider`/`FakeAiProvider` — nunca uma requisição HTTP real.
+
+#### Atualização — Fase 34 (2026-08-30/31): auditoria, não reconstrução
+
+A Fase 34 partiu do princípio (equivocado) de que a integração com a Meta ainda precisava ser
+construída do zero. A auditoria obrigatória da fase encontrou o oposto: **o `WhatsAppModule` da
+Fase 16 já implementava praticamente todo o escopo pedido** — webhook `GET`/`POST` reais,
+verificação de assinatura, idempotência em duas camadas, `MetaWhatsAppProviderService` (adapter
+real via `fetch`, nunca um stub em produção — só os testes trocam por um fake), e todo o fluxo de
+conversa (disponibilidade, criação de reserva, cancelamento) já reaproveitando literalmente
+`BookingsService`/`AvailabilityService`/`IdempotencyService`. Confirmado com o usuário antes de
+prosseguir: **nada dessa lógica foi removido, simplificado ou substituído** — desativar um sistema
+já testado só porque um prompt de fase presumia que ele não existia seria trabalho perdido, não
+progresso.
+
+O trabalho real desta fase foi:
+
+1. **Verificação contra a documentação oficial atual da Meta** (2026): confirmado que a versão da
+   Graph API já usada (`v21.0`) continua sendo a versão estável vigente; confirmados os nomes exatos
+   dos parâmetros do handshake (`hub.mode`/`hub.verify_token`/`hub.challenge`), o header de
+   assinatura (`X-Hub-Signature-256`, HMAC-SHA256) e o formato do endpoint de envio
+   (`https://graph.facebook.com/{version}/{phone-number-id}/messages`) — tudo já implementado
+   corretamente, nada precisou mudar.
+2. **Cobertura de teste que faltava, adicionada**: não existia um spec dedicado pro adapter real
+   (`meta-whatsapp-provider.service.spec.ts`, novo — sucesso, 4xx, 5xx, timeout via fake timers, erro
+   de rede, token nunca no corpo da requisição, só no header `Authorization`) nem um teste explícito
+   de que o app secret/verify token nunca aparecem em nenhuma linha de log (`whatsapp.service.spec.ts`,
+   novo teste espionando os três níveis do `Logger`). O restante do checklist de testes da fase
+   (webhook GET/POST, assinatura, idempotência, concorrência real, isolamento multi-tenant, defesa de
+   prompt injection) já existia desde a Fase 16, em `whatsapp.e2e-spec.ts` (618 linhas) e nos specs de
+   `conversation.service`/`intent.service`/`nlp.util`.
+3. **Nenhuma migration, nenhuma mudança de schema** — `WhatsAppConversation`/`WhatsAppEvent`
+   continuam exatamente como a Fase 16 os deixou.
+
+**Ainda sem integração real validada com a Meta** (mesma situação de antes, só documentada com mais
+precisão): a ativação real — criar o app WhatsApp Business, gerar um token de acesso permanente
+(System User), configurar o webhook no painel da Meta apontando pra
+`https://<sua-api>/v1/webhooks/whatsapp`, configurar os secrets no Railway — é ação manual que só o
+usuário pode realizar (mesmo padrão já usado pra ativar o Mercado Pago nas Fases 23-25). Ver
+relatório da Fase 34 para o que foi efetivamente validado.
 
 ### Pagamentos (Fase 17) — gateway, webhook, idempotência e limitações
 
