@@ -30,6 +30,7 @@ describe('Bookings — concorrência real (e2e)', () => {
   let arenaId: string;
   let courtOneId: string;
   let courtTwoId: string;
+  let courtBatchId: string;
 
   beforeAll(async () => {
     prisma = new PrismaClient();
@@ -49,6 +50,20 @@ describe('Bookings — concorrência real (e2e)', () => {
     });
     courtOneId = courtOne.id;
     courtTwoId = courtTwo.id;
+    // Quadra dedicada aos testes de múltiplos horários abaixo: preço e
+    // duração explícitos (pra verificar o total somado) e bufferMinutes=0
+    // (pra slots consecutivos ficarem exatamente encostados, sem gap).
+    const courtBatch = await prisma.court.create({
+      data: {
+        arenaId,
+        name: 'Quadra Múltiplos Horários',
+        sport: Sport.BEACH_VOLLEYBALL,
+        pricePerSlot: 50,
+        slotDurationMinutes: 60,
+        bufferMinutes: 0,
+      },
+    });
+    courtBatchId = courtBatch.id;
 
     // Fase 5: Arena nasce fechada por padrão — aberta o dia inteiro em
     // todos os dias da semana aqui, já que este arquivo é sobre concorrência
@@ -86,7 +101,9 @@ describe('Bookings — concorrência real (e2e)', () => {
   });
 
   afterAll(async () => {
-    await prisma.booking.deleteMany({ where: { courtId: { in: [courtOneId, courtTwoId] } } });
+    await prisma.booking.deleteMany({
+      where: { courtId: { in: [courtOneId, courtTwoId, courtBatchId] } },
+    });
     await prisma.arena.deleteMany({ where: { id: arenaId } });
     await prisma.user.deleteMany({ where: { clerkId: { in: Object.values(TOKENS) } } });
     await prisma.$disconnect();
@@ -208,5 +225,107 @@ describe('Bookings — concorrência real (e2e)', () => {
 
     const finalBooking = await prisma.booking.findUniqueOrThrow({ where: { id: bookingId } });
     expect(finalBooking.status).toBe('CANCELLED');
+  });
+
+  // Fase "Melhorias no fluxo de reserva": seleção de múltiplos horários numa
+  // única ação de reserva. Provas contra o Postgres real (não mock) de que a
+  // atomicidade continua garantida pelo MESMO mecanismo de sempre — o
+  // `prisma.$transaction` do `IdempotencyService.execute` — sem nenhum
+  // mecanismo novo.
+  describe('Múltiplos horários numa única reserva (real, contra Postgres)', () => {
+    function createBatch(idempotencyKey: string, startsAt: string, additionalStartTimes: string[]) {
+      return request(app.getHttpServer())
+        .post(`/v1/arenas/${arenaId}/courts/${courtBatchId}/bookings`)
+        .set(...authHeader('token-a'))
+        .set('Idempotency-Key', idempotencyKey)
+        .send({ startsAt, additionalStartTimes });
+    }
+
+    it('horários consecutivos: cria UM único Booking cobrindo o intervalo inteiro, com o total somado', async () => {
+      const response = await createBatch('multi-consecutive-1', '2027-05-01T09:00:00-03:00', [
+        '2027-05-01T10:00:00-03:00',
+        '2027-05-01T11:00:00-03:00',
+      ]).expect(201);
+
+      const bookings = response.body as {
+        id: string;
+        startsAt: string;
+        endsAt: string;
+        total: string;
+      }[];
+      expect(bookings).toHaveLength(1);
+      expect(bookings[0]).toMatchObject({
+        startsAt: '2027-05-01T12:00:00.000Z', // 09:00 -03:00
+        endsAt: '2027-05-01T15:00:00.000Z', // 3 slots de 60min -> 12:00
+      });
+      expect(Number(bookings[0]!.total)).toBe(150); // 50 x 3 slots
+
+      const count = await prisma.booking.count({
+        where: { courtId: courtBatchId, startsAt: new Date('2027-05-01T09:00:00-03:00') },
+      });
+      expect(count).toBe(1);
+    });
+
+    it('horários NÃO consecutivos: cria dois Bookings distintos, na mesma requisição/transação', async () => {
+      const response = await createBatch('multi-gap-1', '2027-05-02T09:00:00-03:00', [
+        '2027-05-02T14:00:00-03:00', // longe do primeiro — trecho separado
+      ]).expect(201);
+
+      const bookings = response.body as { id: string }[];
+      expect(bookings).toHaveLength(2);
+
+      const count = await prisma.booking.count({
+        where: {
+          courtId: courtBatchId,
+          startsAt: {
+            in: [new Date('2027-05-02T09:00:00-03:00'), new Date('2027-05-02T14:00:00-03:00')],
+          },
+        },
+      });
+      expect(count).toBe(2);
+    });
+
+    it('atomicidade real: conflito em UM dos horários do lote reverte o lote INTEIRO — nenhum Booking sobrevive', async () => {
+      // Reserva prévia ocupando 11:00-12:00, no meio do lote que será tentado.
+      await createBatch('multi-atomic-setup', '2027-05-03T11:00:00-03:00', []).expect(201);
+
+      const response = await createBatch('multi-atomic-attempt', '2027-05-03T09:00:00-03:00', [
+        '2027-05-03T10:00:00-03:00', // livre
+        '2027-05-03T11:00:00-03:00', // conflita com a reserva prévia
+      ]).expect(409);
+      expect(response.status).toBe(409);
+
+      // Nem 09:00 nem 10:00 (que sozinhos seriam válidos) foram persistidos —
+      // o rollback do Postgres desfez a transação inteira, não só o trecho
+      // que conflitou.
+      const survivors = await prisma.booking.count({
+        where: {
+          courtId: courtBatchId,
+          startsAt: {
+            in: [new Date('2027-05-03T09:00:00-03:00'), new Date('2027-05-03T10:00:00-03:00')],
+          },
+        },
+      });
+      expect(survivors).toBe(0);
+    });
+
+    it('idempotência de um lote multi-horário: replay da mesma chave não duplica nenhum Booking', async () => {
+      const first = await createBatch('multi-idem-1', '2027-05-04T09:00:00-03:00', [
+        '2027-05-04T10:00:00-03:00',
+      ]).expect(201);
+      const firstIds = (first.body as { id: string }[]).map((b) => b.id).sort();
+
+      const replay = await createBatch('multi-idem-1', '2027-05-04T09:00:00-03:00', [
+        '2027-05-04T10:00:00-03:00',
+      ]).expect(201);
+      const replayIds = (replay.body as { id: string }[]).map((b) => b.id).sort();
+
+      expect(replayIds).toEqual(firstIds);
+
+      const count = await prisma.booking.count({
+        where: { courtId: courtBatchId, startsAt: new Date('2027-05-04T09:00:00-03:00') },
+      });
+      expect(count).toBe(1);
+    });
   });
 });

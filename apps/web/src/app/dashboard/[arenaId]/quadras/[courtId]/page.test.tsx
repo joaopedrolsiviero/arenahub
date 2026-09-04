@@ -76,6 +76,7 @@ describe('CourtEditor', () => {
           pricePerSlot: 75,
           slotDurationMinutes: 60,
           bufferMinutes: 0,
+          imageUrl: '',
         },
       }),
     );
@@ -83,6 +84,39 @@ describe('CourtEditor', () => {
     // só voltava de "Salvando…" pra "Salvar", indistinguível de nada ter
     // acontecido (item 6 do prompt da fase).
     expect(await screen.findByText('Quadra atualizada')).toBeInTheDocument();
+  });
+
+  // Fase "melhorias no fluxo de reserva" — item 1: foto da quadra editável
+  // pelo mesmo formulário de sempre, como uma URL colada (nunca upload).
+  it('mostra a URL da foto atual e salva uma nova', async () => {
+    mockedUseCourt.mockReturnValue({
+      data: { ...court, imageUrl: 'https://example.com/quadra.jpg' },
+      isPending: false,
+      isError: false,
+    });
+    mutateAsync.mockResolvedValue({ ...court, imageUrl: 'https://example.com/nova.jpg' });
+    render(<CourtEditor arenaId="arena-1" courtId="court-1" />);
+
+    expect(screen.getByLabelText('URL da foto')).toHaveValue('https://example.com/quadra.jpg');
+
+    fireEvent.change(screen.getByLabelText('URL da foto'), {
+      target: { value: 'https://example.com/nova.jpg' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^salvar$/i }));
+
+    await waitFor(() =>
+      expect(mutateAsync).toHaveBeenCalledWith({
+        courtId: 'court-1',
+        dto: expect.objectContaining({ imageUrl: 'https://example.com/nova.jpg' }),
+      }),
+    );
+  });
+
+  it('campo de foto em branco quando a quadra não tem nenhuma cadastrada', () => {
+    mockedUseCourt.mockReturnValue({ data: court, isPending: false, isError: false });
+    render(<CourtEditor arenaId="arena-1" courtId="court-1" />);
+
+    expect(screen.getByLabelText('URL da foto')).toHaveValue('');
   });
 
   it('alterna quadra ativa/inativa', async () => {

@@ -27,7 +27,7 @@ export function CourtBooking({ arenaId, courtId }: { arenaId: string; courtId: s
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const dateParam = searchParams.get('date');
-  const slotParam = searchParams.get('slot');
+  const slotParam = searchParams.get('slots');
   const { userId, isLoaded: isAuthLoaded } = useAuth();
 
   const { data: arena, isPending: isArenaPending, isError: isArenaError } = useDiscoverArena(arenaId);
@@ -56,59 +56,82 @@ export function CourtBooking({ arenaId, courtId }: { arenaId: string; courtId: s
     isError: isAvailabilityError,
   } = useAvailability(arenaId, courtId, window?.from, window?.to);
 
-  const [selectedSlot, setSelectedSlot] = useState<AvailabilitySlot | null>(null);
+  // Fase "múltiplos horários": um Set de `startsAt` (não mais um único
+  // slot) — o cliente pode escolher vários horários (ex: 09:00+10:00+11:00)
+  // numa única ação de reserva. O backend decide se viram um Booking
+  // contínuo ou vários separados (ver BookingsService.createCustomerBookingBatch);
+  // aqui só importa QUAIS horários foram escolhidos.
+  const [selectedStartTimes, setSelectedStartTimes] = useState<Set<string>>(new Set());
   const [idempotencyKey, setIdempotencyKey] = useState<string | null>(null);
   const [conflictMessage, setConflictMessage] = useState<string | null>(null);
 
-  function updateSlotParam(slot: AvailabilitySlot | null) {
+  // Slots selecionados, sempre ordenados por horário — derivado de
+  // `availability` + `selectedStartTimes`, nunca guardado como estado
+  // próprio (uma única fonte de verdade, a mesma prevenção de divergência
+  // já usada no restante do arquivo).
+  const selectedSlots = useMemo(() => {
+    if (!availability) return [];
+    return availability.slots
+      .filter((slot) => selectedStartTimes.has(slot.startsAt))
+      .sort((a, b) => a.startsAt.localeCompare(b.startsAt));
+  }, [availability, selectedStartTimes]);
+
+  function updateSlotsParam(startTimes: Set<string>) {
     const params = new URLSearchParams(searchParams.toString());
-    if (slot) {
-      params.set('slot', slot.startsAt);
+    if (startTimes.size > 0) {
+      params.set('slots', [...startTimes].sort().join(','));
     } else {
-      params.delete('slot');
+      params.delete('slots');
     }
     router.replace(`?${params.toString()}`);
   }
 
   // Chave de idempotência estável para a MESMA tentativa lógica (mesmo
-  // horário selecionado) — só troca quando a seleção muda, nunca a cada
-  // clique/retry (item 25-27). A seleção também vai pra URL (item novo da
-  // Fase 29): um visitante sem conta que escolhe um horário e é mandado pro
-  // login volta pra cá com a MESMA seleção, sem precisar escolher de novo.
-  function handleSelectSlot(slot: AvailabilitySlot) {
+  // CONJUNTO de horários selecionados) — só troca quando a seleção muda,
+  // nunca a cada clique/retry (item 25-27). A seleção também vai pra URL
+  // (item novo da Fase 29): um visitante sem conta que escolhe horários e é
+  // mandado pro login volta pra cá com a MESMA seleção, sem escolher de novo.
+  function handleToggleSlot(slot: AvailabilitySlot) {
     setConflictMessage(null);
-    if (selectedSlot?.startsAt === slot.startsAt) {
-      setSelectedSlot(null);
-      setIdempotencyKey(null);
-      updateSlotParam(null);
-      return;
-    }
-    setSelectedSlot(slot);
+    setSelectedStartTimes((current) => {
+      const next = new Set(current);
+      if (next.has(slot.startsAt)) {
+        next.delete(slot.startsAt);
+      } else {
+        next.add(slot.startsAt);
+      }
+      updateSlotsParam(next);
+      return next;
+    });
     setIdempotencyKey(crypto.randomUUID());
-    updateSlotParam(slot);
   }
 
   function handleDateChange(value: string) {
-    setSelectedSlot(null);
+    setSelectedStartTimes(new Set());
     setIdempotencyKey(null);
     setConflictMessage(null);
     const params = new URLSearchParams(searchParams.toString());
     params.set('date', value);
-    params.delete('slot');
+    params.delete('slots');
     router.replace(`?${params.toString()}`);
   }
 
   // Restaura a seleção a partir da URL (Fase 29) — cobre exatamente o caso
-  // de ida-e-volta pelo login: `arenaId`/`courtId`/`date`/`slot` nunca saem
+  // de ida-e-volta pelo login: `arenaId`/`courtId`/`date`/`slots` nunca saem
   // da URL, então nunca dependem de estado local que o redirect apagaria.
   // Ajuste de estado DURANTE o render (nunca num useEffect) — padrão
   // recomendado pelo React pra "derivar estado de um valor que mudou": a
-  // guarda `!selectedSlot` já impede loop (falsa a partir do próprio
-  // re-render que a chamada de setState dispara).
-  if (availability && !selectedSlot && slotParam) {
-    const match = availability.slots.find((slot) => slot.startsAt === slotParam && slot.available);
-    if (match) {
-      setSelectedSlot(match);
+  // guarda `selectedStartTimes.size === 0` já impede loop (falsa a partir do
+  // próprio re-render que a chamada de setState dispara).
+  if (availability && selectedStartTimes.size === 0 && slotParam) {
+    const requested = new Set(slotParam.split(','));
+    const matched = new Set(
+      availability.slots
+        .filter((slot) => requested.has(slot.startsAt) && slot.available)
+        .map((slot) => slot.startsAt),
+    );
+    if (matched.size > 0) {
+      setSelectedStartTimes(matched);
       setIdempotencyKey(crypto.randomUUID());
     }
   }
@@ -116,10 +139,10 @@ export function CourtBooking({ arenaId, courtId }: { arenaId: string; courtId: s
   const createBooking = useCreateBooking(arenaId, courtId);
   const queryClient = useQueryClient();
 
-  // Fase 35, item 16 — construído a partir de `date`/`selectedSlot` (estado
+  // Fase 35, item 16 — construído a partir de `date`/`selectedSlots` (estado
   // local já confirmado), nunca de `searchParams`, pelo mesmo motivo do
-  // `signInHref` abaixo: o `router.replace` de `updateSlotParam` é
-  // assíncrono, então a URL do navegador só reflete o `slot` mais recente
+  // `signInHref` abaixo: o `router.replace` de `updateSlotsParam` é
+  // assíncrono, então a URL do navegador só reflete a seleção mais recente
   // depois de um re-render. Reaproveitado tanto pro link "Entrar para
   // confirmar reserva" quanto pelo tratamento de sessão expirada em
   // `handleConfirm` — nunca duas fórmulas divergentes pra mesma URL.
@@ -127,27 +150,50 @@ export function CourtBooking({ arenaId, courtId }: { arenaId: string; courtId: s
     return `/sign-in?redirect_url=${encodeURIComponent(
       `${pathname}?${new URLSearchParams({
         ...(date ? { date } : {}),
-        ...(selectedSlot ? { slot: selectedSlot.startsAt } : {}),
+        ...(selectedSlots.length > 0
+          ? { slots: selectedSlots.map((slot) => slot.startsAt).join(',') }
+          : {}),
       }).toString()}`,
     )}`;
   }
 
   async function handleConfirm() {
-    if (!selectedSlot || !idempotencyKey) return;
+    if (selectedSlots.length === 0 || !idempotencyKey) return;
     setConflictMessage(null);
     try {
+      const [first, ...rest] = selectedSlots;
       const booking = await createBooking.mutateAsync({
-        startsAt: selectedSlot.startsAt,
+        startsAt: first!.startsAt,
+        additionalStartTimes: rest.map((slot) => slot.startsAt),
         idempotencyKey,
       });
-      router.push(`/minhas-reservas/${booking.id}?created=true`);
+      // Múltiplos horários podem virar mais de um Booking (trechos não
+      // consecutivos, ver BookingsService.createCustomerBookingBatch) — a
+      // tela de detalhe só mostra uma reserva por vez, então navegamos pra
+      // primeira (cronologicamente); as demais continuam acessíveis em
+      // "Minhas reservas".
+      const firstBooking = Array.isArray(booking) ? booking[0]! : booking;
+      router.push(`/minhas-reservas/${firstBooking.id}?created=true`);
     } catch (error) {
-      if (error instanceof ApiError && error.status === 409) {
-        setConflictMessage('Esse horário não está mais disponível. Escolha outro horário.');
-        setSelectedSlot(null);
-        // A chave é reaproveitada só para retries do MESMO horário; como o
-        // horário mudou (ficou indisponível), a próxima tentativa é uma
-        // nova tentativa lógica.
+      // 409 (conflito de horário) e 400 (BookingsService.assertNotPast — um
+      // horário selecionado já começou entre a seleção e a confirmação,
+      // item "bloqueio de horários passados") recebem o MESMO tratamento:
+      // o backend é sempre a autoridade final, então em ambos os casos a
+      // seleção não é mais válida e a grade precisa refletir isso, nunca só
+      // o texto do erro cru.
+      if (error instanceof ApiError && (error.status === 409 || error.status === 400)) {
+        setConflictMessage(
+          error.status === 400
+            ? 'Um dos horários selecionados já passou. Escolha novamente.'
+            : selectedSlots.length > 1
+              ? 'Um ou mais horários selecionados não estão mais disponíveis. Escolha outros horários.'
+              : 'Esse horário não está mais disponível. Escolha outro horário.',
+        );
+        setSelectedStartTimes(new Set());
+        updateSlotsParam(new Set());
+        // A chave é reaproveitada só para retries da MESMA seleção; como a
+        // seleção ficou indisponível, a próxima tentativa é uma nova
+        // tentativa lógica.
         setIdempotencyKey(null);
         // Força a grade a refletir o estado real (item 20/39-42) — o backend
         // continua sendo a única autoridade sobre disponibilidade.
@@ -217,20 +263,27 @@ export function CourtBooking({ arenaId, courtId }: { arenaId: string; courtId: s
 
       {availability && availability.slots.length > 0 ? (
         <div className="flex flex-col gap-2.5">
-          <p className="text-sm font-semibold">Horários disponíveis</p>
+          <p className="text-sm font-semibold">
+            Horários disponíveis
+            {/* Fase "múltiplos horários" — dica curta de que dá pra escolher
+                mais de um, sem precisar de um tutorial/onboarding próprio. */}
+            <span className="ml-1.5 font-normal text-muted-foreground">
+              (selecione um ou mais)
+            </span>
+          </p>
           <AvailabilityGrid
             slots={availability.slots}
             timezone={availability.timezone}
-            selectedStartsAt={selectedSlot?.startsAt ?? null}
-            onSelect={handleSelectSlot}
+            selectedStartTimes={selectedStartTimes}
+            onToggle={handleToggleSlot}
           />
         </div>
       ) : null}
 
-      {selectedSlot && availability ? (
+      {selectedSlots.length > 0 && availability ? (
         <BookingSummaryCard
           court={court}
-          slot={selectedSlot}
+          slots={selectedSlots}
           timezone={availability.timezone}
           isSubmitting={createBooking.isPending}
           onConfirm={handleConfirm}

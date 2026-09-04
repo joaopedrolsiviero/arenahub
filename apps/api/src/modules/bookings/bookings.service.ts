@@ -5,7 +5,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { ArenaRole, BookingStatus, BookingType, Prisma, Sport } from '@prisma/client';
+import { ArenaRole, BookingStatus, BookingType, PaymentMode, Prisma, Sport } from '@prisma/client';
 import type { Booking, Court } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CourtsService } from '../courts/courts.service';
@@ -57,7 +57,16 @@ export interface MyBooking {
     id: string;
     name: string;
     sport: Sport;
-    arena: { id: string; name: string; slug: string; timezone: string };
+    arena: {
+      id: string;
+      name: string;
+      slug: string;
+      timezone: string;
+      // Fase de melhorias no fluxo de reserva — o cliente (e o
+      // PaymentsService, que reaproveita esta mesma consulta) precisam
+      // saber se esta arena usa pagamento online ou presencial.
+      paymentMode: PaymentMode;
+    };
   };
 }
 
@@ -122,6 +131,7 @@ export class BookingsService {
     dto: CreateCustomerBookingDto,
   ): Promise<Booking> {
     const startsAt = new Date(dto.startsAt);
+    this.assertNotPast(startsAt);
     return this.createBooking(tx, arenaId, courtId, {
       type: BookingType.CUSTOMER,
       userId,
@@ -134,6 +144,91 @@ export class BookingsService {
       // Court.pricePerSlot nunca afetam Bookings já criados.
       computeTotal: (court) => court.pricePerSlot,
     });
+  }
+
+  /**
+   * Seleção de múltiplos horários numa única reserva. Decisão de
+   * representação (documentada no relatório da fase): horários
+   * CONSECUTIVOS (ex: 09:00+10:00+11:00, com slots de 60min) viram um
+   * único `Booking` contínuo de 09:00 até 12:00 — reaproveita o modelo
+   * existente (um intervalo `startsAt`/`endsAt`) exatamente como ele já
+   * representa uma reserva de 1 slot, sem nenhuma abstração nova.
+   * Horários NÃO consecutivos (ex: 09:00 + 11:00, pulando 10:00) viram
+   * Bookings SEPARADOS — um único Booking não pode representar dois
+   * intervalos disjuntos sem também ocupar (incorretamente) o intervalo
+   * entre eles.
+   *
+   * Atomicidade (item explícito do prompt): todos os Bookings desta
+   * chamada são criados dentro da MESMA `tx` recebida de
+   * `IdempotencyService.execute` — se qualquer horário do pedido não
+   * puder ser reservado (conflito, fora do funcionamento, já passou), o
+   * método correspondente de `createBooking` lança, a exceção propaga
+   * daqui pra fora, e o Postgres reverte a transação inteira (inclusive
+   * Bookings de runs anteriores já inseridos nesta mesma chamada) — nunca
+   * uma reserva parcial. Nenhum mecanismo novo de atomicidade: é o mesmo
+   * rollback de transação que já protege a criação de um único Booking.
+   */
+  async createCustomerBookingBatch(
+    tx: Prisma.TransactionClient,
+    arenaId: string,
+    courtId: string,
+    userId: string,
+    startTimes: string[],
+  ): Promise<Booking[]> {
+    // findOne (fora da tx) só pra saber a duração do slot e agrupar os
+    // horários — leitura informativa, nunca a autoridade: cada run ainda
+    // passa pela validação completa (lock, horário de funcionamento,
+    // conflito) dentro de `createBooking`, sob a `tx`.
+    const court = await this.courtsService.findOne(arenaId, courtId);
+    const slotMs = court.slotDurationMinutes * 60_000;
+
+    const starts = [...new Set(startTimes)]
+      .map((iso) => new Date(iso))
+      .sort((a, b) => a.getTime() - b.getTime());
+    for (const start of starts) {
+      this.assertNotPast(start);
+    }
+
+    const runs: Date[][] = [];
+    for (const start of starts) {
+      const lastRun = runs.at(-1);
+      const lastStart = lastRun?.at(-1);
+      if (lastStart && start.getTime() === lastStart.getTime() + slotMs) {
+        lastRun!.push(start);
+      } else {
+        runs.push([start]);
+      }
+    }
+
+    const bookings: Booking[] = [];
+    for (const run of runs) {
+      const runStart = run[0]!;
+      const slotCount = run.length;
+      bookings.push(
+        await this.createBooking(tx, arenaId, courtId, {
+          type: BookingType.CUSTOMER,
+          userId,
+          startsAt: runStart,
+          reason: null,
+          respectsOperatingHours: true,
+          computeEndsAt: (c) => addMinutes(runStart, c.slotDurationMinutes * slotCount),
+          computeBuffer: (c) => c.bufferMinutes,
+          computeTotal: (c) => c.pricePerSlot.times(slotCount),
+        }),
+      );
+    }
+    return bookings;
+  }
+
+  // Item 3 do prompt da fase: "um horário que já começou não pode ser
+  // selecionado". Mesmo espírito (e mesma comparação `<=`) do bloqueio de
+  // cancelamento já existente (`cancel`, mais abaixo) — nunca confia só na
+  // UI, que já filtra isso via AvailabilityService, mas um cliente
+  // poderia chamar este endpoint direto.
+  private assertNotPast(startsAt: Date): void {
+    if (startsAt.getTime() <= Date.now()) {
+      throw new BadRequestException('Não é possível reservar um horário que já passou.');
+    }
   }
 
   async createBlock(
@@ -228,7 +323,9 @@ export class BookingsService {
         id: true,
         name: true,
         sport: true,
-        arena: { select: { id: true, name: true, slug: true, timezone: true } },
+        arena: {
+          select: { id: true, name: true, slug: true, timezone: true, paymentMode: true },
+        },
       },
     },
   } satisfies Prisma.BookingSelect;

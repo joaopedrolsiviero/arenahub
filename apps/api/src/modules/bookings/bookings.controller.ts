@@ -61,17 +61,25 @@ export class BookingsController {
   @Throttle({ default: { limit: 100, ttl: 60_000 } })
   @Post()
   @HttpCode(HttpStatus.CREATED)
+  // Item "seleção de múltiplos horários": quando `additionalStartTimes` vem
+  // vazio/ausente (todo chamador existente — inclusive WhatsApp via
+  // ConversationService, que nunca preenche esse campo), o retorno
+  // continua sendo um único `Booking`, exatamente como antes desta fase.
+  // Só quando o cliente pede mais de um horário o retorno vira um array —
+  // documentado no relatório da fase, decisão deliberada pra nunca quebrar
+  // o contrato de quem já espera um objeto único.
   async createCustomer(
     @CurrentUser() authUser: AuthenticatedUser,
     @Param('arenaId') arenaId: string,
     @Param('courtId') courtId: string,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Body() dto: CreateCustomerBookingDto,
-  ): Promise<Booking> {
+  ): Promise<Booking | Booking[]> {
     this.assertIdempotencyKey(idempotencyKey);
     const user = await this.usersService.findByClerkId(authUser.clerkId);
+    const additionalStartTimes = dto.additionalStartTimes ?? [];
 
-    const result = await this.idempotencyService.execute<Booking>(
+    const result = await this.idempotencyService.execute<Booking | Booking[]>(
       {
         userId: user.id,
         endpoint: 'bookings.customer.create',
@@ -79,6 +87,16 @@ export class BookingsController {
         payload: { arenaId, courtId, ...dto },
       },
       async (tx) => {
+        if (additionalStartTimes.length > 0) {
+          const bookings = await this.bookingsService.createCustomerBookingBatch(
+            tx,
+            arenaId,
+            courtId,
+            user.id,
+            [dto.startsAt, ...additionalStartTimes],
+          );
+          return { status: HttpStatus.CREATED, body: bookings };
+        }
         const booking = await this.bookingsService.createCustomerBooking(
           tx,
           arenaId,

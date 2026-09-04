@@ -38,7 +38,13 @@ const booking = {
     id: 'court-1',
     name: 'Quadra 1',
     sport: 'BEACH_VOLLEYBALL',
-    arena: { id: 'arena-1', name: 'Arena Central', slug: 'arena-central', timezone: 'America/Sao_Paulo' },
+    arena: {
+      id: 'arena-1',
+      name: 'Arena Central',
+      slug: 'arena-central',
+      timezone: 'America/Sao_Paulo',
+      paymentMode: 'ONLINE',
+    },
   },
 };
 
@@ -335,6 +341,36 @@ describe('BookingDetail', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Pagar com PIX' }));
 
       expect(await screen.findByText('Esta reserva já está paga.')).toBeInTheDocument();
+    });
+  });
+
+  // Fase "melhorias no fluxo de reserva", item 5 — arena com pagamento
+  // presencial: nunca oferece "Pagar com PIX" nem a mensagem de "ainda não
+  // foi paga" (que implicaria pagamento online pendente).
+  describe('Seção de pagamento — arena com paymentMode IN_PERSON', () => {
+    const inPersonBooking = {
+      ...booking,
+      court: { ...booking.court, arena: { ...booking.court.arena, paymentMode: 'IN_PERSON' } },
+    };
+
+    it('mostra a explicação de pagamento presencial, nunca "Pagar com PIX"', () => {
+      mockedUseMyBooking.mockReturnValue({ data: inPersonBooking, isPending: false, isError: false });
+      mockedUseBookingPayment.mockReturnValue({ data: null, isPending: false, isError: false });
+
+      render(<BookingDetail bookingId="booking-1" />);
+
+      expect(screen.getByText(/pagamento presencial/i)).toBeInTheDocument();
+      expect(screen.queryByText('Esta reserva ainda não foi paga.')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /pagar/i })).not.toBeInTheDocument();
+    });
+
+    it('nunca chama a mutation de criar pagamento (não há botão pra isso)', () => {
+      mockedUseMyBooking.mockReturnValue({ data: inPersonBooking, isPending: false, isError: false });
+      mockedUseBookingPayment.mockReturnValue({ data: null, isPending: false, isError: false });
+
+      render(<BookingDetail bookingId="booking-1" />);
+
+      expect(createPaymentMutateAsync).not.toHaveBeenCalled();
     });
   });
 });

@@ -51,6 +51,118 @@ function asBookingBody(response: request.Response): BookingBody {
   return response.body as BookingBody;
 }
 
+// Correção do bug temporal conhecido: as datas fixas originais deste
+// arquivo (2026-08-20 em diante) ficaram no passado conforme o tempo real
+// avançou, e `BookingsService.assertNotPast()` (Fase "melhorias no fluxo de
+// reserva") passou a rejeitar qualquer `startsAt` já passado — o que
+// derrubou boa parte dos testes abaixo. A correção é usar datas SEMPRE
+// relativas a `Date.now()` no momento em que a suíte roda, nunca mais uma
+// data fixa — assim o arquivo nunca mais fica obsoleto, não importa quanto
+// tempo passe.
+//
+// América/São_Paulo não observa mais horário de verão desde o Decreto
+// 10.166/2019 — o offset -03:00 é constante o ano inteiro, então soma de
+// dias em UTC sobre um Y-M-D "pensado como calendário local" é suficiente
+// (nenhuma biblioteca de timezone é necessária aqui).
+const MS_PER_DAY = 86_400_000;
+// Margem generosa e arbitrária — só precisa ser "claramente no futuro" no
+// momento em que a suíte roda; 60 dias evita qualquer proximidade com o
+// bloqueio de horários passados sem se aproximar de nenhum limite prático.
+const DAYS_IN_FUTURE = 60;
+
+function addDaysUtc(base: Date, days: number): Date {
+  return new Date(base.getTime() + days * MS_PER_DAY);
+}
+
+function ymd(date: Date): { yyyy: number; mm: string; dd: string } {
+  return {
+    yyyy: date.getUTCFullYear(),
+    mm: String(date.getUTCMonth() + 1).padStart(2, '0'),
+    dd: String(date.getUTCDate()).padStart(2, '0'),
+  };
+}
+
+// Meia-noite UTC de hoje — só usada para navegar por dias de calendário,
+// nunca como um instante real.
+const TODAY = new Date();
+TODAY.setUTCHours(0, 0, 0, 0);
+// Âncora dinâmica de todas as datas deste arquivo que NÃO dependem de um
+// dia da semana específico — cada bloco de teste usa um dia próprio (só
+// pra nunca colidir com o Booking de outro bloco na mesma quadra), exatamente
+// como as datas fixas originais faziam entre si.
+const BASE_DAY = addDaysUtc(TODAY, DAYS_IN_FUTURE);
+
+// `time` no formato "HH:mm:ss". Devolve a data local da arena (-03:00) no
+// dia `BASE_DAY + offsetDays`.
+function d(offsetDays: number, time: string): string {
+  const { yyyy, mm, dd } = ymd(addDaysUtc(BASE_DAY, offsetDays));
+  return `${yyyy}-${mm}-${dd}T${time}-03:00`;
+}
+
+// Mesmo instante de `d(offsetDays, time)`, mas como a resposta UTC
+// ("...Z") que a API devolve — usado só nas asserções que comparam o corpo
+// da resposta contra um valor exato (a conversão -03:00 -> UTC é uma soma
+// fixa de 3 horas, já que o offset nunca muda).
+function dUtc(offsetDays: number, time: string): string {
+  const { yyyy, mm, dd } = ymd(addDaysUtc(BASE_DAY, offsetDays));
+  const [hh, min, ss] = time.split(':').map(Number);
+  return new Date(Date.UTC(yyyy, Number(mm) - 1, Number(dd), hh! + 3, min, ss)).toISOString();
+}
+
+// Offsets nomeados (em dias a partir de `BASE_DAY`) — cada um corresponde
+// exatamente ao dia calendário fixo que o teste original usava, só que
+// agora relativo a `BASE_DAY` em vez de a um ano/mês/dia fixo. A ORDEM e o
+// ESPAÇAMENTO entre eles são preservados fielmente; o valor numérico em si
+// nunca importou, só que cada bloco tivesse um dia exclusivo na mesma
+// quadra.
+const DAY = {
+  main1: 0, // era 2026-08-20
+  main2: 1, // era 2026-08-21
+  listWindowEnd: 2, // era 2026-08-22 (fim exclusivo da janela de listagem)
+  boundary1: 3, // era 2026-08-23
+  boundary2: 4, // era 2026-08-24
+  boundary3: 5, // era 2026-08-25
+  bufferBlock: 6, // era 2026-08-26
+  bufferCustomer: 7, // era 2026-08-27
+  inactiveCourt: 8, // era 2026-08-28
+  crossTenant: 9, // era 2026-08-29
+  crossTenantAdminWindowEnd: 10, // era 2026-08-30 (fim exclusivo; a janela só verifica 403, nunca dado real)
+  // "Ano seguinte" no arquivo original — a intenção nunca foi "ano que vem"
+  // especificamente, era só garantir um dia isolado, bem longe de qualquer
+  // outro bloco desta mesma quadra.
+  cancelFlow: 400,
+  fase13MassAssignment: 14, // era 2026-09-03
+  fase13BlockAndMaintenance: 15, // era 2026-09-04 (dois horários distintos no mesmo dia, como no original)
+  fase13OwnerCancel: 16, // era 2026-09-05
+} as const;
+
+// isoWeekday: 1 = segunda-feira ... 7 = domingo (mesma convenção ISO) —
+// calculado em cima do dia da semana em UTC do Y-M-D já pensado como
+// calendário local, nunca de um instante real.
+function nextIsoWeekday(from: Date, isoWeekday: number): Date {
+  let candidate = from;
+  while (((candidate.getUTCDay() + 6) % 7) + 1 !== isoWeekday) {
+    candidate = addDaysUtc(candidate, 1);
+  }
+  return candidate;
+}
+
+// A "Arena de horário de funcionamento" (describe próprio, abaixo) precisa
+// de um dia que seja REALMENTE segunda-feira (a config de horário é por dia
+// da semana) — nunca um offset numérico fixo, que cairia num dia da semana
+// diferente dependendo de quando a suíte roda. Terça e quarta são
+// literalmente o dia seguinte/dois dias depois, preservando a mesma relação
+// sequencial que "2026-08-31 (seg) / 09-01 (ter) / 09-02 (qua)" tinha no
+// arquivo original.
+const HOURS_MONDAY = nextIsoWeekday(BASE_DAY, 1);
+const HOURS_TUESDAY = addDaysUtc(HOURS_MONDAY, 1);
+const HOURS_WEDNESDAY = addDaysUtc(HOURS_MONDAY, 2);
+
+function dh(date: Date, time: string): string {
+  const { yyyy, mm, dd } = ymd(date);
+  return `${yyyy}-${mm}-${dd}T${time}-03:00`;
+}
+
 describe('Bookings & Availability (e2e)', () => {
   let app: INestApplication<App>;
   let prisma: PrismaClient;
@@ -140,7 +252,7 @@ describe('Bookings & Availability (e2e)', () => {
       await request(app.getHttpServer())
         .post(bookingsUrl())
         .set(...authHeader('token-customer'))
-        .send({ startsAt: '2026-08-20T09:00:00-03:00' })
+        .send({ startsAt: d(DAY.main1, '09:00:00') })
         .expect(400);
     });
 
@@ -149,7 +261,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(bookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'idem-key-1')
-        .send({ startsAt: '2026-08-20T09:00:00-03:00' })
+        .send({ startsAt: d(DAY.main1, '09:00:00') })
         .expect(201);
 
       const booking = asBookingBody(response);
@@ -157,8 +269,8 @@ describe('Bookings & Availability (e2e)', () => {
         courtId,
         type: BookingType.CUSTOMER,
         status: BookingStatus.CONFIRMED,
-        startsAt: '2026-08-20T12:00:00.000Z', // 09:00 -03:00
-        endsAt: '2026-08-20T13:00:00.000Z',
+        startsAt: dUtc(DAY.main1, '09:00:00'),
+        endsAt: dUtc(DAY.main1, '10:00:00'),
       });
     });
 
@@ -167,11 +279,11 @@ describe('Bookings & Availability (e2e)', () => {
         .post(bookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'idem-key-1')
-        .send({ startsAt: '2026-08-20T09:00:00-03:00' })
+        .send({ startsAt: d(DAY.main1, '09:00:00') })
         .expect(201);
 
       const count = await prisma.booking.count({
-        where: { courtId, startsAt: new Date('2026-08-20T09:00:00-03:00') },
+        where: { courtId, startsAt: new Date(d(DAY.main1, '09:00:00')) },
       });
       expect(count).toBe(1);
       expect(asBookingBody(response).status).toBe(BookingStatus.CONFIRMED);
@@ -182,7 +294,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(bookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'idem-key-1')
-        .send({ startsAt: '2026-08-21T09:00:00-03:00' })
+        .send({ startsAt: d(DAY.main2, '09:00:00') })
         .expect(409);
     });
 
@@ -191,7 +303,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(bookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'idem-key-2')
-        .send({ startsAt: '2026-08-20T09:30:00-03:00' })
+        .send({ startsAt: d(DAY.main1, '09:30:00') })
         .expect(409);
     });
 
@@ -200,7 +312,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(bookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'idem-key-3')
-        .send({ startsAt: '2026-08-20T14:00:00-03:00', userId: 'outro-user', total: 0 })
+        .send({ startsAt: d(DAY.main1, '14:00:00'), userId: 'outro-user', total: 0 })
         .expect(400);
     });
   });
@@ -211,7 +323,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(`${bookingsUrl()}/blocks`)
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'idem-block-1')
-        .send({ startsAt: '2026-08-20T18:00:00-03:00', endsAt: '2026-08-20T20:00:00-03:00' })
+        .send({ startsAt: d(DAY.main1, '18:00:00'), endsAt: d(DAY.main1, '20:00:00') })
         .expect(403);
     });
 
@@ -221,8 +333,8 @@ describe('Bookings & Availability (e2e)', () => {
         .set(...authHeader('token-owner'))
         .set('Idempotency-Key', 'idem-block-1')
         .send({
-          startsAt: '2026-08-20T18:00:00-03:00',
-          endsAt: '2026-08-20T20:00:00-03:00',
+          startsAt: d(DAY.main1, '18:00:00'),
+          endsAt: d(DAY.main1, '20:00:00'),
           reason: 'Manutenção da rede',
         })
         .expect(201);
@@ -238,7 +350,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(`${bookingsUrl()}/maintenance`)
         .set(...authHeader('token-owner'))
         .set('Idempotency-Key', 'idem-maint-1')
-        .send({ startsAt: '2026-08-21T06:00:00-03:00', endsAt: '2026-08-21T07:00:00-03:00' })
+        .send({ startsAt: d(DAY.main2, '06:00:00'), endsAt: d(DAY.main2, '07:00:00') })
         .expect(201);
 
       expect(asBookingBody(response).type).toBe(BookingType.MAINTENANCE);
@@ -249,7 +361,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(bookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'idem-key-4')
-        .send({ startsAt: '2026-08-21T06:00:00-03:00' })
+        .send({ startsAt: d(DAY.main2, '06:00:00') })
         .expect(409);
     });
   });
@@ -258,7 +370,7 @@ describe('Bookings & Availability (e2e)', () => {
     it('listagem pública não expõe userId/reason/total', async () => {
       const response = await request(app.getHttpServer())
         .get(bookingsUrl())
-        .query({ from: '2026-08-20T00:00:00-03:00', to: '2026-08-22T00:00:00-03:00' })
+        .query({ from: d(DAY.main1, '00:00:00'), to: d(DAY.listWindowEnd, '00:00:00') })
         .set(...authHeader('token-customer'))
         .expect(200);
 
@@ -274,7 +386,7 @@ describe('Bookings & Availability (e2e)', () => {
     it('cliente comum não acessa a listagem administrativa (403)', async () => {
       await request(app.getHttpServer())
         .get(`${bookingsUrl()}/admin`)
-        .query({ from: '2026-08-20T00:00:00-03:00', to: '2026-08-22T00:00:00-03:00' })
+        .query({ from: d(DAY.main1, '00:00:00'), to: d(DAY.listWindowEnd, '00:00:00') })
         .set(...authHeader('token-customer'))
         .expect(403);
     });
@@ -282,7 +394,7 @@ describe('Bookings & Availability (e2e)', () => {
     it('OWNER acessa a listagem administrativa com dados do responsável', async () => {
       const response = await request(app.getHttpServer())
         .get(`${bookingsUrl()}/admin`)
-        .query({ from: '2026-08-20T00:00:00-03:00', to: '2026-08-22T00:00:00-03:00' })
+        .query({ from: d(DAY.main1, '00:00:00'), to: d(DAY.listWindowEnd, '00:00:00') })
         .set(...authHeader('token-owner'))
         .expect(200);
 
@@ -295,7 +407,7 @@ describe('Bookings & Availability (e2e)', () => {
     it('marca o slot ocupado pela reserva CUSTOMER como indisponível e um slot livre como disponível', async () => {
       const response = await request(app.getHttpServer())
         .get(`/v1/arenas/${arenaId}/courts/${courtId}/availability`)
-        .query({ from: '2026-08-20T09:00:00-03:00', to: '2026-08-20T12:00:00-03:00' })
+        .query({ from: d(DAY.main1, '09:00:00'), to: d(DAY.main1, '12:00:00') })
         .set(...authHeader('token-customer'))
         .expect(200);
 
@@ -316,7 +428,7 @@ describe('Bookings & Availability (e2e)', () => {
     it('Fase 29: funciona SEM token (visitante anônimo)', async () => {
       const response = await request(app.getHttpServer())
         .get(`/v1/arenas/${arenaId}/courts/${courtId}/availability`)
-        .query({ from: '2026-08-20T09:00:00-03:00', to: '2026-08-20T12:00:00-03:00' })
+        .query({ from: d(DAY.main1, '09:00:00'), to: d(DAY.main1, '12:00:00') })
         .expect(200);
 
       const body = response.body as { slots: { available: boolean }[] };
@@ -327,15 +439,15 @@ describe('Bookings & Availability (e2e)', () => {
   describe('POST /bookings/:bookingId/cancel', () => {
     let bookingId: string;
 
-    // Fase 27: cancelamento exige `startsAt` no futuro — ano seguinte ao
-    // resto da fixture deste arquivo (que usa 2026-08-2x), só pra nunca
+    // Fase 27: cancelamento exige `startsAt` no futuro — `DAY.cancelFlow`
+    // fica bem longe do resto da fixture deste arquivo, só pra nunca
     // colidir com nenhuma outra reserva já criada na mesma quadra.
     beforeAll(async () => {
       const response = await request(app.getHttpServer())
         .post(bookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'idem-cancel-1')
-        .send({ startsAt: '2027-08-22T09:00:00-03:00' })
+        .send({ startsAt: d(DAY.cancelFlow, '09:00:00') })
         .expect(201);
       bookingId = asBookingBody(response).id;
     });
@@ -370,7 +482,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(bookingsUrl())
         .set(...authHeader('token-outro'))
         .set('Idempotency-Key', 'idem-cancel-2')
-        .send({ startsAt: '2027-08-22T09:00:00-03:00' })
+        .send({ startsAt: d(DAY.cancelFlow, '09:00:00') })
         .expect(201);
     });
   });
@@ -384,14 +496,14 @@ describe('Bookings & Availability (e2e)', () => {
         .post(bookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'boundary-1a')
-        .send({ startsAt: '2026-08-23T10:00:00-03:00' })
+        .send({ startsAt: d(DAY.boundary1, '10:00:00') })
         .expect(201);
 
       await request(app.getHttpServer())
         .post(bookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'boundary-1b')
-        .send({ startsAt: '2026-08-23T11:00:00-03:00' })
+        .send({ startsAt: d(DAY.boundary1, '11:00:00') })
         .expect(409);
     });
 
@@ -400,7 +512,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(bookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'boundary-2a')
-        .send({ startsAt: '2026-08-24T10:00:00-03:00' })
+        .send({ startsAt: d(DAY.boundary2, '10:00:00') })
         .expect(201);
 
       // 10:30 não alinha com a grade de 60min, mas o backend não exige
@@ -410,7 +522,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(bookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'boundary-2b')
-        .send({ startsAt: '2026-08-24T10:30:00-03:00' })
+        .send({ startsAt: d(DAY.boundary2, '10:30:00') })
         .expect(409);
     });
 
@@ -419,14 +531,14 @@ describe('Bookings & Availability (e2e)', () => {
         .post(bookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'boundary-3a')
-        .send({ startsAt: '2026-08-25T10:00:00-03:00' })
+        .send({ startsAt: d(DAY.boundary3, '10:00:00') })
         .expect(201);
 
       await request(app.getHttpServer())
         .post(bookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'boundary-3b')
-        .send({ startsAt: '2026-08-25T10:59:00-03:00' })
+        .send({ startsAt: d(DAY.boundary3, '10:59:00') })
         .expect(409);
     });
   });
@@ -440,7 +552,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(`${bookingsUrl()}/blocks`)
         .set(...authHeader('token-owner'))
         .set('Idempotency-Key', 'buffer-block-1')
-        .send({ startsAt: '2026-08-26T14:00:00-03:00', endsAt: '2026-08-26T15:00:00-03:00' })
+        .send({ startsAt: d(DAY.bufferBlock, '14:00:00'), endsAt: d(DAY.bufferBlock, '15:00:00') })
         .expect(201);
 
       // CUSTOMER começa exatamente onde o BLOCK termina (15:00) — permitido,
@@ -449,7 +561,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(bookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'buffer-block-2')
-        .send({ startsAt: '2026-08-26T15:00:00-03:00' })
+        .send({ startsAt: d(DAY.bufferBlock, '15:00:00') })
         .expect(201);
     });
 
@@ -458,7 +570,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(bookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'buffer-cust-1')
-        .send({ startsAt: '2026-08-27T09:00:00-03:00' }) // ocupa até 10:00, buffer até 10:15
+        .send({ startsAt: d(DAY.bufferCustomer, '09:00:00') }) // ocupa até 10:00, buffer até 10:15
         .expect(201);
 
       // BLOCK tentando começar às 10:00 esbarra no buffer de saída da
@@ -467,7 +579,10 @@ describe('Bookings & Availability (e2e)', () => {
         .post(`${bookingsUrl()}/blocks`)
         .set(...authHeader('token-owner'))
         .set('Idempotency-Key', 'buffer-cust-2')
-        .send({ startsAt: '2026-08-27T10:00:00-03:00', endsAt: '2026-08-27T11:00:00-03:00' })
+        .send({
+          startsAt: d(DAY.bufferCustomer, '10:00:00'),
+          endsAt: d(DAY.bufferCustomer, '11:00:00'),
+        })
         .expect(409);
     });
   });
@@ -487,12 +602,12 @@ describe('Bookings & Availability (e2e)', () => {
         .post(bookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'inativa-1')
-        .send({ startsAt: '2026-08-28T09:00:00-03:00' })
+        .send({ startsAt: d(DAY.inactiveCourt, '09:00:00') })
         .expect(409);
 
       const availability = await request(app.getHttpServer())
         .get(`/v1/arenas/${arenaId}/courts/${courtId}/availability`)
-        .query({ from: '2026-08-28T09:00:00-03:00', to: '2026-08-28T10:00:00-03:00' })
+        .query({ from: d(DAY.inactiveCourt, '09:00:00'), to: d(DAY.inactiveCourt, '10:00:00') })
         .set(...authHeader('token-customer'))
         .expect(200);
       const { slots } = availability.body as { slots: { available: boolean }[] };
@@ -502,7 +617,7 @@ describe('Bookings & Availability (e2e)', () => {
       // consultável normalmente.
       const historic = await request(app.getHttpServer())
         .get(bookingsUrl())
-        .query({ from: '2026-08-20T00:00:00-03:00', to: '2026-08-21T00:00:00-03:00' })
+        .query({ from: d(DAY.main1, '00:00:00'), to: d(DAY.main2, '00:00:00') })
         .set(...authHeader('token-customer'))
         .expect(200);
       expect((historic.body as unknown[]).length).toBeGreaterThan(0);
@@ -519,7 +634,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(bookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'inativa-2')
-        .send({ startsAt: '2026-08-28T09:00:00-03:00' })
+        .send({ startsAt: d(DAY.inactiveCourt, '09:00:00') })
         .expect(201);
     });
   });
@@ -558,14 +673,17 @@ describe('Bookings & Availability (e2e)', () => {
         .post(`/v1/arenas/${otherArenaId}/courts/${otherCourtId}/bookings/blocks`)
         .set(...authHeader('token-owner'))
         .set('Idempotency-Key', 'cross-tenant-1')
-        .send({ startsAt: '2026-08-29T10:00:00-03:00', endsAt: '2026-08-29T11:00:00-03:00' })
+        .send({
+          startsAt: d(DAY.crossTenant, '10:00:00'),
+          endsAt: d(DAY.crossTenant, '11:00:00'),
+        })
         .expect(403);
     });
 
     it('OWNER da Arena A não pode ver a listagem administrativa da Arena B (403)', async () => {
       await request(app.getHttpServer())
         .get(`/v1/arenas/${otherArenaId}/courts/${otherCourtId}/bookings/admin`)
-        .query({ from: '2026-08-20T00:00:00-03:00', to: '2026-08-30T00:00:00-03:00' })
+        .query({ from: d(DAY.main1, '00:00:00'), to: d(DAY.crossTenantAdminWindowEnd, '00:00:00') })
         .set(...authHeader('token-owner'))
         .expect(403);
     });
@@ -575,7 +693,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(bookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'cross-tenant-2')
-        .send({ startsAt: '2026-08-29T09:00:00-03:00' })
+        .send({ startsAt: d(DAY.crossTenant, '09:00:00') })
         .expect(201);
       const bookingId = asBookingBody(response).id;
 
@@ -619,8 +737,9 @@ describe('Bookings & Availability (e2e)', () => {
         },
       });
       hoursCourtId = hoursCourt.id;
-      // 2026-08-31 é uma segunda-feira: aberta 08:00-18:00. Nenhum outro dia
-      // configurado (fechado).
+      // `HOURS_MONDAY` é sempre uma segunda-feira de verdade (calculado
+      // dinamicamente, nunca uma data fixa): aberta 08:00-18:00. Nenhum
+      // outro dia configurado (fechado).
       await prisma.arenaOperatingHours.create({
         data: { arenaId: hoursArenaId, dayOfWeek: Weekday.MONDAY, opensAt: 480, closesAt: 1080 },
       });
@@ -638,7 +757,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(hoursBookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'hours-1')
-        .send({ startsAt: '2026-08-31T10:00:00-03:00' })
+        .send({ startsAt: dh(HOURS_MONDAY, '10:00:00') })
         .expect(201);
     });
 
@@ -647,7 +766,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(hoursBookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'hours-2')
-        .send({ startsAt: '2026-08-31T19:00:00-03:00' }) // arena fecha às 18:00
+        .send({ startsAt: dh(HOURS_MONDAY, '19:00:00') }) // arena fecha às 18:00
         .expect(409);
     });
 
@@ -656,7 +775,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(hoursBookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'hours-3')
-        .send({ startsAt: '2026-09-01T10:00:00-03:00' }) // terça — sem horário configurado
+        .send({ startsAt: dh(HOURS_TUESDAY, '10:00:00') }) // terça — sem horário configurado
         .expect(409);
     });
 
@@ -667,14 +786,14 @@ describe('Bookings & Availability (e2e)', () => {
         .post(hoursBookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'hours-4')
-        .send({ startsAt: '2026-08-31T17:00:00-03:00' })
+        .send({ startsAt: dh(HOURS_MONDAY, '17:00:00') })
         .expect(409);
     });
 
     it('disponibilidade não gera slots fora do horário de funcionamento', async () => {
       const response = await request(app.getHttpServer())
         .get(`/v1/arenas/${hoursArenaId}/courts/${hoursCourtId}/availability`)
-        .query({ from: '2026-08-31T00:00:00-03:00', to: '2026-09-01T00:00:00-03:00' })
+        .query({ from: dh(HOURS_MONDAY, '00:00:00'), to: dh(HOURS_TUESDAY, '00:00:00') })
         .set(...authHeader('token-customer'))
         .expect(200);
 
@@ -695,7 +814,7 @@ describe('Bookings & Availability (e2e)', () => {
     it('disponibilidade num dia sem horário configurado não tem nenhum slot', async () => {
       const response = await request(app.getHttpServer())
         .get(`/v1/arenas/${hoursArenaId}/courts/${hoursCourtId}/availability`)
-        .query({ from: '2026-09-01T00:00:00-03:00', to: '2026-09-02T00:00:00-03:00' })
+        .query({ from: dh(HOURS_TUESDAY, '00:00:00'), to: dh(HOURS_WEDNESDAY, '00:00:00') })
         .set(...authHeader('token-customer'))
         .expect(200);
 
@@ -711,7 +830,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(hoursBookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'hours-5')
-        .send({ startsAt: '2026-08-31T08:00:00-03:00' })
+        .send({ startsAt: dh(HOURS_MONDAY, '08:00:00') })
         .expect(201);
       const bookingId = asBookingBody(created).id;
 
@@ -733,7 +852,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(hoursBookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'hours-6')
-        .send({ startsAt: '2026-08-31T08:00:00-03:00' })
+        .send({ startsAt: dh(HOURS_MONDAY, '08:00:00') })
         .expect(409);
 
       // Uma reserva às 13:00 (dentro do novo horário) é aceita.
@@ -741,7 +860,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(hoursBookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'hours-7')
-        .send({ startsAt: '2026-08-31T13:00:00-03:00' })
+        .send({ startsAt: dh(HOURS_MONDAY, '13:00:00') })
         .expect(201);
     });
 
@@ -750,7 +869,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(`${hoursBookingsUrl()}/maintenance`)
         .set(...authHeader('token-owner'))
         .set('Idempotency-Key', 'hours-maint-1')
-        .send({ startsAt: '2026-09-01T03:00:00-03:00', endsAt: '2026-09-01T05:00:00-03:00' })
+        .send({ startsAt: dh(HOURS_TUESDAY, '03:00:00'), endsAt: dh(HOURS_TUESDAY, '05:00:00') })
         .expect(201);
     });
 
@@ -780,7 +899,7 @@ describe('Bookings & Availability (e2e)', () => {
           .post(hoursBookingsUrl())
           .set(...authHeader('token-customer'))
           .set('Idempotency-Key', 'hours-race-1')
-          .send({ startsAt: '2026-09-02T10:30:00-03:00' }), // 10:30 — válido no horário antigo, não no novo
+          .send({ startsAt: dh(HOURS_WEDNESDAY, '10:30:00') }), // 10:30 — válido no horário antigo, não no novo
       ]);
 
       expect(putResponse.status).toBe(200);
@@ -831,7 +950,7 @@ describe('Bookings & Availability (e2e)', () => {
         .post(bookingsUrl())
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'f13-mass-assignment-1')
-        .send({ startsAt: '2026-09-03T09:00:00-03:00' })
+        .send({ startsAt: d(DAY.fase13MassAssignment, '09:00:00') })
         .expect(201);
       const bookingId = asBookingBody(created).id;
 
@@ -860,7 +979,10 @@ describe('Bookings & Availability (e2e)', () => {
         .post(`${bookingsUrl()}/blocks`)
         .set(...authHeader('token-owner'))
         .set('Idempotency-Key', 'f13-block-cancel-1')
-        .send({ startsAt: '2026-09-04T14:00:00-03:00', endsAt: '2026-09-04T15:00:00-03:00' })
+        .send({
+          startsAt: d(DAY.fase13BlockAndMaintenance, '14:00:00'),
+          endsAt: d(DAY.fase13BlockAndMaintenance, '15:00:00'),
+        })
         .expect(201);
       const blockId = asBookingBody(block).id;
 
@@ -882,7 +1004,10 @@ describe('Bookings & Availability (e2e)', () => {
         .post(`${bookingsUrl()}/maintenance`)
         .set(...authHeader('token-owner'))
         .set('Idempotency-Key', 'f13-maintenance-cancel-1')
-        .send({ startsAt: '2026-09-04T16:00:00-03:00', endsAt: '2026-09-04T17:00:00-03:00' })
+        .send({
+          startsAt: d(DAY.fase13BlockAndMaintenance, '16:00:00'),
+          endsAt: d(DAY.fase13BlockAndMaintenance, '17:00:00'),
+        })
         .expect(201);
       const maintenanceId = asBookingBody(maintenance).id;
 
@@ -897,7 +1022,10 @@ describe('Bookings & Availability (e2e)', () => {
         .post(`${bookingsUrl()}/blocks`)
         .set(...authHeader('token-owner'))
         .set('Idempotency-Key', 'f13-block-cancel-2')
-        .send({ startsAt: '2026-09-05T14:00:00-03:00', endsAt: '2026-09-05T15:00:00-03:00' })
+        .send({
+          startsAt: d(DAY.fase13OwnerCancel, '14:00:00'),
+          endsAt: d(DAY.fase13OwnerCancel, '15:00:00'),
+        })
         .expect(201);
       const blockId = asBookingBody(block).id;
 

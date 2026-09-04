@@ -5,9 +5,11 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  IsUrl,
   Max,
   MaxLength,
   Min,
+  ValidateIf,
 } from 'class-validator';
 import { Sport } from '@prisma/client';
 
@@ -43,4 +45,16 @@ export class CreateCourtDto {
   @Min(0)
   @Max(24 * 60)
   bufferMinutes?: number;
+
+  // URL de uma foto já hospedada externamente pelo OWNER/ADMIN — nunca um
+  // upload de arquivo (o projeto não tem infraestrutura de armazenamento
+  // de mídia; ver comentário em schema.prisma, model Court). String vazia
+  // é um valor válido aqui (nunca em `IsUrl` puro) — é o sinal que o
+  // formulário de edição usa pra "remover a foto"; `CourtsService.update`
+  // converte `''` pra `null` antes de persistir.
+  @IsOptional()
+  @ValidateIf((_object, value: unknown) => value !== '')
+  @IsUrl({}, { message: 'A foto precisa ser uma URL válida.' })
+  @MaxLength(2048)
+  imageUrl?: string;
 }

@@ -10,7 +10,12 @@ const slots: AvailabilitySlot[] = [
 describe('AvailabilityGrid', () => {
   it('renderiza horários disponíveis como clicáveis e indisponíveis como desabilitados', () => {
     render(
-      <AvailabilityGrid slots={slots} timezone="America/Sao_Paulo" selectedStartsAt={null} onSelect={() => {}} />,
+      <AvailabilityGrid
+        slots={slots}
+        timezone="America/Sao_Paulo"
+        selectedStartTimes={new Set()}
+        onToggle={() => {}}
+      />,
     );
 
     const available = screen.getByRole('button', { name: /Selecionar horário/ });
@@ -20,14 +25,19 @@ describe('AvailabilityGrid', () => {
     expect(unavailable).toBeDisabled();
   });
 
-  it('chama onSelect apenas para horários disponíveis', () => {
-    const onSelect = jest.fn();
+  it('chama onToggle apenas para horários disponíveis', () => {
+    const onToggle = jest.fn();
     render(
-      <AvailabilityGrid slots={slots} timezone="America/Sao_Paulo" selectedStartsAt={null} onSelect={onSelect} />,
+      <AvailabilityGrid
+        slots={slots}
+        timezone="America/Sao_Paulo"
+        selectedStartTimes={new Set()}
+        onToggle={onToggle}
+      />,
     );
 
     fireEvent.click(screen.getByRole('button', { name: /Selecionar horário/ }));
-    expect(onSelect).toHaveBeenCalledWith(slots[0]);
+    expect(onToggle).toHaveBeenCalledWith(slots[0]);
   });
 
   it('marca o horário selecionado com aria-pressed', () => {
@@ -35,8 +45,8 @@ describe('AvailabilityGrid', () => {
       <AvailabilityGrid
         slots={slots}
         timezone="America/Sao_Paulo"
-        selectedStartsAt={slots[0]!.startsAt}
-        onSelect={() => {}}
+        selectedStartTimes={new Set([slots[0]!.startsAt])}
+        onToggle={() => {}}
       />,
     );
 
@@ -44,5 +54,25 @@ describe('AvailabilityGrid', () => {
       'aria-pressed',
       'true',
     );
+  });
+
+  // Fase "múltiplos horários": mais de um slot pode estar selecionado ao
+  // mesmo tempo — o grid não força seleção única.
+  it('permite múltiplos horários marcados como selecionados simultaneamente', () => {
+    const multiSlots: AvailabilitySlot[] = [
+      ...slots,
+      { startsAt: '2026-09-07T15:00:00.000Z', endsAt: '2026-09-07T16:00:00.000Z', available: true },
+    ];
+    render(
+      <AvailabilityGrid
+        slots={multiSlots}
+        timezone="America/Sao_Paulo"
+        selectedStartTimes={new Set([multiSlots[0]!.startsAt, multiSlots[2]!.startsAt])}
+        onToggle={() => {}}
+      />,
+    );
+
+    const pressed = screen.getAllByRole('button', { pressed: true });
+    expect(pressed).toHaveLength(2);
   });
 });

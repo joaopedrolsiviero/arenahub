@@ -42,8 +42,12 @@ export function DashboardDateNav({
         <ChevronRightIcon />
       </Button>
       {date !== today ? (
-        <Button type="button" variant="ghost" size="sm" onClick={() => onChange(today)}>
-          Hoje
+        // Antes usava variant="ghost" (sem borda/fundo em repouso) — lia como
+        // texto solto, não como botão clicável. `outline` reaproveita a MESMA
+        // aparência dos botões de navegação ao lado (borda + fundo + hover
+        // visíveis), então nunca é ambíguo que isto é uma ação.
+        <Button type="button" variant="outline" size="sm" onClick={() => onChange(today)}>
+          Voltar para hoje
         </Button>
       ) : null}
     </div>

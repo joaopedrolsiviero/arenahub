@@ -80,6 +80,29 @@ function PaymentSection({ booking }: { booking: MyBooking }) {
     return null;
   }
 
+  // Fase "melhorias no fluxo de reserva", item 5 — arena configurada para
+  // pagamento presencial nunca tem Payment/PIX (PaymentsService.createPayment
+  // rejeita antes de criar); esta seção então nunca oferece "Pagar com PIX"
+  // nem tenta interpretar `payment` (que aqui será sempre `null`, nunca
+  // "ainda não foi paga" — são estados diferentes). `paymentMode` vem sempre
+  // do backend via `booking.court.arena` (nunca do cliente), então não há
+  // como um cliente forjar isto pelo frontend.
+  if (booking.court.arena.paymentMode === 'IN_PERSON') {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Pagamento</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground">
+            Esta arena usa pagamento presencial — combine a forma de pagamento diretamente com o
+            responsável pela quadra. Nenhuma cobrança é feita pelo ArenaHub.
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+
   const canPay =
     booking.status === 'CONFIRMED' && (!payment || payment.status === 'FAILED' || payment.status === 'EXPIRED');
 

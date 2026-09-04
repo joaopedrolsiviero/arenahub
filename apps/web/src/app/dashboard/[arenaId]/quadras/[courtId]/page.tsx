@@ -26,6 +26,7 @@ function CourtForm({ arenaId, court }: { arenaId: string; court: Court }) {
   const [pricePerSlot, setPricePerSlot] = useState(court.pricePerSlot);
   const [slotDurationMinutes, setSlotDurationMinutes] = useState(String(court.slotDurationMinutes));
   const [bufferMinutes, setBufferMinutes] = useState(String(court.bufferMinutes));
+  const [imageUrl, setImageUrl] = useState(court.imageUrl ?? '');
   const [error, setError] = useState<string | null>(null);
   const [savedMessage, setSavedMessage] = useState(false);
 
@@ -42,6 +43,9 @@ function CourtForm({ arenaId, court }: { arenaId: string; court: Court }) {
           pricePerSlot: Number(pricePerSlot),
           slotDurationMinutes: Number(slotDurationMinutes),
           bufferMinutes: Number(bufferMinutes),
+          // String vazia é o sinal de "remover a foto" (ver CourtsService.update)
+          // — nunca omitido, senão o backend interpretaria como "não mexer".
+          imageUrl: imageUrl.trim(),
         },
       });
       setSavedMessage(true);
@@ -90,6 +94,21 @@ function CourtForm({ arenaId, court }: { arenaId: string; court: Court }) {
               onChange={(event) => setDescription(event.target.value)}
               maxLength={1000}
             />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="edit-image-url">URL da foto</Label>
+            <Input
+              id="edit-image-url"
+              type="url"
+              value={imageUrl}
+              onChange={(event) => setImageUrl(event.target.value)}
+              maxLength={2048}
+              placeholder="https://..."
+            />
+            <p className="text-xs text-muted-foreground">
+              Cole o link de uma foto já hospedada (ex: um link de imagem do seu site ou de um
+              serviço de hospedagem). Deixe em branco para remover a foto.
+            </p>
           </div>
           <div className="grid grid-cols-3 gap-3">
             <div className="flex flex-col gap-1.5">

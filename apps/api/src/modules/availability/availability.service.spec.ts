@@ -26,6 +26,17 @@ describe('AvailabilityService', () => {
   const thursdayAllDay = [{ dayOfWeek: Weekday.THURSDAY, opensAt: 480, closesAt: 1320 }];
 
   beforeEach(() => {
+    // Fase de melhorias no fluxo de reserva — `getAvailability` agora
+    // bloqueia slots cujo início já passou (`Date.now()`), então todo
+    // teste deste arquivo precisa de um "agora" fixo e seguramente
+    // ANTERIOR a todas as datas de fixture usadas (inclusive as de DST,
+    // fevereiro/março de 2026) — sem isso, a data real do sistema
+    // eventualmente ultrapassa 2026-08-20 e todo slot passaria a nascer
+    // indisponível, quebrando os testes por um motivo alheio ao que eles
+    // testam (mesmo problema, e mesma solução, já usado em
+    // conversation.service.spec.ts).
+    jest.useFakeTimers().setSystemTime(new Date('2026-01-01T00:00:00Z'));
+
     prisma = {
       booking: { findMany: jest.fn().mockResolvedValue([]) },
       arena: { findUniqueOrThrow: jest.fn().mockResolvedValue({ timezone }) },
@@ -39,6 +50,10 @@ describe('AvailabilityService', () => {
       courtsService as unknown as CourtsService,
       operatingHoursService as unknown as OperatingHoursService,
     );
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
   });
 
   const from = new Date('2026-08-20T08:00:00-03:00');
@@ -285,6 +300,69 @@ describe('AvailabilityService', () => {
   // vale provar explicitamente que ele também resolve o instante UTC
   // correto atravessando uma transição real de DST, não só a checagem de
   // horário isolada.
+  // Item "bloqueio dos horários que já passaram" — cada teste pina um
+  // "agora" diferente (sobrescrevendo o fake timer global do beforeEach),
+  // porque é exatamente a relação entre "agora" e o horário de cada slot
+  // que está sendo testada.
+  describe('bloqueio de horários que já passaram', () => {
+    it('slot cujo início já passou fica indisponível, mesmo sem nenhum conflito de reserva', async () => {
+      jest.setSystemTime(new Date('2026-08-20T09:30:00-03:00')); // meio do slot 09:00-10:00
+
+      const result = await service.getAvailability('arena-1', 'court-1', from, to);
+
+      expect(result.slots.map((s) => s.available)).toEqual([false, false, true]);
+    });
+
+    it('slot cujo início é EXATAMENTE agora fica indisponível — já está começando', async () => {
+      jest.setSystemTime(new Date('2026-08-20T09:00:00-03:00'));
+
+      const result = await service.getAvailability('arena-1', 'court-1', from, to);
+
+      expect(result.slots.map((s) => s.available)).toEqual([false, false, true]);
+    });
+
+    it('slot que começa 1 minuto depois de agora já é considerado disponível', async () => {
+      jest.setSystemTime(new Date('2026-08-20T08:59:00-03:00'));
+
+      const result = await service.getAvailability('arena-1', 'court-1', from, to);
+
+      expect(result.slots.map((s) => s.available)).toEqual([false, true, true]);
+    });
+
+    it('data futura nunca é afetada por essa regra, mesmo com "agora" tarde no dia', async () => {
+      jest.setSystemTime(new Date('2026-08-20T20:00:00-03:00'));
+
+      // Só a arena tem grade configurada pra quinta-feira (mock do
+      // beforeEach) — usa a quinta da semana seguinte como "data futura",
+      // sem precisar reconfigurar horário de funcionamento só pra este
+      // teste.
+      const nextThursdayFrom = new Date('2026-08-27T08:00:00-03:00');
+      const nextThursdayTo = new Date('2026-08-27T11:00:00-03:00');
+
+      const result = await service.getAvailability(
+        'arena-1',
+        'court-1',
+        nextThursdayFrom,
+        nextThursdayTo,
+      );
+
+      expect(result.slots.every((s) => s.available)).toBe(true);
+    });
+
+    it('comparação usa o instante absoluto, correta mesmo com a arena num timezone bem diferente (Asia/Tokyo)', async () => {
+      // Arena em Tokyo (UTC+9) — 08:00/09:00/10:00 locais de quinta
+      // (20/08 em Tokyo) correspondem a 2026-08-19T23:00/00:00/01:00Z.
+      prisma.arena.findUniqueOrThrow.mockResolvedValue({ timezone: 'Asia/Tokyo' });
+      jest.setSystemTime(new Date('2026-08-19T23:30:00Z')); // 30min depois do 1º slot abrir
+
+      const tokyoFrom = new Date('2026-08-19T23:00:00Z');
+      const tokyoTo = new Date('2026-08-20T02:00:00Z');
+      const result = await service.getAvailability('arena-1', 'court-1', tokyoFrom, tokyoTo);
+
+      expect(result.slots.map((s) => s.available)).toEqual([false, true, true]);
+    });
+  });
+
   describe('DST (America/New_York)', () => {
     it('gera slots com o instante UTC correto antes e depois da transição de DST (8/mar/2026)', async () => {
       operatingHoursService.getRawIntervalsForArena.mockResolvedValue([

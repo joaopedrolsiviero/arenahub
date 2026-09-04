@@ -111,6 +111,19 @@ export class PaymentsService {
       throw new ConflictException('Esta reserva foi cancelada e não pode gerar um novo pagamento.');
     }
 
+    // Fase de melhorias no fluxo de reserva — arena configurada para
+    // pagamento presencial nunca inicia cobrança online: `paymentMode`
+    // vem sempre de `Arena` no banco (via `findMyBookingDetail` acima),
+    // nunca de qualquer valor enviado pelo cliente (item de segurança
+    // explícito do prompt: "não confiar em valores enviados pelo
+    // frontend para autorizar pagamento presencial" — aqui é o inverso,
+    // mas o princípio é o mesmo: só o banco decide).
+    if (booking.court.arena.paymentMode === 'IN_PERSON') {
+      throw new ConflictException(
+        'Esta arena usa pagamento presencial — não é possível criar um pagamento online para esta reserva.',
+      );
+    }
+
     const arenaId = booking.court.arena.id;
     const courtId = booking.court.id;
     const amount = booking.total;

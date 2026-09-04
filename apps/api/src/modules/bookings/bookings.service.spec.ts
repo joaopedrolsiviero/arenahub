@@ -86,6 +86,19 @@ describe('BookingsService', () => {
   describe('createCustomerBooking', () => {
     const dto = { startsAt: '2026-08-20T19:00:00-03:00' };
 
+    // Fase de melhorias no fluxo de reserva — `createCustomerBooking`
+    // agora rejeita `startsAt` no passado (`assertNotPast`); fixa "agora"
+    // antes de 2026-08-20 pra essa fixture continuar representando um
+    // horário futuro indefinidamente, sem depender da data real do
+    // sistema (mesmo problema e mesma solução de
+    // availability.service.spec.ts).
+    beforeEach(() => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-08-19T00:00:00Z'));
+    });
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
     it('cria a reserva calculando endsAt/buffer/total a partir da quadra', async () => {
       tx.court.findFirst.mockResolvedValue(activeCourt);
       tx.booking.create.mockResolvedValue({ id: 'booking-1' });
@@ -189,6 +202,129 @@ describe('BookingsService', () => {
       await expect(
         service.createCustomerBooking(asTx(), 'arena-1', 'court-1', 'user-1', dto),
       ).rejects.toBe(otherError);
+    });
+  });
+
+  describe('createCustomerBookingBatch — múltiplos horários numa única reserva', () => {
+    // Decimal de verdade (não o `100` plano do `activeCourt` compartilhado
+    // acima) — o método soma o total via `Prisma.Decimal.times()`, que só
+    // existe numa instância real de Decimal.
+    const batchCourt = { ...activeCourt, pricePerSlot: new Prisma.Decimal(100) };
+
+    beforeEach(() => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-08-19T00:00:00Z'));
+      courtsService.findOne.mockResolvedValue(batchCourt);
+      tx.court.findFirst.mockResolvedValue(batchCourt);
+    });
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    // Tipo mínimo do que a asserção realmente lê de cada chamada de
+    // `tx.booking.create` — evita `expect.objectContaining` aninhado dentro
+    // de um objeto (dispara `no-unsafe-assignment`, já que `data` é
+    // estruturalmente tipado como `Prisma.BookingCreateInput`); ler
+    // `.mock.calls` com um cast local é o mesmo padrão já usado nos testes
+    // de `createCustomerBooking` acima.
+    interface CapturedCreateCall {
+      data: { startsAt: Date; endsAt: Date; total: Prisma.Decimal };
+    }
+    function capturedCalls(): CapturedCreateCall[] {
+      return (tx.booking.create.mock.calls as [CapturedCreateCall][]).map(([arg]) => arg);
+    }
+
+    it('horários consecutivos viram um ÚNICO Booking contínuo, cobrindo o intervalo inteiro', async () => {
+      tx.booking.create.mockResolvedValue({ id: 'booking-1' });
+
+      const bookings = await service.createCustomerBookingBatch(
+        asTx(),
+        'arena-1',
+        'court-1',
+        'user-1',
+        ['2026-08-20T09:00:00-03:00', '2026-08-20T10:00:00-03:00', '2026-08-20T11:00:00-03:00'],
+      );
+
+      const calls = capturedCalls();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.data.startsAt).toEqual(new Date('2026-08-20T09:00:00-03:00'));
+      expect(calls[0]!.data.endsAt).toEqual(new Date('2026-08-20T12:00:00-03:00')); // 3 slots de 60min
+      expect(calls[0]!.data.total.toNumber()).toBe(300); // 100 x 3 slots
+      expect(bookings).toEqual([{ id: 'booking-1' }]);
+    });
+
+    it('horários NÃO consecutivos viram Bookings SEPARADOS, um por trecho contínuo', async () => {
+      tx.booking.create
+        .mockResolvedValueOnce({ id: 'booking-1' })
+        .mockResolvedValueOnce({ id: 'booking-2' });
+
+      const bookings = await service.createCustomerBookingBatch(
+        asTx(),
+        'arena-1',
+        'court-1',
+        'user-1',
+        [
+          '2026-08-20T09:00:00-03:00',
+          '2026-08-20T11:00:00-03:00', // pula as 10:00 — não é consecutivo
+        ],
+      );
+
+      const calls = capturedCalls();
+      expect(calls).toHaveLength(2);
+      expect(calls[0]!.data.startsAt).toEqual(new Date('2026-08-20T09:00:00-03:00'));
+      expect(calls[0]!.data.endsAt).toEqual(new Date('2026-08-20T10:00:00-03:00'));
+      expect(calls[1]!.data.startsAt).toEqual(new Date('2026-08-20T11:00:00-03:00'));
+      expect(calls[1]!.data.endsAt).toEqual(new Date('2026-08-20T12:00:00-03:00'));
+      expect(bookings).toEqual([{ id: 'booking-1' }, { id: 'booking-2' }]);
+    });
+
+    it('horários fora de ordem e duplicados são normalizados antes de agrupar', async () => {
+      tx.booking.create.mockResolvedValue({ id: 'booking-1' });
+
+      await service.createCustomerBookingBatch(asTx(), 'arena-1', 'court-1', 'user-1', [
+        '2026-08-20T10:00:00-03:00',
+        '2026-08-20T09:00:00-03:00', // fora de ordem
+        '2026-08-20T09:00:00-03:00', // duplicado
+      ]);
+
+      // Duas datas únicas, consecutivas (09:00, 10:00) -> um único Booking
+      // de 09:00 até 11:00.
+      const calls = capturedCalls();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.data.startsAt).toEqual(new Date('2026-08-20T09:00:00-03:00'));
+      expect(calls[0]!.data.endsAt).toEqual(new Date('2026-08-20T11:00:00-03:00'));
+    });
+
+    it('atomicidade: conflito num horário do meio propaga o erro — nenhum Booking do lote é considerado criado', async () => {
+      // Dois trechos não consecutivos: 09:00 (sucesso) e 14:00 (conflito).
+      // A exceção do segundo precisa propagar sem ser engolida — é essa
+      // propagação que faz o Postgres reverter a transação inteira em
+      // produção (mesmo rollback que já protege um único Booking, nunca
+      // um mecanismo novo).
+      tx.booking.create.mockResolvedValueOnce({ id: 'booking-1' });
+      tx.$queryRaw
+        .mockResolvedValueOnce([]) // 09:00: sem conflito
+        .mockResolvedValueOnce([{ id: 'outra-reserva' }]); // 14:00: conflito
+
+      await expect(
+        service.createCustomerBookingBatch(asTx(), 'arena-1', 'court-1', 'user-1', [
+          '2026-08-20T09:00:00-03:00',
+          '2026-08-20T14:00:00-03:00',
+        ]),
+      ).rejects.toBeInstanceOf(ConflictException);
+      // O primeiro booking.create FOI chamado (a reversão é responsabilidade
+      // da transação do Postgres, não deste método) — o que importa é que o
+      // método nunca engole o erro do segundo trecho.
+      expect(tx.booking.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejeita horário no passado dentro do lote, mesmo que os outros sejam futuros', async () => {
+      await expect(
+        service.createCustomerBookingBatch(asTx(), 'arena-1', 'court-1', 'user-1', [
+          '2026-08-20T09:00:00-03:00',
+          '2020-01-01T09:00:00-03:00', // claramente no passado
+        ]),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(tx.booking.create).not.toHaveBeenCalled();
     });
   });
 
@@ -350,7 +486,7 @@ describe('BookingsService', () => {
       );
     });
 
-    it('inclui court e arena (nome, timezone) para o frontend montar a tela sem round-trip extra', async () => {
+    it('inclui court e arena (nome, timezone, paymentMode) para o frontend montar a tela sem round-trip extra', async () => {
       prisma.booking.findMany.mockResolvedValue([]);
 
       await service.findMyBookings('user-1');
@@ -363,6 +499,7 @@ describe('BookingsService', () => {
         name: true,
         slug: true,
         timezone: true,
+        paymentMode: true,
       });
     });
   });

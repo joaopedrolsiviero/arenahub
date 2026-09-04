@@ -68,6 +68,14 @@ enum Sport {
   BEACH_VOLLEYBALL
 }
 
+// Como o cliente paga uma reserva CUSTOMER desta arena — configuração POR
+// ARENA (nunca global), com ONLINE como default explícito pra nunca mudar
+// o comportamento de uma arena já existente sem ação do OWNER/ADMIN.
+enum PaymentMode {
+  ONLINE
+  IN_PERSON
+}
+
 // Estabelecimento esportivo. Campos deliberadamente mínimos nesta fase —
 // endereço, imagens e status (previstos na Parte 7 do ARCHITECTURE.md para o
 // marketplace/disponibilidade futuros) chegam quando a fase que realmente
@@ -96,6 +104,12 @@ model Arena {
   // (a maioria, nesta fase — configurar é uma ação explícita do OWNER via
   // `PATCH /arenas/:arenaId`, reaproveitando a autorização já existente).
   whatsappPhoneNumberId String?  @unique
+  // Fase de melhorias no fluxo de reserva: cada arena decide se o cliente
+  // paga pelo site (Mercado Pago, fluxo já existente desde a Fase 17) ou
+  // presencialmente (o ArenaHub só agenda, sem gerar Payment/PIX nenhum).
+  // Default ONLINE — preserva o comportamento atual de toda arena já
+  // existente sem exigir nenhuma migração de dado.
+  paymentMode           PaymentMode @default(ONLINE)
   createdAt             DateTime @default(now()) @db.Timestamptz(6)
   updatedAt             DateTime @updatedAt @db.Timestamptz(6)
 
@@ -233,6 +247,13 @@ model Court {
   // Minutos de buffer obrigatório após uma reserva de CUSTOMER antes do
   // próximo horário ficar disponível. Não se aplica a BLOCK/MAINTENANCE.
   bufferMinutes       Int      @default(0)
+  // URL de uma imagem já hospedada externamente (o OWNER cola o link) —
+  // deliberadamente NÃO um upload de arquivo: o projeto não tem nenhuma
+  // infraestrutura de armazenamento de mídia (S3/Cloudinary/etc.) hoje, e
+  // criar uma só para isso seria a "solução externa complexa" que esta
+  // fase pediu explicitamente pra evitar. Nulo = sem foto, o frontend usa
+  // um placeholder neutro.
+  imageUrl            String?
   createdAt           DateTime @default(now()) @db.Timestamptz(6)
   updatedAt           DateTime @updatedAt @db.Timestamptz(6)
 

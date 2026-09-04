@@ -4,6 +4,11 @@
 
 export type Sport = 'BEACH_VOLLEYBALL';
 
+// Como o cliente paga uma reserva CUSTOMER — configuração por arena (nunca
+// global). ONLINE preserva o fluxo do Mercado Pago existente desde a Fase
+// 17; IN_PERSON só confirma a reserva, sem criar nenhum Payment/PIX.
+export type PaymentMode = 'ONLINE' | 'IN_PERSON';
+
 export type Weekday =
   | 'MONDAY'
   | 'TUESDAY'
@@ -35,6 +40,9 @@ export interface CourtPublic {
   pricePerSlot: string;
   slotDurationMinutes: number;
   bufferMinutes: number;
+  // URL de uma foto já hospedada externamente, colada pelo OWNER/ADMIN.
+  // `null` = sem foto — o card usa um placeholder neutro.
+  imageUrl: string | null;
 }
 
 export interface ArenaDiscoveryDetail {
@@ -52,6 +60,10 @@ export interface ArenaDiscoveryDetail {
   // informação do OWNER); usado pra distinguir "esta arena ainda está
   // sendo configurada" de qualquer outro estado (erro, sem quadras no dia).
   isReady: boolean;
+  // Como o cliente paga esta arena — o cliente precisa saber ANTES de
+  // confirmar a reserva, por isso é público (diferente de
+  // whatsappPhoneNumberId, que nunca aparece aqui).
+  paymentMode: PaymentMode;
 }
 
 export interface AvailabilitySlot {
@@ -98,7 +110,7 @@ export interface MyBooking {
     id: string;
     name: string;
     sport: Sport;
-    arena: { id: string; name: string; slug: string; timezone: string };
+    arena: { id: string; name: string; slug: string; timezone: string; paymentMode: PaymentMode };
   };
 }
 
@@ -135,6 +147,10 @@ export interface AdminArena {
   // Fase 28 — só presente na resposta de detalhe (GET /arenas/:arenaId);
   // ausente em GET /arenas (lista), que devolve ArenaSummary sem esse campo.
   setupStatus?: ArenaSetupStatus;
+  // Configuração de pagamento desta arena — default ONLINE no backend, o
+  // OWNER/ADMIN muda em Configurações (PATCH /arenas/:arenaId, mesma
+  // autorização já usada pro resto desta tela).
+  paymentMode: PaymentMode;
 }
 
 export interface Court {
@@ -147,6 +163,9 @@ export interface Court {
   pricePerSlot: string;
   slotDurationMinutes: number;
   bufferMinutes: number;
+  // Ver comentário em CourtPublic — mesmo campo, aqui na visão de gestão
+  // (inclui quadras inativas, sem filtro público).
+  imageUrl: string | null;
 }
 
 export interface OperatingInterval {

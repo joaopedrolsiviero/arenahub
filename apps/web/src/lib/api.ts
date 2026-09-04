@@ -127,17 +127,25 @@ export const api = {
     ),
 
   // Idempotency-Key é obrigatória (Fase 4) — nunca opcional aqui.
+  // `additionalStartTimes` é opcional e aditivo (Fase de múltiplos horários)
+  // — quando ausente, o corpo é idêntico ao de sempre e o backend devolve um
+  // único Booking; quando presente, devolve um array (um Booking por trecho
+  // contínuo de horários, ver BookingsService.createCustomerBookingBatch).
   createBooking: (
     token: string | null,
     arenaId: string,
     courtId: string,
     startsAt: string,
     idempotencyKey: string,
-  ): Promise<Booking> =>
+    additionalStartTimes?: string[],
+  ): Promise<Booking | Booking[]> =>
     request(`/arenas/${arenaId}/courts/${courtId}/bookings`, {
       token,
       method: 'POST',
-      body: { startsAt },
+      body:
+        additionalStartTimes && additionalStartTimes.length > 0
+          ? { startsAt, additionalStartTimes }
+          : { startsAt },
       headers: { 'Idempotency-Key': idempotencyKey },
     }),
 
@@ -179,7 +187,13 @@ export const api = {
     dto: Partial<
       Pick<
         AdminArena,
-        'name' | 'description' | 'phone' | 'email' | 'timezone' | 'whatsappPhoneNumberId'
+        | 'name'
+        | 'description'
+        | 'phone'
+        | 'email'
+        | 'timezone'
+        | 'whatsappPhoneNumberId'
+        | 'paymentMode'
       >
     >,
   ): Promise<AdminArena> =>
@@ -201,6 +215,7 @@ export const api = {
       pricePerSlot?: number;
       slotDurationMinutes?: number;
       bufferMinutes?: number;
+      imageUrl?: string;
     },
   ): Promise<Court> => request(`/arenas/${arenaId}/courts`, { token, method: 'POST', body: dto }),
 
@@ -215,6 +230,9 @@ export const api = {
       slotDurationMinutes: number;
       bufferMinutes: number;
       isActive: boolean;
+      // String vazia ('') é o sinal pra remover a foto — o backend
+      // (CourtsService.update) converte pra `null` antes de persistir.
+      imageUrl: string;
     }>,
   ): Promise<Court> =>
     request(`/arenas/${arenaId}/courts/${courtId}`, { token, method: 'PATCH', body: dto }),

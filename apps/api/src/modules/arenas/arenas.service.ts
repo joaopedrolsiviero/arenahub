@@ -1,5 +1,5 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { ArenaRole, Prisma, Sport } from '@prisma/client';
+import { ArenaRole, PaymentMode, Prisma, Sport } from '@prisma/client';
 import type { Court } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ArenaMembersService, ArenaMemberWithUser } from '../arena-members/arena-members.service';
@@ -24,6 +24,11 @@ export interface ArenaFields {
   // este campo), só nas respostas administrativas (OWNER/ADMIN) já
   // protegidas por `ArenaAccessGuard`.
   whatsappPhoneNumberId: string | null;
+  // Ao contrário de `whatsappPhoneNumberId`, este campo é PÚBLICO
+  // deliberadamente — o cliente final (nunca autenticado como membro da
+  // arena) precisa saber, antes de confirmar uma reserva, se vai ser
+  // levado ao pagamento online ou se o pagamento é presencial.
+  paymentMode: PaymentMode;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -89,6 +94,7 @@ export interface CourtPublic {
   pricePerSlot: Prisma.Decimal;
   slotDurationMinutes: number;
   bufferMinutes: number;
+  imageUrl: string | null;
 }
 
 // Omit<..., 'whatsappPhoneNumberId'>: descoberta pública nunca expõe esse
@@ -249,6 +255,7 @@ export class ArenasService {
         phone: true,
         email: true,
         timezone: true,
+        paymentMode: true,
         createdAt: true,
         updatedAt: true,
         courts: {
@@ -261,6 +268,7 @@ export class ArenasService {
             pricePerSlot: true,
             slotDurationMinutes: true,
             bufferMinutes: true,
+            imageUrl: true,
           },
           orderBy: { createdAt: 'asc' },
         },

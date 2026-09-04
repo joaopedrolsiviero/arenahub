@@ -1,4 +1,13 @@
-import { IsEmail, IsNotEmpty, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
+import {
+  IsEmail,
+  IsEnum,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+} from 'class-validator';
+import { PaymentMode } from '@prisma/client';
 import { IsIanaTimezone } from '../validators/is-iana-timezone.validator';
 
 // Regex de slug: minúsculas, dígitos e hífen simples entre palavras — sem
@@ -54,4 +63,12 @@ export class CreateArenaDto {
   @IsString()
   @Matches(/^\d{1,32}$/, { message: 'whatsappPhoneNumberId deve conter apenas dígitos' })
   whatsappPhoneNumberId?: string;
+
+  // Opcional, com default ONLINE no banco (ver schema.prisma) — omitido na
+  // criação preserva o comportamento de sempre; o OWNER/ADMIN muda depois
+  // via PATCH /arenas/:arenaId, mesma autorização já usada pra todo o
+  // resto desta configuração.
+  @IsOptional()
+  @IsEnum(PaymentMode)
+  paymentMode?: PaymentMode;
 }

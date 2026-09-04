@@ -42,8 +42,15 @@ export class CourtsService {
     // findOne em vez de duplicar a checagem).
     await this.findOne(arenaId, courtId);
 
+    // `imageUrl: ''` é o sinal do formulário pra "remover a foto" (o DTO
+    // aceita string vazia só pra isso, ver create-court.dto.ts) — nunca
+    // persistido como string vazia, sempre convertido pra `null`.
+    // `undefined` (campo não enviado) passa direto: Prisma ignora campos
+    // `undefined` num update, nunca zera o que não foi tocado.
+    const data = { ...dto, imageUrl: dto.imageUrl === '' ? null : dto.imageUrl };
+
     try {
-      return await this.prisma.court.update({ where: { id: courtId }, data: dto });
+      return await this.prisma.court.update({ where: { id: courtId }, data });
     } catch (error) {
       throw this.mapPrismaError(error);
     }

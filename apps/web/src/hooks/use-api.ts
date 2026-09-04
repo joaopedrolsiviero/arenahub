@@ -55,10 +55,20 @@ export function useCreateBooking(arenaId: string, courtId: string) {
     mutationFn: async ({
       startsAt,
       idempotencyKey,
+      additionalStartTimes,
     }: {
       startsAt: string;
       idempotencyKey: string;
-    }) => api.createBooking(await getToken(), arenaId, courtId, startsAt, idempotencyKey),
+      additionalStartTimes?: string[];
+    }) =>
+      api.createBooking(
+        await getToken(),
+        arenaId,
+        courtId,
+        startsAt,
+        idempotencyKey,
+        additionalStartTimes,
+      ),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['availability', arenaId, courtId] });
       await queryClient.invalidateQueries({ queryKey: ['my-bookings'] });

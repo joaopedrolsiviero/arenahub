@@ -64,6 +64,7 @@ const availability = {
   to: '2026-09-08T03:00:00.000Z',
   slots: [
     { startsAt: '2026-09-07T13:00:00.000Z', endsAt: '2026-09-07T14:00:00.000Z', available: true },
+    { startsAt: '2026-09-07T14:00:00.000Z', endsAt: '2026-09-07T15:00:00.000Z', available: true },
   ],
 };
 
@@ -166,7 +167,7 @@ describe('CourtBookingPage — fluxo de confirmação de reserva', () => {
     expect(target).toContain('/sign-in?redirect_url=');
     expect(target).toContain('/arenas/arena-1/courts/court-1');
     expect(target).toContain('date=2026-09-07');
-    expect(target).toContain('slot=2026-09-07T13%3A00%3A00.000Z');
+    expect(target).toContain('slots=2026-09-07T13%3A00%3A00.000Z');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
@@ -199,7 +200,7 @@ describe('CourtBookingPage — fluxo de confirmação de reserva', () => {
       const redirectTarget = decodeURIComponent(href.replace('/sign-in?redirect_url=', ''));
       expect(redirectTarget).toContain('/arenas/arena-1/courts/court-1');
       expect(redirectTarget).toContain('date=2026-09-07');
-      expect(redirectTarget).toContain('slot=2026-09-07T13%3A00%3A00.000Z');
+      expect(redirectTarget).toContain('slots=2026-09-07T13%3A00%3A00.000Z');
     });
 
     it('nunca chama createBooking a partir do link de entrar (login continua sendo o único caminho pra autenticar)', async () => {
@@ -222,11 +223,63 @@ describe('CourtBookingPage — fluxo de confirmação de reserva', () => {
     mockedUseAuth.mockReturnValue({ userId: 'user-1', isLoaded: true });
     searchParamsValue = new URLSearchParams({
       date: '2026-09-07',
-      slot: '2026-09-07T13:00:00.000Z',
+      slots: '2026-09-07T13:00:00.000Z',
     });
     renderPage();
 
     expect(await screen.findByText('Resumo da reserva')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Confirmar reserva' })).toBeInTheDocument();
+  });
+
+  // Fase "melhorias no fluxo de reserva" — seleção de múltiplos horários
+  // numa única ação de reserva (item 2 do prompt).
+  describe('Múltiplos horários numa única reserva', () => {
+    it('seleciona dois horários e confirma enviando startsAt + additionalStartTimes', async () => {
+      mutateAsync.mockResolvedValue([{ id: 'booking-1' }, { id: 'booking-2' }]);
+      renderPage();
+
+      fireEvent.click(await screen.findByRole('button', { name: /Selecionar horário 10:00/ }));
+      fireEvent.click(await screen.findByRole('button', { name: /Selecionar horário 11:00/ }));
+      expect(await screen.findByText('Confirmar reserva')).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Confirmar reserva' }));
+
+      await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(1));
+      const call = mutateAsync.mock.calls[0][0];
+      expect(call.startsAt).toBe('2026-09-07T13:00:00.000Z');
+      expect(call.additionalStartTimes).toEqual(['2026-09-07T14:00:00.000Z']);
+
+      // Resultado é um array (mais de um Booking) — navega pra primeira.
+      await waitFor(() => expect(push).toHaveBeenCalledWith('/minhas-reservas/booking-1?created=true'));
+    });
+
+    it('clicar de novo no mesmo horário remove da seleção (toggle)', async () => {
+      renderPage();
+
+      const first = await screen.findByRole('button', { name: /Selecionar horário 10:00/ });
+      fireEvent.click(first);
+      fireEvent.click(await screen.findByRole('button', { name: /Selecionar horário 11:00/ }));
+      fireEvent.click(first); // desmarca o primeiro
+
+      fireEvent.click(screen.getByRole('button', { name: 'Confirmar reserva' }));
+
+      await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(1));
+      const call = mutateAsync.mock.calls[0][0];
+      expect(call.startsAt).toBe('2026-09-07T14:00:00.000Z');
+      expect(call.additionalStartTimes).toEqual([]);
+    });
+
+    it('resposta de um único Booking (horários consecutivos mesclados) ainda navega corretamente', async () => {
+      mutateAsync.mockResolvedValue({ id: 'booking-merged' });
+      renderPage();
+
+      fireEvent.click(await screen.findByRole('button', { name: /Selecionar horário 10:00/ }));
+      fireEvent.click(await screen.findByRole('button', { name: /Selecionar horário 11:00/ }));
+      fireEvent.click(await screen.findByText('Confirmar reserva'));
+
+      await waitFor(() =>
+        expect(push).toHaveBeenCalledWith('/minhas-reservas/booking-merged?created=true'),
+      );
+    });
   });
 });

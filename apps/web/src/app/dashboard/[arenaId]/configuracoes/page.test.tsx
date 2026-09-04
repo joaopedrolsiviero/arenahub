@@ -28,6 +28,7 @@ const ARENA = {
   email: null,
   timezone: 'America/Sao_Paulo',
   whatsappPhoneNumberId: null,
+  paymentMode: 'ONLINE',
   role: 'OWNER',
 };
 
@@ -90,6 +91,54 @@ describe('ArenaSettingsPage — campo de WhatsApp (Fase 16)', () => {
     await waitFor(() => {
       expect(mutateAsync).toHaveBeenCalledWith(
         expect.objectContaining({ whatsappPhoneNumberId: undefined }),
+      );
+    });
+  });
+});
+
+// Fase "melhorias no fluxo de reserva" — item 5: pagamento online/presencial
+// por arena, default ONLINE preservando o comportamento de toda arena já
+// existente.
+describe('ArenaSettingsPage — modo de pagamento', () => {
+  let mutateAsync: jest.Mock;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockedUseMyAdminArenas.mockReturnValue({ data: [{ id: 'arena-1', role: 'OWNER' }] });
+    mockedUseDashboard.mockReturnValue({
+      data: { arena: { name: 'Arena Central', timezone: 'America/Sao_Paulo' } },
+    });
+    mockedUseArena.mockReturnValue({ data: ARENA, isPending: false, isError: false });
+    mutateAsync = jest.fn().mockResolvedValue(ARENA);
+    mockedUseUpdateArena.mockReturnValue({ mutateAsync, isPending: false });
+  });
+
+  it('mostra ONLINE pré-selecionado para uma arena sem configuração explícita (default do backend)', async () => {
+    renderPage();
+    expect(await screen.findByLabelText(/como o cliente paga/i)).toHaveValue('ONLINE');
+  });
+
+  it('pré-seleciona IN_PERSON quando a arena já está configurada como presencial', async () => {
+    mockedUseArena.mockReturnValue({
+      data: { ...ARENA, paymentMode: 'IN_PERSON' },
+      isPending: false,
+      isError: false,
+    });
+    renderPage();
+    expect(await screen.findByLabelText(/como o cliente paga/i)).toHaveValue('IN_PERSON');
+  });
+
+  it('trocar para presencial e salvar envia paymentMode: IN_PERSON no PATCH', async () => {
+    renderPage();
+
+    fireEvent.change(await screen.findByLabelText(/como o cliente paga/i), {
+      target: { value: 'IN_PERSON' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /salvar/i }));
+
+    await waitFor(() => {
+      expect(mutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({ paymentMode: 'IN_PERSON' }),
       );
     });
   });

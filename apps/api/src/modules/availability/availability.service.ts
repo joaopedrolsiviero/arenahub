@@ -162,10 +162,21 @@ export class AvailabilityService {
               startMinutes,
               endMinutes + courtBufferMinutes,
             );
+            // Item "bloqueio dos horários que já passaram" — comparação
+            // sempre contra o instante real (`Date.now()`, nunca o relógio
+            // do navegador), com o slot já calculado no timezone da
+            // ARENA (nunca o do servidor — `slotStart` acima já é um
+            // instante absoluto resolvido a partir do timezone da arena,
+            // então comparar dois instantes absolutos aqui é correto
+            // independentemente de qual timezone o servidor roda). `>`
+            // estrito: um slot cujo início é exatamente agora já está
+            // começando, mesmo espírito do bloqueio de cancelamento
+            // (`BookingsService.cancel`, `startsAt.getTime() <= now`).
+            const hasNotStarted = slotStart.getTime() > Date.now();
             slots.push({
               startsAt: slotStart,
               endsAt: slotEnd,
-              available: withinHours && isOccupancyFree(slotStart, slotEnd),
+              available: withinHours && hasNotStarted && isOccupancyFree(slotStart, slotEnd),
             });
           }
 

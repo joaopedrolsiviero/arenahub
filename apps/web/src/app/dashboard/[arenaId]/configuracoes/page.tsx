@@ -28,6 +28,7 @@ function ArenaForm({ arenaId, arena }: { arenaId: string; arena: AdminArena }) {
   const [whatsappPhoneNumberId, setWhatsappPhoneNumberId] = useState(
     arena.whatsappPhoneNumberId ?? '',
   );
+  const [paymentMode, setPaymentMode] = useState(arena.paymentMode);
   const [error, setError] = useState<string | null>(null);
   const [savedMessage, setSavedMessage] = useState(false);
 
@@ -44,6 +45,7 @@ function ArenaForm({ arenaId, arena }: { arenaId: string; arena: AdminArena }) {
         timezone,
         whatsappPhoneNumberId:
           whatsappPhoneNumberId.trim().length > 0 ? whatsappPhoneNumberId.trim() : undefined,
+        paymentMode,
       });
       setSavedMessage(true);
     } catch (submitError) {
@@ -130,6 +132,29 @@ function ArenaForm({ arenaId, arena }: { arenaId: string; arena: AdminArena }) {
           <p className="text-xs text-muted-foreground">
             Alterar o timezone nunca modifica reservas já existentes — só passa a valer para a
             disponibilidade futura.
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Pagamento</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-1.5">
+          <select
+            id="arena-payment-mode"
+            aria-label="Como o cliente paga"
+            value={paymentMode}
+            onChange={(event) => setPaymentMode(event.target.value as typeof paymentMode)}
+            className="h-8 w-fit rounded-lg border border-input bg-transparent px-2.5 text-sm"
+          >
+            <option value="ONLINE">Online (Mercado Pago)</option>
+            <option value="IN_PERSON">Presencial</option>
+          </select>
+          <p className="text-xs text-muted-foreground">
+            &quot;Online&quot; leva o cliente ao pagamento pelo Mercado Pago ao confirmar a
+            reserva, igual hoje. &quot;Presencial&quot; só confirma a reserva — o pagamento é
+            combinado direto com o cliente, sem nenhum PIX ou cobrança gerada pelo ArenaHub.
           </p>
         </CardContent>
       </Card>

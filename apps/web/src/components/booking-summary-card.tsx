@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button, buttonVariants } from '@/components/ui/button';
-import { formatCurrencyBRL, formatDateTimeInZone, formatTimeInZone } from '@/lib/format';
+import { formatCurrencyBRL, formatDateInZone, formatTimeInZone } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import type { AvailabilitySlot, CourtPublic } from '@/lib/types';
 
@@ -18,16 +18,22 @@ function Row({ label, value, emphasis = false }: { label: string; value: string;
 
 // A síntese precisa deixar confirmar em segundos (item 15) — hierarquia
 // clara entre os dados e o valor total, CTA de marca sem disputa visual.
+//
+// Fase "múltiplos horários": recebe a lista inteira de slots selecionados
+// (nunca mais um único) — o total é sempre `pricePerSlot x quantidade`,
+// verdadeiro tanto para um trecho contínuo (um Booking) quanto para
+// horários espaçados (vários Bookings), já que o preço por slot nunca muda
+// dentro da mesma quadra. `slots` chega sempre ordenado por horário.
 export function BookingSummaryCard({
   court,
-  slot,
+  slots,
   timezone,
   isSubmitting,
   onConfirm,
   signInHref,
 }: {
   court: CourtPublic;
-  slot: AvailabilitySlot;
+  slots: AvailabilitySlot[];
   timezone: string;
   isSubmitting: boolean;
   onConfirm: () => void;
@@ -39,6 +45,11 @@ export function BookingSummaryCard({
   // depois do login, através do parâmetro `redirect_url` do Clerk.
   signInHref?: string;
 }) {
+  const total = Number(court.pricePerSlot) * slots.length;
+  const horariosLabel = slots
+    .map((slot) => `${formatTimeInZone(slot.startsAt, timezone)}–${formatTimeInZone(slot.endsAt, timezone)}`)
+    .join(', ');
+
   return (
     <Card className="border-2 border-brand/25">
       <CardHeader>
@@ -46,10 +57,10 @@ export function BookingSummaryCard({
       </CardHeader>
       <CardContent className="flex flex-col gap-2.5">
         <Row label="Quadra" value={court.name} />
-        <Row label="Data e horário" value={formatDateTimeInZone(slot.startsAt, timezone)} />
-        <Row label="Término previsto" value={formatTimeInZone(slot.endsAt, timezone)} />
+        <Row label="Data" value={formatDateInZone(slots[0]!.startsAt, timezone)} />
+        <Row label={slots.length > 1 ? 'Horários' : 'Horário'} value={horariosLabel} />
         <div className="my-1 h-px bg-border" />
-        <Row label="Total" value={formatCurrencyBRL(court.pricePerSlot)} emphasis />
+        <Row label="Total" value={formatCurrencyBRL(total)} emphasis />
       </CardContent>
       <CardFooter>
         {signInHref ? (
