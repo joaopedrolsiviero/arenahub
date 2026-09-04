@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { PlusIcon } from 'lucide-react';
 import { ArenaSelector } from '@/components/arena-selector';
+import { SiteBrand } from '@/components/site-brand';
 import type { AdminArena } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
@@ -38,20 +39,13 @@ export function DashboardHeader({
     <header className="sticky top-0 z-20 border-b border-border/70 bg-background/85 backdrop-blur-md">
       <div className="mx-auto flex w-full max-w-5xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-6">
         <div className="flex min-w-0 items-center gap-3">
-          <Link
-            href="/"
-            className="flex shrink-0 items-center gap-1.5 font-heading text-sm font-bold tracking-tight"
-          >
-            <span className="flex size-6 items-center justify-center rounded-md bg-brand text-brand-foreground">
-              <svg viewBox="0 0 24 24" fill="none" className="size-3.5" aria-hidden="true">
-                <path
-                  d="M4 12a8 8 0 0 1 16 0M4 12a8 8 0 0 0 16 0M4 12h16"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                />
-              </svg>
-            </span>
+          {/* Fase de Branding — ícone compacto da Siviero (não a logo
+              completa: espaço estreito, ao lado do nome da arena e do
+              seletor). ArenaHub continua sendo o nome do produto — o
+              dashboard em si já não repetia "ArenaHub" por extenso aqui
+              antes desta fase; nenhuma mudança de rótulo foi necessária. */}
+          <Link href="/" aria-label="ArenaHub — página inicial" className="flex shrink-0 items-center">
+            <SiteBrand variant="icon" className="h-6 w-auto" />
           </Link>
           <div className="h-5 w-px shrink-0 bg-border" />
           {/* min-w-0 + truncate (item 3/62): sem isso, um nome de arena longo

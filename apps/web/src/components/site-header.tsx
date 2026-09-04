@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Show, UserButton } from '@clerk/nextjs';
 import { CalendarCheckIcon, LayoutGridIcon } from 'lucide-react';
+import { SiteBrand } from '@/components/site-brand';
 import { buttonVariants } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
@@ -27,18 +28,12 @@ export function SiteHeader() {
   return (
     <header className="sticky top-0 z-20 border-b border-border/70 bg-background/85 backdrop-blur-md">
       <div className="mx-auto flex h-16 w-full max-w-5xl items-center justify-between gap-4 px-4 sm:px-6">
-        <Link href="/" className="flex items-center gap-2 font-heading text-lg font-bold tracking-tight">
-          <span className="flex size-7 items-center justify-center rounded-lg bg-brand text-brand-foreground">
-            <svg viewBox="0 0 24 24" fill="none" className="size-4" aria-hidden="true">
-              <path
-                d="M4 12a8 8 0 0 1 16 0M4 12a8 8 0 0 0 16 0M4 12h16"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-              />
-            </svg>
-          </span>
-          ArenaHub
+        {/* Fase de Branding — logo completa da Siviero (empresa por trás do
+            ArenaHub) no header público, limpa (sem texto adicional
+            empilhado). O produto continua identificado pelo título da
+            página/metadata ("ArenaHub") e pela navegação abaixo. */}
+        <Link href="/" aria-label="ArenaHub — página inicial" className="flex items-center">
+          <SiteBrand variant="full" className="h-8 w-auto sm:h-9" />
         </Link>
 
         <Show when="signed-in">

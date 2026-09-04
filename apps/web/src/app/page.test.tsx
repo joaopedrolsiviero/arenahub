@@ -13,10 +13,14 @@ jest.mock('@clerk/nextjs', () => ({
 }));
 
 describe('Home', () => {
-  it('renders the ArenaHub wordmark and the value-proposition heading', () => {
+  // Fase de Branding — a wordmark de texto "ArenaHub" no header virou a
+  // logo oficial da Siviero (`SiteBrand`); o produto continua identificado
+  // pelo `aria-label="ArenaHub"` no wrapper (acessibilidade) e pelo
+  // heading de valor logo abaixo, nunca removido.
+  it('renders the Siviero brand mark (ArenaHub via aria-label) and the value-proposition heading', () => {
     render(<Home />);
 
-    expect(screen.getByText('ArenaHub')).toBeInTheDocument();
+    expect(screen.getByLabelText('ArenaHub')).toBeInTheDocument();
     expect(
       screen.getByRole('heading', { name: 'Reserve sua quadra em segundos.' }),
     ).toBeInTheDocument();

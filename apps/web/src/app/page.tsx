@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { Show, UserButton } from '@clerk/nextjs';
 import { ArrowRightIcon, CalendarCheckIcon, ShieldCheckIcon, ZapIcon } from 'lucide-react';
+import { SiteBrand } from '@/components/site-brand';
 import { buttonVariants } from '@/components/ui/button';
 
 const HIGHLIGHTS = [
@@ -25,18 +26,12 @@ export default function Home() {
   return (
     <div className="flex min-h-[100dvh] flex-col">
       <header className="mx-auto flex w-full max-w-5xl items-center justify-between px-6 py-6 sm:px-8">
-        <span className="flex items-center gap-2 font-heading text-lg font-bold tracking-tight">
-          <span className="flex size-7 items-center justify-center rounded-lg bg-brand text-brand-foreground">
-            <svg viewBox="0 0 24 24" fill="none" className="size-4" aria-hidden="true">
-              <path
-                d="M4 12a8 8 0 0 1 16 0M4 12a8 8 0 0 0 16 0M4 12h16"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-              />
-            </svg>
-          </span>
-          ArenaHub
+        {/* Fase de Branding — logo completa da Siviero na home pública,
+            limpa. O ArenaHub continua claramente identificado como o
+            produto pelo título/metadata da página e pelo conteúdo abaixo
+            ("Reserve sua quadra em segundos", CTAs de arena/reserva). */}
+        <span aria-label="ArenaHub" className="flex items-center">
+          <SiteBrand variant="full" className="h-8 w-auto sm:h-9" />
         </span>
         <Show when="signed-in">
           <UserButton />
