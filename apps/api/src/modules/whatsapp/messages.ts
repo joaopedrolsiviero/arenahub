@@ -1,4 +1,5 @@
 import { DateTime } from 'luxon';
+import { PaymentStatus } from '@prisma/client';
 
 // Todo texto que o cliente vê nesta fase vem SOMENTE daqui — nunca prosa
 // gerada pelo LLM (a única saída do modelo, em `intent.service.ts`, é um
@@ -63,6 +64,50 @@ export const whatsappMessages = {
 
   bookingConfirmed: (courtName: string, dateLabel: string, timeLabel: string, priceBRL: string) =>
     `Reserva confirmada! 🏐\n${courtName}\n${dateLabel} às ${timeLabel}\n${priceBRL}`,
+
+  // W1 — arena ONLINE: a reserva já está confirmada, mas só é garantida
+  // após o pagamento (mesma regra do site/app). O código PIX vem SEMPRE do
+  // backend/provider (PaymentsService/Mercado Pago) — nunca gerado ou
+  // alterado aqui.
+  bookingConfirmedPixPending: (
+    courtName: string,
+    dateLabel: string,
+    timeLabel: string,
+    priceBRL: string,
+    pixCopyPaste: string,
+  ) =>
+    `Reserva confirmada! 🏐\n${courtName}\n${dateLabel} às ${timeLabel}\n${priceBRL}\n\n` +
+    `Para garantir sua reserva, finalize o pagamento via PIX (copia e cola):\n${pixCopyPaste}\n\n` +
+    'Envie "status" a qualquer momento para conferir se o pagamento já foi aprovado.',
+
+  bookingConfirmedPaymentFailed: (courtName: string, dateLabel: string, timeLabel: string) =>
+    `Reserva confirmada! 🏐\n${courtName}\n${dateLabel} às ${timeLabel}\n\n` +
+    'Não consegui gerar o pagamento PIX agora. Envie "status" em alguns instantes para tentar novamente — nenhuma cobrança duplicada será feita.',
+
+  paymentStatusNotFound: 'Não encontrei nenhum pagamento para consultar no momento.',
+
+  paymentStatus: (status: PaymentStatus, pixCopyPaste: string | null) => {
+    switch (status) {
+      case PaymentStatus.PAID:
+        return 'Seu pagamento foi aprovado! ✅ Reserva confirmada.';
+      case PaymentStatus.PENDING:
+        return pixCopyPaste
+          ? `Seu pagamento ainda está pendente. Aqui está o código PIX novamente:\n${pixCopyPaste}`
+          : 'Seu pagamento ainda está pendente.';
+      case PaymentStatus.FAILED:
+        return 'O pagamento não foi aprovado. Envie "status" novamente em instantes ou entre em contato com a arena.';
+      case PaymentStatus.EXPIRED:
+        return 'O prazo para pagamento expirou. Entre em contato com a arena para verificar sua reserva.';
+      case PaymentStatus.CANCELLED:
+        return 'Este pagamento foi cancelado.';
+      case PaymentStatus.REFUNDING:
+        return 'Seu reembolso está sendo processado.';
+      case PaymentStatus.REFUNDED:
+        return 'Seu pagamento foi reembolsado.';
+      default:
+        return 'Não consegui identificar o status do pagamento agora.';
+    }
+  },
 
   bookingDeclined: 'Tudo bem, a reserva não foi confirmada.',
   bookingConflict:

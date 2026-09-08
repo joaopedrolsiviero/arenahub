@@ -7,6 +7,7 @@ import { AvailabilityModule } from '../availability/availability.module';
 import { BookingsModule } from '../bookings/bookings.module';
 import { IdempotencyModule } from '../idempotency/idempotency.module';
 import { AiModule } from '../ai/ai.module';
+import { PaymentsModule } from '../payments/payments.module';
 import { WhatsAppController } from './whatsapp.controller';
 import { WhatsAppService } from './whatsapp.service';
 import { ConversationService } from './conversation.service';
@@ -35,6 +36,12 @@ import { MetaWhatsAppProviderService } from './providers/meta-whatsapp-provider.
     BookingsModule,
     IdempotencyModule,
     AiModule,
+    // W1 — PaymentsModule já exportava PaymentsService prevendo justamente
+    // este consumidor futuro (ver payments.module.ts). Sem forwardRef: nem
+    // PaymentsModule nem BookingsModule importam WhatsAppModule de volta,
+    // então não existe ciclo aqui (o ciclo Payments<->Bookings já existente
+    // é resolvido pelos próprios forwardRef() daqueles dois módulos).
+    PaymentsModule,
   ],
   controllers: [WhatsAppController],
   providers: [

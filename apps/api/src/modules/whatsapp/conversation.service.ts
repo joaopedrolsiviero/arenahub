@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { ConflictException, Injectable, Logger } from '@nestjs/common';
 import { Prisma, WhatsAppConversationState } from '@prisma/client';
-import type { Court, WhatsAppConversation } from '@prisma/client';
+import type { Court, PaymentMode, WhatsAppConversation } from '@prisma/client';
 import { DateTime } from 'luxon';
 import { PrismaService } from '../../prisma/prisma.service';
 import { UsersService } from '../users/users.service';
@@ -10,6 +10,7 @@ import { CourtsService } from '../courts/courts.service';
 import { AvailabilityService, AvailabilitySlot } from '../availability/availability.service';
 import { BookingsService } from '../bookings/bookings.service';
 import { IdempotencyService } from '../idempotency/idempotency.service';
+import { PaymentsService } from '../payments/payments.service';
 import { WhatsAppIntentService } from './intent.service';
 import { formatDateLabel, formatPriceBRL, formatTimeLabel, whatsappMessages } from './messages';
 import {
@@ -68,6 +69,7 @@ export class ConversationService {
     private readonly availabilityService: AvailabilityService,
     private readonly bookingsService: BookingsService,
     private readonly idempotencyService: IdempotencyService,
+    private readonly paymentsService: PaymentsService,
     private readonly intentService: WhatsAppIntentService,
   ) {}
 
@@ -89,7 +91,14 @@ export class ConversationService {
 
     const arena = await this.prisma.arena.findUnique({
       where: { id: arenaId },
-      select: { id: true, name: true, phone: true, description: true, timezone: true },
+      select: {
+        id: true,
+        name: true,
+        phone: true,
+        description: true,
+        timezone: true,
+        paymentMode: true,
+      },
     });
     if (!arena) {
       // Não deveria acontecer (o webhook já resolveu arenaId a partir de um
@@ -138,6 +147,7 @@ export class ConversationService {
       phone: string | null;
       description: string | null;
       timezone: string;
+      paymentMode: PaymentMode;
     },
     user: { id: string },
     conversation: WhatsAppConversation,
@@ -220,6 +230,8 @@ export class ConversationService {
           })),
         );
       }
+      case 'PAYMENT_STATUS':
+        return this.handlePaymentStatus(user, conversation);
       case 'UNKNOWN':
       default:
         return whatsappMessages.genericHelp;
@@ -402,7 +414,7 @@ export class ConversationService {
   }
 
   private async handleConfirmingBooking(
-    arena: { id: string; timezone: string },
+    arena: { id: string; timezone: string; paymentMode: PaymentMode },
     user: { id: string },
     conversation: WhatsAppConversation,
     text: string,
@@ -468,14 +480,91 @@ export class ConversationService {
           return { status: 201, body: booking };
         },
       );
-      void result;
-      await this.resetToIdle(conversation.id);
-      return whatsappMessages.bookingConfirmed(
-        selected.name,
-        dateLabel,
-        timeLabel,
-        selected.priceBRL,
-      );
+      const booking = result.body;
+
+      if (arena.paymentMode === 'IN_PERSON') {
+        await this.resetToIdle(conversation.id);
+        return whatsappMessages.bookingConfirmed(
+          selected.name,
+          dateLabel,
+          timeLabel,
+          selected.priceBRL,
+        );
+      }
+
+      // W1 — arena ONLINE: reaproveita literalmente PaymentsService/
+      // PaymentProvider/Mercado Pago já usados pelo site (item 3 do
+      // prompt) — a MESMA Idempotency-Key da reserva (`pendingActionId`)
+      // também protege a criação do Payment (escopo de unicidade
+      // `(bookingId, idempotencyKey)`, totalmente separado do escopo de
+      // `IdempotencyKey.(userId,endpoint,key)` usado acima — nenhuma
+      // colisão possível entre os dois usos da mesma string).
+      //
+      // Depois de resolvido (com ou sem sucesso), a conversa volta a IDLE
+      // mas MANTÉM `pendingBookingId` apontando pra esta reserva — reusa o
+      // campo já existente (em vez de um novo estado/migração) só pra que
+      // uma mensagem de acompanhamento ("status") saiba qual reserva
+      // consultar sem precisar perguntar de novo.
+      try {
+        const payment = await this.paymentsService.createPayment(
+          user.id,
+          booking.id,
+          conversation.pendingActionId,
+        );
+        await this.updateConversation(conversation.id, {
+          state: WhatsAppConversationState.IDLE,
+          pendingOptions: Prisma.JsonNull,
+          pendingDate: null,
+          pendingTime: null,
+          pendingCourtId: null,
+          pendingBookingId: booking.id,
+          pendingActionId: null,
+          expiresAt: null,
+        });
+        if (payment.status === 'PENDING' && payment.pixCopyPaste) {
+          return whatsappMessages.bookingConfirmedPixPending(
+            selected.name,
+            dateLabel,
+            timeLabel,
+            selected.priceBRL,
+            payment.pixCopyPaste,
+          );
+        }
+        if (payment.status === 'PAID') {
+          return whatsappMessages.bookingConfirmed(
+            selected.name,
+            dateLabel,
+            timeLabel,
+            selected.priceBRL,
+          );
+        }
+        // FAILED (ou qualquer outro status sem PIX disponível ainda) — a
+        // reserva já está confirmada (item 6 do prompt: nunca deixar o
+        // cliente confuso); nenhuma segunda tentativa automática é feita
+        // aqui, o cliente pode pedir "status" pra tentar de novo.
+        return whatsappMessages.bookingConfirmedPaymentFailed(selected.name, dateLabel, timeLabel);
+      } catch (paymentError) {
+        // A reserva já foi criada e commitada — nunca desfeita por uma
+        // falha na criação do pagamento (item 6 do prompt). O Payment já
+        // foi marcado FAILED dentro de PaymentsService antes de propagar
+        // qualquer erro que não seja PaymentProviderError.
+        await this.updateConversation(conversation.id, {
+          state: WhatsAppConversationState.IDLE,
+          pendingOptions: Prisma.JsonNull,
+          pendingDate: null,
+          pendingTime: null,
+          pendingCourtId: null,
+          pendingBookingId: booking.id,
+          pendingActionId: null,
+          expiresAt: null,
+        });
+        this.logger.error(
+          `Falha ao criar pagamento pro booking ${booking.id} via WhatsApp: ${
+            paymentError instanceof Error ? paymentError.message : 'erro desconhecido'
+          }`,
+        );
+        return whatsappMessages.bookingConfirmedPaymentFailed(selected.name, dateLabel, timeLabel);
+      }
     } catch (error) {
       await this.resetToIdle(conversation.id);
       if (error instanceof ConflictException) {
@@ -504,6 +593,44 @@ export class ConversationService {
     return whatsappMessages.myBookingsList(
       filtered.map((b) => ({ label: this.describeBooking(b) })),
     );
+  }
+
+  // ---- Consulta de status de pagamento (W1) ----
+
+  /**
+   * `conversation.pendingBookingId` é a ÚNICA fonte pra qual reserva
+   * consultar (nunca um bookingId vindo do LLM/texto — item 4/10 do
+   * prompt). `getPaymentForBooking` já faz a checagem de ownership
+   * (usuário só vê o PRÓPRIO pagamento) por dentro de
+   * `BookingsService.findMyBookingDetail` — nenhuma checagem duplicada
+   * aqui, e uma tentativa de consultar reserva de outro usuário nunca
+   * poderia sequer chegar aqui, já que `pendingBookingId` só é preenchido
+   * por este mesmo fluxo, pra este mesmo usuário.
+   */
+  private async handlePaymentStatus(
+    user: { id: string },
+    conversation: WhatsAppConversation,
+  ): Promise<string> {
+    if (!conversation.pendingBookingId) {
+      return whatsappMessages.paymentStatusNotFound;
+    }
+    try {
+      const payment = await this.paymentsService.getPaymentForBooking(
+        user.id,
+        conversation.pendingBookingId,
+      );
+      if (!payment) {
+        return whatsappMessages.paymentStatusNotFound;
+      }
+      return whatsappMessages.paymentStatus(payment.status, payment.pixCopyPaste);
+    } catch (error) {
+      this.logger.error(
+        `Falha ao consultar status de pagamento via WhatsApp: ${
+          error instanceof Error ? error.message : 'erro desconhecido'
+        }`,
+      );
+      return whatsappMessages.paymentStatusNotFound;
+    }
   }
 
   // ---- Fluxo de cancelamento ----
@@ -589,6 +716,21 @@ export class ConversationService {
         conversation.pendingBookingId,
         user.id,
       );
+      // W1 — mesmo padrão exato de BookingsController.cancel (REST): chama
+      // refundIfPaid incondicionalmente após todo cancelamento bem-sucedido
+      // (item 9 do prompt). refundIfPaid nunca lança e é um no-op seguro
+      // quando não há nada a reembolsar (reserva IN_PERSON, pagamento nunca
+      // concluído, ou já reembolsado) — nenhuma lógica de reembolso
+      // duplicada aqui, só reaproveitada.
+      try {
+        await this.paymentsService.refundIfPaid(conversation.pendingBookingId);
+      } catch (refundError) {
+        this.logger.error(
+          `Falha ao processar reembolso da Booking ${conversation.pendingBookingId} via WhatsApp: ${
+            refundError instanceof Error ? refundError.message : 'erro desconhecido'
+          }`,
+        );
+      }
       await this.resetToIdle(conversation.id);
       return whatsappMessages.cancelConfirmed(selected.label);
     } catch (error) {

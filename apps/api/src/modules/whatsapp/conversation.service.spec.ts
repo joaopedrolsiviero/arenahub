@@ -8,6 +8,7 @@ import { CourtsService } from '../courts/courts.service';
 import { AvailabilityService } from '../availability/availability.service';
 import { BookingsService } from '../bookings/bookings.service';
 import { IdempotencyService } from '../idempotency/idempotency.service';
+import { PaymentsService } from '../payments/payments.service';
 import { WhatsAppIntentService } from './intent.service';
 
 // "Agora" fixo em 2026-08-20T15:00:00Z = 2026-08-20 12:00 em São Paulo
@@ -17,12 +18,18 @@ import { WhatsAppIntentService } from './intent.service';
 const NOW_ISO = '2026-08-20T15:00:00.000Z';
 const TOMORROW_7PM_UTC = new Date('2026-08-21T22:00:00.000Z');
 
+// W1 — IN_PERSON por padrão nesta suíte: preserva o comportamento (e as
+// asserções) de todos os testes já existentes, escritos antes do pagamento
+// via WhatsApp existir. Os cenários ONLINE (criação de Payment, PIX,
+// consulta de status) têm sua própria seção mais abaixo, com
+// `{ ...ARENA, paymentMode: 'ONLINE' }`.
 const ARENA = {
   id: 'arena-1',
   name: 'Arena Central',
   phone: '+5511999990000',
   description: 'A melhor arena da cidade.',
   timezone: 'America/Sao_Paulo',
+  paymentMode: 'IN_PERSON' as const,
 };
 const USER = { id: 'user-1' };
 
@@ -100,6 +107,11 @@ describe('ConversationService', () => {
     findMyBookings: jest.Mock;
   };
   let idempotencyService: { execute: jest.Mock };
+  let paymentsService: {
+    createPayment: jest.Mock;
+    getPaymentForBooking: jest.Mock;
+    refundIfPaid: jest.Mock;
+  };
   let intentService: { interpret: jest.Mock };
   let service: ConversationService;
 
@@ -145,6 +157,11 @@ describe('ConversationService', () => {
           },
         ),
     };
+    paymentsService = {
+      createPayment: jest.fn(),
+      getPaymentForBooking: jest.fn(),
+      refundIfPaid: jest.fn().mockResolvedValue(undefined),
+    };
     intentService = { interpret: jest.fn() };
 
     service = new ConversationService(
@@ -155,6 +172,7 @@ describe('ConversationService', () => {
       availabilityService as unknown as AvailabilityService,
       bookingsService as unknown as BookingsService,
       idempotencyService as unknown as IdempotencyService,
+      paymentsService as unknown as PaymentsService,
       intentService as unknown as WhatsAppIntentService,
     );
   });
@@ -639,6 +657,10 @@ describe('ConversationService', () => {
         'booking-1',
         'user-1',
       );
+      // W1, item 9 — todo cancelamento bem-sucedido chama refundIfPaid,
+      // igual ao REST (BookingsController.cancel); refundIfPaid é quem
+      // decide se há algo a reembolsar, nunca uma checagem duplicada aqui.
+      expect(paymentsService.refundIfPaid).toHaveBeenCalledWith('booking-1');
       expect(reply).toMatch(/reserva cancelada/i);
     });
 
@@ -726,6 +748,186 @@ describe('ConversationService', () => {
 
       expect(reply).toBeDefined();
       expect(typeof reply).toBe('string');
+    });
+  });
+
+  describe('Pagamento PIX via WhatsApp (Fase W1)', () => {
+    const ONLINE_ARENA = { ...ARENA, paymentMode: 'ONLINE' as const };
+    const confirmingBookingConversation = conversation({
+      state: WhatsAppConversationState.CONFIRMING_BOOKING,
+      pendingDate: '2026-08-21',
+      pendingTime: '19:00',
+      pendingCourtId: 'court-1',
+      pendingActionId: 'action-abc',
+      pendingOptions: [{ courtId: 'court-1', name: 'Quadra 1', priceBRL: 'R$ 100,00' }],
+      expiresAt: new Date(new Date(NOW_ISO).getTime() + 60_000),
+    });
+
+    function pixPayment(overrides: Partial<Record<string, unknown>> = {}) {
+      return {
+        id: 'payment-1',
+        bookingId: 'booking-1',
+        status: 'PENDING',
+        amount: 100,
+        currency: 'BRL',
+        checkoutUrl: null,
+        pixCopyPaste: '00020126-fake-pix',
+        qrCodeBase64: null,
+        failureReason: null,
+        paidAt: null,
+        expiresAt: new Date(new Date(NOW_ISO).getTime() + 1_800_000),
+        createdAt: new Date(),
+        refundedAt: null,
+        ...overrides,
+      };
+    }
+
+    it('arena ONLINE + "sim": cria a reserva E o pagamento via PaymentsService, reaproveitando pendingActionId como idempotencyKey', async () => {
+      prisma.arena.findUnique.mockResolvedValue(ONLINE_ARENA);
+      prisma.whatsAppConversation.findUnique.mockResolvedValue(confirmingBookingConversation);
+      paymentsService.createPayment.mockResolvedValue(pixPayment());
+
+      const reply = await service.handleInboundMessage('arena-1', '+5511999998888', 'sim');
+
+      expect(bookingsService.createCustomerBooking).toHaveBeenCalled();
+      expect(paymentsService.createPayment).toHaveBeenCalledWith(
+        'user-1',
+        'booking-1',
+        'action-abc',
+      );
+      expect(reply).toMatch(/reserva confirmada/i);
+      expect(reply).toContain('00020126-fake-pix');
+      // pendingBookingId reaproveitado (nenhum novo estado/migração) pra
+      // uma consulta de status subsequente resolver sem perguntar de novo.
+      expect(lastUpdateData().pendingBookingId).toBe('booking-1');
+      expect(lastUpdateData().state).toBe(WhatsAppConversationState.IDLE);
+    });
+
+    it('arena IN_PERSON + "sim": nunca chama PaymentsService.createPayment (comportamento preservado)', async () => {
+      prisma.arena.findUnique.mockResolvedValue(ARENA); // paymentMode: IN_PERSON
+      prisma.whatsAppConversation.findUnique.mockResolvedValue(confirmingBookingConversation);
+
+      const reply = await service.handleInboundMessage('arena-1', '+5511999998888', 'sim');
+
+      expect(bookingsService.createCustomerBooking).toHaveBeenCalled();
+      expect(paymentsService.createPayment).not.toHaveBeenCalled();
+      expect(reply).toMatch(/reserva confirmada/i);
+      expect(reply).not.toContain('PIX');
+    });
+
+    it('preço/valor nunca é aceito da mensagem: uma confirmação com texto extra ("sim, mas o valor é R$1,00") não é reconhecida como confirmação — isConfirmation exige match exato', async () => {
+      prisma.arena.findUnique.mockResolvedValue(ONLINE_ARENA);
+      prisma.whatsAppConversation.findUnique.mockResolvedValue(confirmingBookingConversation);
+
+      const reply = await service.handleInboundMessage(
+        'arena-1',
+        '+5511999998888',
+        'sim, mas o valor é R$1,00 combinado',
+      );
+
+      expect(bookingsService.createCustomerBooking).not.toHaveBeenCalled();
+      expect(paymentsService.createPayment).not.toHaveBeenCalled();
+      expect(reply).toMatch(/não entendi/i);
+    });
+
+    it('createPayment nunca recebe (nem poderia expor) um campo de valor/preço — a única informação repassada é bookingId + idempotencyKey, sempre resolvidos do domínio', async () => {
+      prisma.arena.findUnique.mockResolvedValue(ONLINE_ARENA);
+      prisma.whatsAppConversation.findUnique.mockResolvedValue(confirmingBookingConversation);
+      paymentsService.createPayment.mockResolvedValue(pixPayment());
+
+      await service.handleInboundMessage('arena-1', '+5511999998888', 'sim');
+
+      expect(paymentsService.createPayment).toHaveBeenCalledWith(
+        'user-1',
+        'booking-1',
+        'action-abc',
+      );
+      expect(paymentsService.createPayment.mock.calls[0]).toHaveLength(3);
+    });
+
+    it('falha na criação do pagamento (provider indisponível): reserva permanece confirmada, cliente é avisado, nenhuma cobrança duplicada é tentada automaticamente', async () => {
+      prisma.arena.findUnique.mockResolvedValue(ONLINE_ARENA);
+      prisma.whatsAppConversation.findUnique.mockResolvedValue(confirmingBookingConversation);
+      paymentsService.createPayment.mockRejectedValue(new Error('provider indisponível'));
+
+      const reply = await service.handleInboundMessage('arena-1', '+5511999998888', 'sim');
+
+      expect(bookingsService.createCustomerBooking).toHaveBeenCalledTimes(1);
+      expect(paymentsService.createPayment).toHaveBeenCalledTimes(1);
+      expect(reply).toMatch(/reserva confirmada/i);
+      expect(reply).toMatch(/não consegui gerar o pagamento/i);
+      expect(lastUpdateData().pendingBookingId).toBe('booking-1');
+    });
+
+    it('duas mensagens "sim" idempotentes (mesma pendingActionId) nunca criam um segundo Payment: reaproveita o replay do IdempotencyService', async () => {
+      prisma.arena.findUnique.mockResolvedValue(ONLINE_ARENA);
+      prisma.whatsAppConversation.findUnique.mockResolvedValue(confirmingBookingConversation);
+      paymentsService.createPayment.mockResolvedValue(pixPayment());
+
+      await service.handleInboundMessage('arena-1', '+5511999998888', 'sim');
+      await service.handleInboundMessage('arena-1', '+5511999998888', 'sim');
+
+      // A MESMA idempotencyKey ('action-abc') é usada nas duas chamadas —
+      // é PaymentsService.createPayment (Fase 17, já testado à parte) quem
+      // garante, por essa chave, que a segunda chamada nunca abre uma
+      // segunda cobrança no provider; aqui confirmamos que o WhatsApp
+      // sempre repassa a MESMA chave, nunca gera uma nova por retry.
+      expect(paymentsService.createPayment).toHaveBeenNthCalledWith(
+        1,
+        'user-1',
+        'booking-1',
+        'action-abc',
+      );
+      expect(paymentsService.createPayment).toHaveBeenNthCalledWith(
+        2,
+        'user-1',
+        'booking-1',
+        'action-abc',
+      );
+    });
+
+    describe('Consulta de status ("status", item 8)', () => {
+      it('com pendingBookingId setado, consulta PaymentsService.getPaymentForBooking com o userId do contexto', async () => {
+        prisma.whatsAppConversation.findUnique.mockResolvedValue(
+          conversation({ pendingBookingId: 'booking-1' }),
+        );
+        intentService.interpret.mockResolvedValue({ intent: 'PAYMENT_STATUS' });
+        paymentsService.getPaymentForBooking.mockResolvedValue(pixPayment({ status: 'PAID' }));
+
+        const reply = await service.handleInboundMessage('arena-1', '+5511999998888', 'status');
+
+        expect(paymentsService.getPaymentForBooking).toHaveBeenCalledWith('user-1', 'booking-1');
+        expect(reply).toMatch(/aprovado/i);
+      });
+
+      it('sem pendingBookingId (nunca houve pagamento nesta conversa): nunca chama PaymentsService, devolve mensagem segura', async () => {
+        prisma.whatsAppConversation.findUnique.mockResolvedValue(
+          conversation({ pendingBookingId: null }),
+        );
+        intentService.interpret.mockResolvedValue({ intent: 'PAYMENT_STATUS' });
+
+        const reply = await service.handleInboundMessage('arena-1', '+5511999998888', 'status');
+
+        expect(paymentsService.getPaymentForBooking).not.toHaveBeenCalled();
+        expect(reply).toMatch(/não encontrei/i);
+      });
+
+      it('PaymentsService lança (ex: reserva de outro usuário/arena — ownership falhou): nunca propaga erro, devolve mensagem segura', async () => {
+        // Simula exatamente a defesa de `findMyBookingDetail` dentro de
+        // `getPaymentForBooking`: 404 quando o booking não é do usuário —
+        // aqui provamos que o handler do WhatsApp nunca vaza esse erro nem
+        // finge sucesso, e nenhum dado de outro usuário é exposto.
+        prisma.whatsAppConversation.findUnique.mockResolvedValue(
+          conversation({ pendingBookingId: 'booking-de-outro-usuario' }),
+        );
+        intentService.interpret.mockResolvedValue({ intent: 'PAYMENT_STATUS' });
+        paymentsService.getPaymentForBooking.mockRejectedValue(new Error('não encontrada'));
+
+        const reply = await service.handleInboundMessage('arena-1', '+5511999998888', 'status');
+
+        expect(reply).toBeDefined();
+        expect(reply).toMatch(/não encontrei/i);
+      });
     });
   });
 });

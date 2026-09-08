@@ -18,6 +18,15 @@ import {
   WhatsAppOutboundMessage,
   WhatsAppProvider,
 } from '../src/modules/whatsapp/providers/whatsapp-provider';
+import {
+  PaymentProvider,
+  PaymentProviderCreateRequest,
+  PaymentProviderCreateResult,
+  PaymentProviderRefundResult,
+  PaymentProviderStatusResult,
+  ProviderPaymentStatus,
+  ProviderRefundStatus,
+} from '../src/modules/payments/providers/payment-provider';
 
 // Fase 16: WhatsApp é só mais um canal de entrada pro domínio já existente
 // (ver docs/ARCHITECTURE.md) — esta suíte prova a integração PONTA A PONTA
@@ -39,6 +48,77 @@ class FakeAiProvider extends AiProvider {
   generate(): Promise<AiGenerateResponse> {
     this.requestCount += 1;
     return Promise.resolve(this.nextResponse);
+  }
+}
+
+// W1 — mesmo padrão exato de FakePaymentProvider em payments.e2e-spec.ts
+// (Fase 17/27): a arena de teste ONLINE usa este fake em vez do Mercado
+// Pago real, nunca uma segunda implementação de provider.
+class FakePaymentProvider extends PaymentProvider {
+  createCalls: PaymentProviderCreateRequest[] = [];
+  nextCreateResult: PaymentProviderCreateResult = {
+    providerPaymentId: 'mp-wa-fake',
+    checkoutUrl: null,
+    pixCopyPaste: '00020126-wa-fake-pix',
+    qrCodeBase64: null,
+  };
+  nextCreateError: Error | null = null;
+  statusByProviderPaymentId = new Map<string, ProviderPaymentStatus>();
+  private idCounter = 0;
+
+  createPayment(request: PaymentProviderCreateRequest): Promise<PaymentProviderCreateResult> {
+    this.createCalls.push(request);
+    if (this.nextCreateError) {
+      const error = this.nextCreateError;
+      this.nextCreateError = null;
+      return Promise.reject(error);
+    }
+    this.idCounter += 1;
+    const result = {
+      ...this.nextCreateResult,
+      providerPaymentId: `${this.nextCreateResult.providerPaymentId}-${this.idCounter}`,
+    };
+    this.statusByProviderPaymentId.set(result.providerPaymentId, 'PENDING');
+    return Promise.resolve(result);
+  }
+
+  getPaymentStatus(providerPaymentId: string): Promise<PaymentProviderStatusResult> {
+    const status = this.statusByProviderPaymentId.get(providerPaymentId) ?? 'PENDING';
+    return Promise.resolve({
+      status,
+      paidAt: status === 'PAID' ? new Date() : undefined,
+      failureReason: status === 'FAILED' ? 'insufficient_funds' : undefined,
+    });
+  }
+
+  refundCalls: { providerPaymentId: string; idempotencyKey: string }[] = [];
+  nextRefundResult: PaymentProviderRefundResult = {
+    refundId: 'refund-wa-fake',
+    status: 'REFUNDED',
+  };
+  nextRefundError: Error | null = null;
+  private refundIdCounter = 0;
+
+  refundPayment(
+    providerPaymentId: string,
+    idempotencyKey: string,
+  ): Promise<PaymentProviderRefundResult> {
+    this.refundCalls.push({ providerPaymentId, idempotencyKey });
+    if (this.nextRefundError) {
+      const error = this.nextRefundError;
+      this.nextRefundError = null;
+      return Promise.reject(error);
+    }
+    this.refundIdCounter += 1;
+    const result = {
+      ...this.nextRefundResult,
+      refundId: `${this.nextRefundResult.refundId}-${this.refundIdCounter}`,
+    };
+    return Promise.resolve(result);
+  }
+
+  getRefundStatus(): Promise<ProviderRefundStatus> {
+    return Promise.resolve(this.nextRefundResult.status);
   }
 }
 
@@ -123,15 +203,22 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
   let prisma: PrismaClient;
   let fakeAiProvider: FakeAiProvider;
   let fakeWhatsappProvider: FakeWhatsAppProvider;
+  let fakePaymentProvider: FakePaymentProvider;
   let arenaAId: string;
   let arenaBId: string;
+  let arenaCId: string;
   let courtAId: string;
   let courtBId: string;
+  let courtCId: string;
   let customerAId: string;
   let customerCId: string;
 
   const PHONE_NUMBER_ID_A = '1000000001';
   const PHONE_NUMBER_ID_B = '1000000002';
+  // W1 — arena dedicada ao fluxo ONLINE (pagamento via PIX), separada da
+  // Arena A (IN_PERSON) pra nunca alterar o comportamento/asserções dos
+  // testes já existentes.
+  const PHONE_NUMBER_ID_C = '1000000003';
   let messageCounter = 0;
   function nextMessageId(): string {
     messageCounter += 1;
@@ -177,6 +264,10 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
         phone: '1140000000',
         description: 'Arena de teste do canal de WhatsApp.',
         whatsappPhoneNumberId: PHONE_NUMBER_ID_A,
+        // Explícito (mesmo sendo o oposto do default do schema) — preserva
+        // 100% do comportamento dos testes já existentes desta suíte,
+        // escritos antes do pagamento via WhatsApp (W1) existir.
+        paymentMode: 'IN_PERSON',
       },
     });
     arenaAId = arenaA.id;
@@ -227,8 +318,40 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
     });
     courtBId = courtB.id;
 
+    // W1 — arena ONLINE dedicada ao fluxo de pagamento PIX via WhatsApp.
+    const arenaC = await prisma.arena.create({
+      data: {
+        name: 'Arena WhatsApp C (pagamento online)',
+        slug: 'wa-e2e-arena-c',
+        timezone: 'America/Sao_Paulo',
+        phone: '1140000002',
+        whatsappPhoneNumberId: PHONE_NUMBER_ID_C,
+        paymentMode: 'ONLINE',
+      },
+    });
+    arenaCId = arenaC.id;
+    await prisma.arenaMember.create({
+      data: { arenaId: arenaCId, userId: ownerA.id, role: ArenaRole.OWNER },
+    });
+    for (const day of Object.values(Weekday)) {
+      await prisma.arenaOperatingHours.create({
+        data: { arenaId: arenaCId, dayOfWeek: day, opensAt: 8 * 60, closesAt: 22 * 60 },
+      });
+    }
+    const courtC = await prisma.court.create({
+      data: {
+        arenaId: arenaCId,
+        name: 'Quadra C1',
+        sport: Sport.BEACH_VOLLEYBALL,
+        pricePerSlot: 100,
+        slotDurationMinutes: 60,
+      },
+    });
+    courtCId = courtC.id;
+
     fakeAiProvider = new FakeAiProvider();
     fakeWhatsappProvider = new FakeWhatsAppProvider();
+    fakePaymentProvider = new FakePaymentProvider();
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
@@ -245,6 +368,8 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
       .useValue(fakeAiProvider)
       .overrideProvider(WhatsAppProvider)
       .useValue(fakeWhatsappProvider)
+      .overrideProvider(PaymentProvider)
+      .useValue(fakePaymentProvider)
       .compile();
 
     app = moduleFixture.createNestApplication({ rawBody: true });
@@ -257,11 +382,12 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
 
   afterAll(async () => {
     await prisma.whatsAppConversation.deleteMany({
-      where: { arenaId: { in: [arenaAId, arenaBId] } },
+      where: { arenaId: { in: [arenaAId, arenaBId, arenaCId] } },
     });
     await prisma.whatsAppEvent.deleteMany({});
-    await prisma.booking.deleteMany({ where: { courtId: { in: [courtAId, courtBId] } } });
-    await prisma.arena.deleteMany({ where: { id: { in: [arenaAId, arenaBId] } } });
+    await prisma.payment.deleteMany({ where: { arenaId: arenaCId } });
+    await prisma.booking.deleteMany({ where: { courtId: { in: [courtAId, courtBId, courtCId] } } });
+    await prisma.arena.deleteMany({ where: { id: { in: [arenaAId, arenaBId, arenaCId] } } });
     await prisma.user.deleteMany({ where: { clerkId: { in: Object.values(TOKENS) } } });
     await prisma.user.deleteMany({
       where: { phone: { in: [CUSTOMER_A.phone, CUSTOMER_C.phone] } },
@@ -275,12 +401,24 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
   beforeEach(async () => {
     fakeAiProvider.nextResponse = { text: '{"intent":"UNKNOWN"}' };
     fakeWhatsappProvider.sent = [];
+    fakePaymentProvider.createCalls = [];
+    fakePaymentProvider.refundCalls = [];
+    fakePaymentProvider.nextCreateError = null;
+    fakePaymentProvider.nextRefundError = null;
+    fakePaymentProvider.nextCreateResult = {
+      providerPaymentId: 'mp-wa-fake',
+      checkoutUrl: null,
+      pixCopyPaste: '00020126-wa-fake-pix',
+      qrCodeBase64: null,
+    };
+    fakePaymentProvider.nextRefundResult = { refundId: 'refund-wa-fake', status: 'REFUNDED' };
     // Reseta o estado de conversa entre testes — cada teste começa do IDLE,
     // sem depender de ordem de execução.
     await prisma.whatsAppConversation.deleteMany({
-      where: { arenaId: { in: [arenaAId, arenaBId] } },
+      where: { arenaId: { in: [arenaAId, arenaBId, arenaCId] } },
     });
-    await prisma.booking.deleteMany({ where: { courtId: { in: [courtAId, courtBId] } } });
+    await prisma.payment.deleteMany({ where: { arenaId: arenaCId } });
+    await prisma.booking.deleteMany({ where: { courtId: { in: [courtAId, courtBId, courtCId] } } });
   });
 
   describe('Webhook — verificação e assinatura (itens 4-5)', () => {
@@ -613,6 +751,213 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
       const afterCourt = await prisma.court.findUniqueOrThrow({ where: { id: courtAId } });
       expect(afterCourt.updatedAt.getTime()).toBe(beforeCourt.updatedAt.getTime());
       expect(Number(afterCourt.pricePerSlot)).toBe(Number(beforeCourt.pricePerSlot));
+    });
+  });
+
+  describe('Pagamento PIX via WhatsApp — arena ONLINE (Fase W1)', () => {
+    it('reserva confirmada gera um Payment PENDING real e o cliente recebe o código PIX', async () => {
+      fakeAiProvider.nextResponse = {
+        text: '{"intent":"CREATE_BOOKING","datePhrase":"amanhã","timePhrase":"10h"}',
+      };
+      await send(PHONE_NUMBER_ID_C, CUSTOMER_A.phone.replace('+', ''), 'reservar amanhã às 10h');
+      await send(PHONE_NUMBER_ID_C, CUSTOMER_A.phone.replace('+', ''), 'sim');
+
+      const reply = fakeWhatsappProvider.lastTo(CUSTOMER_A.phone);
+      expect(reply).toMatch(/reserva confirmada/i);
+      expect(reply).toContain('00020126-wa-fake-pix');
+
+      const booking = await prisma.booking.findFirstOrThrow({
+        where: { courtId: courtCId, userId: customerAId, status: BookingStatus.CONFIRMED },
+      });
+      const payment = await prisma.payment.findFirstOrThrow({ where: { bookingId: booking.id } });
+      expect(payment.status).toBe('PENDING');
+      expect(Number(payment.amount)).toBe(100); // sempre o total real da reserva, nunca inventado
+      expect(payment.pixCopyPaste).toBe('00020126-wa-fake-pix');
+
+      const conversation = await prisma.whatsAppConversation.findUniqueOrThrow({
+        where: { arenaId_userId: { arenaId: arenaCId, userId: customerAId } },
+      });
+      expect(conversation.state).toBe('IDLE');
+      expect(conversation.pendingBookingId).toBe(booking.id);
+    });
+
+    it('evento de webhook duplicado (mesmo message id) na confirmação ONLINE nunca cria um segundo Payment', async () => {
+      fakeAiProvider.nextResponse = {
+        text: '{"intent":"CREATE_BOOKING","datePhrase":"amanhã","timePhrase":"11h"}',
+      };
+      await send(PHONE_NUMBER_ID_C, CUSTOMER_A.phone.replace('+', ''), 'reservar amanhã às 11h');
+
+      const confirmId = nextMessageId();
+      await send(PHONE_NUMBER_ID_C, CUSTOMER_A.phone.replace('+', ''), 'sim', confirmId);
+      await send(PHONE_NUMBER_ID_C, CUSTOMER_A.phone.replace('+', ''), 'sim', confirmId);
+
+      const booking = await prisma.booking.findFirstOrThrow({
+        where: { courtId: courtCId, userId: customerAId, status: BookingStatus.CONFIRMED },
+      });
+      const payments = await prisma.payment.findMany({ where: { bookingId: booking.id } });
+      expect(payments).toHaveLength(1);
+      expect(fakePaymentProvider.createCalls).toHaveLength(1);
+    });
+
+    it('falha do provider ao criar o pagamento: reserva permanece confirmada, cliente é avisado, sem cobrança duplicada automática', async () => {
+      fakeAiProvider.nextResponse = {
+        text: '{"intent":"CREATE_BOOKING","datePhrase":"amanhã","timePhrase":"12h"}',
+      };
+      fakePaymentProvider.nextCreateError = new Error('provider indisponível (teste)');
+      await send(PHONE_NUMBER_ID_C, CUSTOMER_A.phone.replace('+', ''), 'reservar amanhã às 12h');
+      await send(PHONE_NUMBER_ID_C, CUSTOMER_A.phone.replace('+', ''), 'sim');
+
+      const reply = fakeWhatsappProvider.lastTo(CUSTOMER_A.phone);
+      expect(reply).toMatch(/reserva confirmada/i);
+      expect(reply).toMatch(/não consegui gerar o pagamento/i);
+
+      const booking = await prisma.booking.findFirstOrThrow({
+        where: { courtId: courtCId, userId: customerAId, status: BookingStatus.CONFIRMED },
+      });
+      const payment = await prisma.payment.findFirstOrThrow({ where: { bookingId: booking.id } });
+      expect(payment.status).toBe('FAILED');
+    });
+
+    it('"status" consulta o pagamento real da última reserva e reflete a aprovação assim que o provider confirma', async () => {
+      fakeAiProvider.nextResponse = {
+        text: '{"intent":"CREATE_BOOKING","datePhrase":"amanhã","timePhrase":"13h"}',
+      };
+      await send(PHONE_NUMBER_ID_C, CUSTOMER_A.phone.replace('+', ''), 'reservar amanhã às 13h');
+      await send(PHONE_NUMBER_ID_C, CUSTOMER_A.phone.replace('+', ''), 'sim');
+
+      fakeAiProvider.nextResponse = { text: '{"intent":"PAYMENT_STATUS"}' };
+      await send(PHONE_NUMBER_ID_C, CUSTOMER_A.phone.replace('+', ''), 'status');
+      expect(fakeWhatsappProvider.lastTo(CUSTOMER_A.phone)).toMatch(/pendente/i);
+
+      const booking = await prisma.booking.findFirstOrThrow({
+        where: { courtId: courtCId, userId: customerAId, status: BookingStatus.CONFIRMED },
+      });
+      const payment = await prisma.payment.findFirstOrThrow({ where: { bookingId: booking.id } });
+      // Simula o provider confirmando o pagamento (equivalente ao que o
+      // webhook real faria via applyProviderStatus — não reimplementado
+      // aqui, só a ponta que o teste precisa: o status muda no banco).
+      await prisma.payment.update({ where: { id: payment.id }, data: { status: 'PAID' } });
+
+      await send(PHONE_NUMBER_ID_C, CUSTOMER_A.phone.replace('+', ''), 'status');
+      expect(fakeWhatsappProvider.lastTo(CUSTOMER_A.phone)).toMatch(/aprovado/i);
+    });
+
+    it('cancelar uma reserva já PAGA aciona o reembolso (mesma regra do REST — refundIfPaid), exatamente uma vez', async () => {
+      const future = new Date(Date.now() + 7 * 86_400_000).toISOString();
+      const booking = await prisma.booking.create({
+        data: {
+          courtId: courtCId,
+          userId: customerAId,
+          type: BookingType.CUSTOMER,
+          status: BookingStatus.CONFIRMED,
+          startsAt: new Date(future),
+          endsAt: new Date(new Date(future).getTime() + 3_600_000),
+          total: 100,
+        },
+      });
+      await prisma.payment.create({
+        data: {
+          bookingId: booking.id,
+          userId: customerAId,
+          arenaId: arenaCId,
+          amount: 100,
+          currency: 'BRL',
+          status: 'PAID',
+          provider: 'MERCADO_PAGO',
+          providerPaymentId: `mp-wa-paid-${booking.id}`,
+          idempotencyKey: `paid-${booking.id}`,
+          paidAt: new Date(),
+        },
+      });
+
+      fakeAiProvider.nextResponse = { text: '{"intent":"CANCEL_BOOKING","datePhrase":null}' };
+      await send(PHONE_NUMBER_ID_C, CUSTOMER_A.phone.replace('+', ''), 'cancelar');
+      await send(PHONE_NUMBER_ID_C, CUSTOMER_A.phone.replace('+', ''), '1');
+      await send(PHONE_NUMBER_ID_C, CUSTOMER_A.phone.replace('+', ''), 'sim');
+
+      const cancelled = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+      expect(cancelled.status).toBe(BookingStatus.CANCELLED);
+      expect(fakePaymentProvider.refundCalls).toHaveLength(1);
+      const payment = await prisma.payment.findFirstOrThrow({ where: { bookingId: booking.id } });
+      expect(['REFUNDING', 'REFUNDED']).toContain(payment.status);
+
+      // Uma segunda tentativa de cancelamento (já cancelada) nunca aciona
+      // um segundo reembolso.
+      await send(PHONE_NUMBER_ID_C, CUSTOMER_A.phone.replace('+', ''), 'cancelar');
+      expect(fakeWhatsappProvider.lastTo(CUSTOMER_A.phone)).toMatch(
+        /não encontrei nenhuma reserva/i,
+      );
+      expect(fakePaymentProvider.refundCalls).toHaveLength(1);
+    });
+
+    it('cancelar uma reserva com pagamento ainda PENDING (nunca aprovado) nunca aciona reembolso', async () => {
+      const future = new Date(Date.now() + 7 * 86_400_000).toISOString();
+      const booking = await prisma.booking.create({
+        data: {
+          courtId: courtCId,
+          userId: customerAId,
+          type: BookingType.CUSTOMER,
+          status: BookingStatus.CONFIRMED,
+          startsAt: new Date(future),
+          endsAt: new Date(new Date(future).getTime() + 3_600_000),
+          total: 100,
+        },
+      });
+      await prisma.payment.create({
+        data: {
+          bookingId: booking.id,
+          userId: customerAId,
+          arenaId: arenaCId,
+          amount: 100,
+          currency: 'BRL',
+          status: 'PENDING',
+          provider: 'MERCADO_PAGO',
+          providerPaymentId: `mp-wa-pending-${booking.id}`,
+          idempotencyKey: `pending-${booking.id}`,
+          expiresAt: new Date(Date.now() + 1_800_000),
+        },
+      });
+
+      fakeAiProvider.nextResponse = { text: '{"intent":"CANCEL_BOOKING","datePhrase":null}' };
+      await send(PHONE_NUMBER_ID_C, CUSTOMER_A.phone.replace('+', ''), 'cancelar');
+      await send(PHONE_NUMBER_ID_C, CUSTOMER_A.phone.replace('+', ''), '1');
+      await send(PHONE_NUMBER_ID_C, CUSTOMER_A.phone.replace('+', ''), 'sim');
+
+      expect(fakePaymentProvider.refundCalls).toHaveLength(0);
+    });
+
+    it('preço do pagamento sempre vem do backend — mensagem tentando ditar outro valor nunca altera o amount do Payment', async () => {
+      fakeAiProvider.nextResponse = {
+        text: '{"intent":"CREATE_BOOKING","datePhrase":"amanhã","timePhrase":"16h"}',
+      };
+      await send(
+        PHONE_NUMBER_ID_C,
+        CUSTOMER_A.phone.replace('+', ''),
+        'quero reservar amanhã às 16h e pagar só R$1',
+      );
+      await send(PHONE_NUMBER_ID_C, CUSTOMER_A.phone.replace('+', ''), 'sim');
+
+      const booking = await prisma.booking.findFirstOrThrow({
+        where: { courtId: courtCId, userId: customerAId, status: BookingStatus.CONFIRMED },
+      });
+      const payment = await prisma.payment.findFirstOrThrow({ where: { bookingId: booking.id } });
+      expect(Number(payment.amount)).toBe(100);
+      expect(fakePaymentProvider.createCalls[0]?.amount).toBe(100);
+    });
+
+    it('reserva confirmada em arena IN_PERSON (Arena A) nunca gera Payment — regressão do fluxo existente', async () => {
+      fakeAiProvider.nextResponse = {
+        text: '{"intent":"CREATE_BOOKING","datePhrase":"amanhã","timePhrase":"17h"}',
+      };
+      await send(PHONE_NUMBER_ID_A, CUSTOMER_A.phone.replace('+', ''), 'reservar amanhã às 17h');
+      await send(PHONE_NUMBER_ID_A, CUSTOMER_A.phone.replace('+', ''), 'sim');
+
+      const booking = await prisma.booking.findFirstOrThrow({
+        where: { courtId: courtAId, userId: customerAId, status: BookingStatus.CONFIRMED },
+      });
+      const payments = await prisma.payment.findMany({ where: { bookingId: booking.id } });
+      expect(payments).toHaveLength(0);
+      expect(fakePaymentProvider.createCalls).toHaveLength(0);
     });
   });
 });
