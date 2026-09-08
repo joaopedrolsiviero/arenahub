@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PaymentsService } from './payments.service';
 import { PaymentProvider } from './providers/payment-provider';
+import { PushNotificationsService } from '../notifications/push-notifications.service';
 
 export interface ParsedPaymentNotification {
   providerEventId: string;
@@ -28,6 +29,9 @@ export class PaymentsWebhookService {
     private readonly prisma: PrismaService,
     private readonly paymentsService: PaymentsService,
     private readonly paymentProvider: PaymentProvider,
+    // M7 — só esta camada de borda conhece PushNotificationsService;
+    // PaymentsService continua sem nenhuma dependência de notificações.
+    private readonly pushNotificationsService: PushNotificationsService,
   ) {}
 
   // Parsing defensivo do formato de notificação do Mercado Pago — nunca
@@ -129,12 +133,36 @@ export class PaymentsWebhookService {
     try {
       // Nunca confia no `status` do corpo do webhook — busca o status
       // AUTORITATIVO direto no provider pelo ID (item 8.10/33 do prompt).
-      const result = await this.paymentProvider.getPaymentStatus(notification.providerPaymentId);
-      await this.paymentsService.applyProviderStatus(payment.id, result.status, {
-        paidAt: result.paidAt,
-        failureReason: result.failureReason,
-      });
-      await this.markEvent(notification.providerEventId, `processed: ${result.status}`);
+      const providerResult = await this.paymentProvider.getPaymentStatus(
+        notification.providerPaymentId,
+      );
+      const applyResult = await this.paymentsService.applyProviderStatus(
+        payment.id,
+        providerResult.status,
+        { paidAt: providerResult.paidAt, failureReason: providerResult.failureReason },
+      );
+
+      // M7 — só notifica quando ESTE evento é quem realmente transicionou
+      // pra PAID agora (applyResult.transitioned), nunca num webhook
+      // duplicado/reprocessado que encontra o Payment já PAID (isso já é
+      // coberto por `claimEvent` acima, mas `transitioned` é a proteção
+      // definitiva contra qualquer outra via de duplicação — ex: um resync
+      // administrativo futuro chamando applyProviderStatus diretamente).
+      // Nunca deixa uma falha de notificação virar erro no processamento
+      // do webhook (o webhook já está confirmado nesse ponto).
+      if (applyResult.transitioned && applyResult.status === 'PAID' && applyResult.booking) {
+        try {
+          await this.pushNotificationsService.notifyPaymentConfirmed(applyResult.booking);
+        } catch (error) {
+          this.logger.error(
+            `Falha ao notificar pagamento confirmado da Booking ${applyResult.booking.id}: ${
+              error instanceof Error ? error.message : 'erro desconhecido'
+            }`,
+          );
+        }
+      }
+
+      await this.markEvent(notification.providerEventId, `processed: ${providerResult.status}`);
     } catch (error) {
       this.logger.error(
         `Falha ao processar webhook de pagamento ${payment.id}: ${

@@ -49,6 +49,7 @@ model User {
   acceptedInvitations   ArenaInvitation[]      @relation("InvitationAcceptedBy")
   whatsappConversations WhatsAppConversation[]
   payments              Payment[]
+  pushTokens            PushToken[]
 }
 
 // Papel do usuário dentro de uma arena específica (nunca um campo global).
@@ -604,4 +605,30 @@ model PaymentWebhookEvent {
   resultSummary   String?
 
   @@unique([provider, providerEventId])
+}
+
+// Fase M7 (Mobile) — token de push (Expo Push Token) do dispositivo,
+// associado ao usuário AUTENTICADO que o registrou (nunca a um `userId`
+// enviado pelo cliente — ver PushTokensController). `token` é
+// globalmente `@unique`: o mesmo dispositivo físico nunca tem duas linhas
+// (reinstalação/token novo do Expo é tratado como upsert-por-token, não
+// como um registro paralelo); reassociar o MESMO token a outro usuário
+// (logout + login de outra conta no mesmo aparelho) é uma escrita normal
+// nesta mesma linha, nunca uma segunda identidade. `platform` não é um enum
+// fechado (`String`) de propósito — o Expo pode introduzir uma nova
+// plataforma (ex: "web") sem exigir migration aqui.
+// `onDelete: Cascade`: diferente de Booking/Payment (histórico que nunca
+// pode desaparecer), um token de push não tem valor nenhum sem o usuário
+// dono — apagar o usuário libera os tokens junto, sem constraint órfã.
+model PushToken {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  platform  String
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }

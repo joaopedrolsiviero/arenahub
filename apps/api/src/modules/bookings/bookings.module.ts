@@ -5,6 +5,7 @@ import { CourtsModule } from '../courts/courts.module';
 import { IdempotencyModule } from '../idempotency/idempotency.module';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { PaymentsModule } from '../payments/payments.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { BookingsController } from './bookings.controller';
 import { MyBookingsController } from './my-bookings.controller';
 import { BookingsService } from './bookings.service';
@@ -29,6 +30,10 @@ import { BookingsService } from './bookings.service';
     IdempotencyModule,
     PrismaModule,
     forwardRef(() => PaymentsModule),
+    // M7 — BookingsController dispara notificação de confirmação/
+    // cancelamento no mesmo endpoint, sem endpoint novo (mesmo padrão do
+    // forwardRef(PaymentsModule) acima para refundIfPaid).
+    NotificationsModule,
   ],
   controllers: [BookingsController, MyBookingsController],
   providers: [BookingsService],

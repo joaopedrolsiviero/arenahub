@@ -379,12 +379,21 @@ export class BookingsService {
   // Fase 11) — a perdedora da corrida nunca sobrescreve
   // `cancelledAt`/`cancelledByUserId` da vencedora, só relê o estado final já
   // definido por ela.
+  // M7, item 8 do prompt (idempotência de notificações): o retorno passou a
+  // incluir `cancelledNow` — true SÓ quando ESTA chamada é quem realmente
+  // executou a transição CONFIRMED->CANCELLED (nunca em replay de uma
+  // reserva já cancelada, nem quando outra requisição venceu a corrida).
+  // BookingsController usa esse sinal pra nunca disparar duas notificações
+  // de cancelamento pra uma mesma transição de negócio (retry, duplo
+  // clique) — reaproveita a MESMA proteção que já existia (o CAS
+  // `status: CONFIRMED` no WHERE), nunca um segundo mecanismo de
+  // idempotência.
   async cancel(
     arenaId: string,
     courtId: string,
     bookingId: string,
     requesterId: string,
-  ): Promise<Booking> {
+  ): Promise<{ booking: Booking; cancelledNow: boolean }> {
     await this.courtsService.findOne(arenaId, courtId);
 
     const booking = await this.prisma.booking.findFirst({ where: { id: bookingId, courtId } });
@@ -402,7 +411,7 @@ export class BookingsService {
     }
 
     if (booking.status === BookingStatus.CANCELLED) {
-      return booking;
+      return { booking, cancelledNow: false };
     }
 
     // Fase 27, Regra 3/4 — instante real (`Date.now()`), nunca comparação
@@ -416,7 +425,7 @@ export class BookingsService {
       );
     }
 
-    await this.prisma.booking.updateMany({
+    const result = await this.prisma.booking.updateMany({
       where: { id: bookingId, status: BookingStatus.CONFIRMED },
       data: {
         status: BookingStatus.CANCELLED,
@@ -429,7 +438,8 @@ export class BookingsService {
     // foi 0, outra requisição venceu a corrida entre o findFirst acima e
     // este updateMany — o resultado devolvido é o mesmo de qualquer forma
     // (a reserva já está CANCELLED), nunca um erro.
-    return this.prisma.booking.findUniqueOrThrow({ where: { id: bookingId } });
+    const finalBooking = await this.prisma.booking.findUniqueOrThrow({ where: { id: bookingId } });
+    return { booking: finalBooking, cancelledNow: result.count === 1 };
   }
 
   private assertValidWindow(from: Date, to: Date): void {

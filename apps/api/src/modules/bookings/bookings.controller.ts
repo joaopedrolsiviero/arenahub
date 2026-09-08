@@ -22,6 +22,7 @@ import { RequireArenaRole } from '../arena-members/require-arena-role.decorator'
 import { UsersService } from '../users/users.service';
 import { IdempotencyService } from '../idempotency/idempotency.service';
 import { PaymentsService } from '../payments/payments.service';
+import { PushNotificationsService } from '../notifications/push-notifications.service';
 import { BookingDetailed, BookingOccupancy, BookingsService } from './bookings.service';
 import { CreateCustomerBookingDto } from './dto/create-customer-booking.dto';
 import { CreateAdminBookingDto } from './dto/create-admin-booking.dto';
@@ -51,6 +52,9 @@ export class BookingsController {
     // Fase 27 — só o controller conhece PaymentsService; BookingsService
     // continua sem nenhuma dependência de Payment (docs/ARCHITECTURE.md).
     private readonly paymentsService: PaymentsService,
+    // M7 — mesmo padrão: só o controller conhece PushNotificationsService;
+    // BookingsService continua sem nenhuma dependência de notificações.
+    private readonly pushNotificationsService: PushNotificationsService,
   ) {}
 
   // Fase 18 (item 4): criação de reserva é o endpoint de maior valor de
@@ -107,6 +111,29 @@ export class BookingsController {
         return { status: HttpStatus.CREATED, body: booking };
       },
     );
+
+    // M7, item 8 (idempotência): `replayed` já é o sinal oficial de
+    // "isto é um retry de uma requisição já processada" — IdempotencyService
+    // só devolve `replayed: false` na execução que realmente criou a(s)
+    // Booking(s) agora. Nunca notifica num replay (retry de rede, duplo
+    // clique com a mesma Idempotency-Key), nenhum mecanismo novo de
+    // deduplicação. Falha ao notificar nunca vira erro pro cliente —
+    // PushNotificationsService já nunca lança, mas o try/catch aqui é
+    // defesa em profundidade explícita no ponto de disparo.
+    if (!result.replayed) {
+      const bookings = Array.isArray(result.body) ? result.body : [result.body];
+      for (const booking of bookings) {
+        try {
+          await this.pushNotificationsService.notifyBookingConfirmed(booking);
+        } catch (error) {
+          this.logger.error(
+            `Falha ao notificar confirmação da Booking ${booking.id}: ${
+              error instanceof Error ? error.message : 'erro desconhecido'
+            }`,
+          );
+        }
+      }
+    }
 
     return result.body;
   }
@@ -225,7 +252,12 @@ export class BookingsController {
     @Param('bookingId') bookingId: string,
   ): Promise<Booking> {
     const user = await this.usersService.findByClerkId(authUser.clerkId);
-    const booking = await this.bookingsService.cancel(arenaId, courtId, bookingId, user.id);
+    const { booking, cancelledNow } = await this.bookingsService.cancel(
+      arenaId,
+      courtId,
+      bookingId,
+      user.id,
+    );
 
     // Fase 27, Regra 2/5 — mesmo endpoint pra CUSTOMER, OWNER e ADMIN
     // (nenhuma regra diferente por quem cancela); `refundIfPaid` é
@@ -242,6 +274,20 @@ export class BookingsController {
           error instanceof Error ? error.message : 'erro desconhecido'
         }`,
       );
+    }
+
+    // M7 — só notifica quando ESTA chamada realmente cancelou (nunca num
+    // replay de uma reserva já cancelada, ver BookingsService.cancel).
+    if (cancelledNow) {
+      try {
+        await this.pushNotificationsService.notifyBookingCancelled(booking);
+      } catch (error) {
+        this.logger.error(
+          `Falha ao notificar cancelamento da Booking ${booking.id}: ${
+            error instanceof Error ? error.message : 'erro desconhecido'
+          }`,
+        );
+      }
     }
 
     return booking;

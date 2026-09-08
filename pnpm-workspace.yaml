@@ -14,6 +14,17 @@ allowBuilds:
   # resolution). Disallowed until there's a concrete need for them.
   sharp: false
   unrs-resolver: false
+  # apps/mobile (Clerk Expo + its transitive deps). None of these need their
+  # build script to run: @clerk/shared's postinstall only affects the
+  # browser SDK's cross-tab session lock (browser-tabs-lock, unused on
+  # native); bufferutil/utf-8-validate are optional native perf addons for
+  # `ws` with a working pure-JS fallback when unbuilt; core-js's postinstall
+  # is only a donation-nag message, never required for it to function.
+  '@clerk/shared': false
+  browser-tabs-lock: false
+  bufferutil: false
+  core-js: false
+  utf-8-validate: false
 
 # pnpm's supply-chain policy blocks installing packages published too
 # recently by default; these were added automatically on install and are
@@ -21,3 +32,9 @@ allowBuilds:
 minimumReleaseAgeExclude:
   - '@clerk/backend@3.16.8'
   - '@clerk/nextjs@7.7.8'
+  - '@expo/cli@57.0.22'
+  - '@expo/ui@57.0.16'
+  - expo-modules-core@57.0.16
+  - expo-modules-jsi@57.0.8
+  - expo-router@57.0.19
+  - expo@57.0.20

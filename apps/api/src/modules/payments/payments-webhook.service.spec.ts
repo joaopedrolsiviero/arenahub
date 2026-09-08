@@ -4,6 +4,7 @@ import { PaymentsWebhookService } from './payments-webhook.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PaymentsService } from './payments.service';
 import { PaymentProvider } from './providers/payment-provider';
+import { PushNotificationsService } from '../notifications/push-notifications.service';
 
 const SECRET = 'test-webhook-secret';
 
@@ -17,6 +18,7 @@ describe('PaymentsWebhookService', () => {
   let prisma: { paymentWebhookEvent: { create: jest.Mock; updateMany: jest.Mock } };
   let paymentsService: { findByProviderPaymentId: jest.Mock; applyProviderStatus: jest.Mock };
   let paymentProvider: { getPaymentStatus: jest.Mock };
+  let pushNotificationsService: { notifyPaymentConfirmed: jest.Mock };
   let service: PaymentsWebhookService;
 
   beforeEach(() => {
@@ -29,14 +31,18 @@ describe('PaymentsWebhookService', () => {
     };
     paymentsService = {
       findByProviderPaymentId: jest.fn().mockResolvedValue({ id: 'payment-1' }),
-      applyProviderStatus: jest.fn().mockResolvedValue(undefined),
+      // Default: nenhuma transição real (a maioria dos testes deste arquivo
+      // não é sobre notificação) — os testes de M7 abaixo sobrescrevem isto.
+      applyProviderStatus: jest.fn().mockResolvedValue({ transitioned: false, status: null }),
     };
     paymentProvider = { getPaymentStatus: jest.fn().mockResolvedValue({ status: 'PAID' }) };
+    pushNotificationsService = { notifyPaymentConfirmed: jest.fn().mockResolvedValue(undefined) };
 
     service = new PaymentsWebhookService(
       prisma as unknown as PrismaService,
       paymentsService as unknown as PaymentsService,
       paymentProvider as unknown as PaymentProvider,
+      pushNotificationsService as unknown as PushNotificationsService,
     );
   });
 
@@ -157,6 +163,61 @@ describe('PaymentsWebhookService', () => {
       await expect(
         service.handleEvent({ providerEventId: 'evt-3', providerPaymentId: 'mp-123' }),
       ).resolves.toBeUndefined();
+    });
+  });
+
+  describe('handleEvent — notificação de pagamento confirmado (M7)', () => {
+    const booking = { id: 'booking-1', userId: 'user-1' };
+
+    it('transição real para PAID dispara a notificação com a Booking correta', async () => {
+      paymentsService.applyProviderStatus.mockResolvedValue({
+        transitioned: true,
+        status: 'PAID',
+        booking,
+      });
+
+      await service.handleEvent({ providerEventId: 'evt-1', providerPaymentId: 'mp-123' });
+
+      expect(pushNotificationsService.notifyPaymentConfirmed).toHaveBeenCalledWith(booking);
+      expect(pushNotificationsService.notifyPaymentConfirmed).toHaveBeenCalledTimes(1);
+    });
+
+    it('evento ignorado (Payment já terminal) NUNCA notifica — nenhuma duplicação por webhook reprocessado', async () => {
+      paymentsService.applyProviderStatus.mockResolvedValue({
+        transitioned: false,
+        status: 'PAID',
+      });
+
+      await service.handleEvent({ providerEventId: 'evt-1', providerPaymentId: 'mp-123' });
+
+      expect(pushNotificationsService.notifyPaymentConfirmed).not.toHaveBeenCalled();
+    });
+
+    it('transição real para um status diferente de PAID (ex: FAILED) nunca dispara notificação de pagamento confirmado', async () => {
+      paymentsService.applyProviderStatus.mockResolvedValue({
+        transitioned: true,
+        status: 'FAILED',
+      });
+
+      await service.handleEvent({ providerEventId: 'evt-1', providerPaymentId: 'mp-123' });
+
+      expect(pushNotificationsService.notifyPaymentConfirmed).not.toHaveBeenCalled();
+    });
+
+    it('falha ao notificar nunca impede o evento de ser marcado como processado', async () => {
+      paymentsService.applyProviderStatus.mockResolvedValue({
+        transitioned: true,
+        status: 'PAID',
+        booking,
+      });
+      pushNotificationsService.notifyPaymentConfirmed.mockRejectedValue(new Error('Expo indisponível'));
+
+      await expect(
+        service.handleEvent({ providerEventId: 'evt-1', providerPaymentId: 'mp-123' }),
+      ).resolves.toBeUndefined();
+      expect(prisma.paymentWebhookEvent.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ resultSummary: 'processed: PAID' }) }),
+      );
     });
   });
 });

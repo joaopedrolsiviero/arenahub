@@ -1,0 +1,54 @@
+{
+  "expo": {
+    "name": "ArenaHub",
+    "slug": "arenahub",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "arenahub",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "bundleIdentifier": "com.siviero.arenahub",
+      "supportsTablet": false
+    },
+    "android": {
+      "package": "com.siviero.arenahub",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "backgroundColor": "#FBFAF7"
+      }
+    },
+    "web": {
+      "output": "static",
+      "favicon": "./assets/images/favicon.png",
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 160,
+          "backgroundColor": "#FBFAF7"
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#a6e146"
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "822944ab-c542-430c-b736-b26bc5398078"
+      }
+    },
+    "owner": "fragelos-team"
+  }
+}

@@ -576,7 +576,10 @@ describe('BookingsService', () => {
       expect(call.where).toEqual({ id: 'booking-1', status: BookingStatus.CONFIRMED });
       expect(call.data.status).toBe(BookingStatus.CANCELLED);
       expect(call.data.cancelledByUserId).toBe('user-1');
-      expect(result.status).toBe(BookingStatus.CANCELLED);
+      expect(result.booking.status).toBe(BookingStatus.CANCELLED);
+      // M7 — sinal de idempotência pra notificação: esta chamada é quem
+      // realmente cancelou agora.
+      expect(result.cancelledNow).toBe(true);
     });
 
     it('permite que ADMIN/OWNER da arena cancele reserva de outro usuário', async () => {
@@ -620,7 +623,10 @@ describe('BookingsService', () => {
       const result = await service.cancel('arena-1', 'court-1', 'booking-1', 'user-1');
 
       expect(prisma.booking.updateMany).not.toHaveBeenCalled();
-      expect(result.status).toBe(BookingStatus.CANCELLED);
+      expect(result.booking.status).toBe(BookingStatus.CANCELLED);
+      // M7 — replay de uma reserva já cancelada NUNCA sinaliza uma nova
+      // transição (é o que impede BookingsController de notificar de novo).
+      expect(result.cancelledNow).toBe(false);
     });
 
     // Fase 13: a proteção contra a corrida real (duas requisições passando
@@ -638,8 +644,11 @@ describe('BookingsService', () => {
 
       const result = await service.cancel('arena-1', 'court-1', 'booking-1', 'user-1');
 
-      expect(result.status).toBe(BookingStatus.CANCELLED);
-      expect(result.cancelledByUserId).toBe('quem-venceu-a-corrida');
+      expect(result.booking.status).toBe(BookingStatus.CANCELLED);
+      expect(result.booking.cancelledByUserId).toBe('quem-venceu-a-corrida');
+      // M7 — a PERDEDORA da corrida nunca notifica (só quem realmente
+      // executou o UPDATE, count===1, sinaliza cancelledNow: true).
+      expect(result.cancelledNow).toBe(false);
     });
 
     // Fase 27, Regra 3/4: `now >= startsAt` bloqueia o cancelamento — nunca
@@ -679,8 +688,9 @@ describe('BookingsService', () => {
 
       const result = await service.cancel('arena-1', 'court-1', 'booking-1', 'user-1');
 
-      expect(result.status).toBe(BookingStatus.CANCELLED);
+      expect(result.booking.status).toBe(BookingStatus.CANCELLED);
       expect(prisma.booking.updateMany).not.toHaveBeenCalled();
+      expect(result.cancelledNow).toBe(false);
     });
   });
 });

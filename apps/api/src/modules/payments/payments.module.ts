@@ -2,6 +2,7 @@ import { forwardRef, Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { UsersModule } from '../users/users.module';
 import { BookingsModule } from '../bookings/bookings.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { PaymentsController } from './payments.controller';
 import { MyPaymentsController } from './my-payments.controller';
@@ -22,7 +23,16 @@ import { MercadoPagoPaymentProviderService } from './providers/mercado-pago-paym
   // forwardRef (Fase 27) — BookingsModule agora importa PaymentsModule de
   // volta (BookingsController dispara `refundIfPaid` no cancelamento); ver
   // bookings.module.ts para a justificativa completa do ciclo.
-  imports: [AuthModule, UsersModule, forwardRef(() => BookingsModule), PrismaModule],
+  imports: [
+    AuthModule,
+    UsersModule,
+    forwardRef(() => BookingsModule),
+    PrismaModule,
+    // M7 — PaymentsWebhookService dispara notificação de pagamento
+    // confirmado quando o CAS de applyProviderStatus realmente transiciona
+    // pra PAID (nunca em replay/evento já processado).
+    NotificationsModule,
+  ],
   controllers: [PaymentsController, MyPaymentsController, PaymentsWebhookController],
   providers: [
     PaymentsService,

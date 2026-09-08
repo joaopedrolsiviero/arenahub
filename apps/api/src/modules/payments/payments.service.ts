@@ -1,5 +1,5 @@
 import { ConflictException, Injectable, Logger } from '@nestjs/common';
-import { Payment, PaymentStatus, Prisma } from '@prisma/client';
+import { Booking, Payment, PaymentStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { BookingsService } from '../bookings/bookings.service';
 import {
@@ -302,40 +302,50 @@ export class PaymentsService {
    * estados. Qualquer Payment que já não esteja PENDING ignora o evento
    * silenciosamente (logado) — PAID nunca volta a FAILED, EXPIRED nunca
    * vira PAID, não importa a ordem de chegada dos eventos.
+   *
+   * M7, item 8 (idempotência de notificações): o retorno passou a incluir
+   * `transitioned` — true SÓ quando ESTE CAS é quem realmente moveu
+   * PENDING -> outro status agora (nunca quando o Payment já estava
+   * terminal, nunca quando outra transação venceu a corrida). Junto com
+   * `booking` (só presente quando o novo status é PAID), isso é o
+   * suficiente para `PaymentsWebhookService` disparar a notificação de
+   * pagamento confirmado sem nenhum mecanismo novo de deduplicação —
+   * reaproveita o MESMO CAS que já protegia a máquina de estados.
    */
   async applyProviderStatus(
     paymentId: string,
     providerStatus: ProviderPaymentStatus,
     meta: { paidAt?: Date; failureReason?: string },
-  ): Promise<void> {
+  ): Promise<{ transitioned: boolean; status: PaymentStatus | null; booking?: Booking }> {
     if (providerStatus === 'PENDING') {
-      return; // nada muda; PENDING->PENDING não é uma transição.
+      return { transitioned: false, status: null }; // nada muda; PENDING->PENDING não é uma transição.
     }
 
     let attemptedStatus: PaymentStatus | null = null;
     try {
-      await this.prisma.$transaction(async (tx) => {
+      return await this.prisma.$transaction(async (tx) => {
         const payment = await tx.payment.findUnique({ where: { id: paymentId } });
         if (!payment) {
           this.logger.warn(`Evento de pagamento para Payment ${paymentId} inexistente — ignorado.`);
-          return;
+          return { transitioned: false, status: null };
         }
         if (payment.status !== PaymentStatus.PENDING) {
           this.logger.log(
             `Payment ${paymentId} já está em estado terminal (${payment.status}) — evento ${providerStatus} ignorado.`,
           );
-          return;
+          return { transitioned: false, status: payment.status };
         }
 
         let nextStatus: PaymentStatus = providerStatus;
         let failureReason = meta.failureReason ?? null;
+        let booking: Booking | null = null;
 
         // Item 12 do prompt: "se a Booking for cancelada antes do
         // pagamento, o pagamento não pode ser concluído" — checado DENTRO
         // da mesma transação que aplica a transição, nunca antes (evita
         // corrida entre checar e escrever).
         if (providerStatus === 'PAID') {
-          const booking = await tx.booking.findUnique({ where: { id: payment.bookingId } });
+          booking = await tx.booking.findUnique({ where: { id: payment.bookingId } });
           if (!booking || booking.status === 'CANCELLED') {
             nextStatus = PaymentStatus.CANCELLED;
             failureReason = 'BOOKING_CANCELLED_BEFORE_PAYMENT';
@@ -358,7 +368,13 @@ export class PaymentsService {
           this.logger.log(
             `Payment ${paymentId}: corrida perdida ao aplicar ${nextStatus}, ignorado.`,
           );
+          return { transitioned: false, status: nextStatus };
         }
+        return {
+          transitioned: true,
+          status: nextStatus,
+          booking: nextStatus === PaymentStatus.PAID && booking ? booking : undefined,
+        };
       });
     } catch (error) {
       // Índice único parcial "no máximo um PAID por bookingId" — só pode
@@ -378,7 +394,7 @@ export class PaymentsService {
           where: { id: paymentId, status: PaymentStatus.PENDING },
           data: { status: PaymentStatus.FAILED, failureReason: 'DUPLICATE_PAYMENT_FOR_BOOKING' },
         });
-        return;
+        return { transitioned: true, status: PaymentStatus.FAILED };
       }
       throw error;
     }

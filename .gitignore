@@ -37,6 +37,12 @@ apps/api/generated/
 # Misc
 *.tsbuildinfo
 next-env.d.ts
+expo-env.d.ts
+
+# Expo
+.expo/
+apps/mobile/android/
+apps/mobile/ios/
 
 # Vercel CLI project link (local, no secrets — regenerate with `vercel link`)
 .vercel

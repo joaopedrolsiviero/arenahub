@@ -23,6 +23,7 @@ import { CustomersModule } from './modules/customers/customers.module';
 import { ReportsModule } from './modules/reports/reports.module';
 import { WhatsAppModule } from './modules/whatsapp/whatsapp.module';
 import { PaymentsModule } from './modules/payments/payments.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
 
 @Module({
   imports: [
@@ -65,6 +66,7 @@ import { PaymentsModule } from './modules/payments/payments.module';
     ReportsModule,
     WhatsAppModule,
     PaymentsModule,
+    NotificationsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

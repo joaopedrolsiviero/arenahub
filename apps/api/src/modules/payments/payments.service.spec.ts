@@ -405,11 +405,20 @@ describe('PaymentsService', () => {
       tx.payment.findUnique.mockResolvedValue(paymentRow());
       tx.booking.findUnique.mockResolvedValue({ id: 'booking-1', status: 'CONFIRMED' });
 
-      await service.applyProviderStatus('payment-1', 'PAID', { paidAt: new Date('2026-01-01') });
+      const result = await service.applyProviderStatus('payment-1', 'PAID', {
+        paidAt: new Date('2026-01-01'),
+      });
 
       expect(tx.payment.updateMany).toHaveBeenCalledWith({
         where: { id: 'payment-1', status: 'PENDING' },
         data: { status: 'PAID', paidAt: new Date('2026-01-01'), failureReason: null },
+      });
+      // M7 — sinal de idempotência pra notificação: transição real +
+      // Booking anexada só quando o novo status é PAID.
+      expect(result).toEqual({
+        transitioned: true,
+        status: 'PAID',
+        booking: { id: 'booking-1', status: 'CONFIRMED' },
       });
     });
 
@@ -418,7 +427,7 @@ describe('PaymentsService', () => {
       tx.payment.findUnique.mockResolvedValue(paymentRow());
       tx.booking.findUnique.mockResolvedValue({ id: 'booking-1', status: 'CONFIRMED' });
 
-      await service.applyProviderStatus('payment-1', 'FAILED', {
+      const result = await service.applyProviderStatus('payment-1', 'FAILED', {
         failureReason: 'cc_rejected_other',
       });
 
@@ -426,35 +435,43 @@ describe('PaymentsService', () => {
         where: { id: 'payment-1', status: 'PENDING' },
         data: { status: 'FAILED', paidAt: null, failureReason: 'cc_rejected_other' },
       });
+      // M7 — transicionou de verdade, mas nunca anexa `booking` fora de
+      // PAID (PushNotificationsService.notifyPaymentConfirmed é só para
+      // pagamento confirmado, nunca para falha).
+      expect(result).toEqual({ transitioned: true, status: 'FAILED', booking: undefined });
     });
 
     it('PAID é terminal: um evento FAILED posterior é ignorado, nunca reverte pra FAILED', async () => {
       tx.payment.findUnique.mockResolvedValue(paymentRow({ status: 'PAID' }));
 
-      await service.applyProviderStatus('payment-1', 'FAILED', {});
+      const result = await service.applyProviderStatus('payment-1', 'FAILED', {});
 
       expect(tx.payment.updateMany).not.toHaveBeenCalled();
+      // M7 — nunca transicionou (já estava terminal); nunca notifica de novo.
+      expect(result).toEqual({ transitioned: false, status: 'PAID' });
     });
 
     it('EXPIRED é terminal: um PAID que chega depois nunca reverte pra PAID', async () => {
       tx.payment.findUnique.mockResolvedValue(paymentRow({ status: 'EXPIRED' }));
 
-      await service.applyProviderStatus('payment-1', 'PAID', {});
+      const result = await service.applyProviderStatus('payment-1', 'PAID', {});
 
       expect(tx.payment.updateMany).not.toHaveBeenCalled();
+      expect(result).toEqual({ transitioned: false, status: 'EXPIRED' });
     });
 
     it('PENDING (sem mudança real) é sempre um no-op, nunca escreve', async () => {
-      await service.applyProviderStatus('payment-1', 'PENDING', {});
+      const result = await service.applyProviderStatus('payment-1', 'PENDING', {});
 
       expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(result).toEqual({ transitioned: false, status: null });
     });
 
     it('Booking cancelada antes da confirmação: PAID vira CANCELLED, nunca PAID (item 12)', async () => {
       tx.payment.findUnique.mockResolvedValue(paymentRow());
       tx.booking.findUnique.mockResolvedValue({ id: 'booking-1', status: 'CANCELLED' });
 
-      await service.applyProviderStatus('payment-1', 'PAID', {});
+      const result = await service.applyProviderStatus('payment-1', 'PAID', {});
 
       expect(tx.payment.updateMany).toHaveBeenCalledWith({
         where: { id: 'payment-1', status: 'PENDING' },
@@ -464,6 +481,9 @@ describe('PaymentsService', () => {
           failureReason: 'BOOKING_CANCELLED_BEFORE_PAYMENT',
         },
       });
+      // M7 — nunca notifica "pagamento confirmado" quando o desfecho real
+      // foi CANCELLED (Booking cancelada antes da confirmação chegar).
+      expect(result).toEqual({ transitioned: true, status: 'CANCELLED', booking: undefined });
     });
 
     it('corrida perdida (count 0) é logada, nunca lança', async () => {
@@ -471,13 +491,21 @@ describe('PaymentsService', () => {
       tx.booking.findUnique.mockResolvedValue({ id: 'booking-1', status: 'CONFIRMED' });
       tx.payment.updateMany.mockResolvedValue({ count: 0 });
 
-      await expect(service.applyProviderStatus('payment-1', 'PAID', {})).resolves.toBeUndefined();
+      // M7 — perder a corrida nunca sinaliza uma transição real (o CAS é a
+      // MESMA proteção reaproveitada pra evitar notificação duplicada).
+      await expect(service.applyProviderStatus('payment-1', 'PAID', {})).resolves.toEqual({
+        transitioned: false,
+        status: 'PAID',
+      });
     });
 
     it('Payment inexistente é ignorado, nunca lança', async () => {
       tx.payment.findUnique.mockResolvedValue(null);
 
-      await expect(service.applyProviderStatus('payment-x', 'PAID', {})).resolves.toBeUndefined();
+      await expect(service.applyProviderStatus('payment-x', 'PAID', {})).resolves.toEqual({
+        transitioned: false,
+        status: null,
+      });
     });
 
     it('violação do índice único "um PAID por Booking" recupera marcando FAILED (fora da transação que falhou)', async () => {
@@ -485,12 +513,16 @@ describe('PaymentsService', () => {
       tx.booking.findUnique.mockResolvedValue({ id: 'booking-1', status: 'CONFIRMED' });
       tx.payment.updateMany.mockRejectedValue(uniqueViolation());
 
-      await service.applyProviderStatus('payment-1', 'PAID', {});
+      const result = await service.applyProviderStatus('payment-1', 'PAID', {});
 
       expect(prisma.payment.updateMany).toHaveBeenCalledWith({
         where: { id: 'payment-1', status: 'PENDING' },
         data: { status: 'FAILED', failureReason: 'DUPLICATE_PAYMENT_FOR_BOOKING' },
       });
+      // M7 — desfecho real foi FAILED (duplicidade), nunca PAID; nunca
+      // anexa Booking (só PaymentsWebhookService.handleEvent decide notificar,
+      // e só faz isso quando status === 'PAID').
+      expect(result).toEqual({ transitioned: true, status: 'FAILED' });
     });
   });
 
