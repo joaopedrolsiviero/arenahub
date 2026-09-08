@@ -210,14 +210,17 @@ describe('PaymentsWebhookService', () => {
         status: 'PAID',
         booking,
       });
-      pushNotificationsService.notifyPaymentConfirmed.mockRejectedValue(new Error('Expo indisponível'));
+      pushNotificationsService.notifyPaymentConfirmed.mockRejectedValue(
+        new Error('Expo indisponível'),
+      );
 
       await expect(
         service.handleEvent({ providerEventId: 'evt-1', providerPaymentId: 'mp-123' }),
       ).resolves.toBeUndefined();
-      expect(prisma.paymentWebhookEvent.updateMany).toHaveBeenCalledWith(
-        expect.objectContaining({ data: expect.objectContaining({ resultSummary: 'processed: PAID' }) }),
-      );
+      const [[updateManyArg]] = prisma.paymentWebhookEvent.updateMany.mock.calls as [
+        [{ data: { resultSummary: string } }],
+      ];
+      expect(updateManyArg.data.resultSummary).toBe('processed: PAID');
     });
   });
 });

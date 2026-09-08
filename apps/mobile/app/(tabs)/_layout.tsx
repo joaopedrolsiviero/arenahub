@@ -4,8 +4,11 @@ import { colors } from '@/constants/theme';
 
 // Navegação inferior com as quatro abas do MVP (item 8 do prompt) — usa o
 // Tabs nativo do próprio Expo Router (@react-navigation/bottom-tabs por
-// baixo), nenhuma biblioteca extra. Nenhuma aba depende de dado remoto ou
-// de login nesta fase — todas abrem placeholders.
+// baixo), nenhuma biblioteca extra. Dependência de login/dado remoto por
+// aba (M7): "Início" é um placeholder estático; "Explorar" busca dado
+// remoto público (useDiscoverArenas, sem exigir login — mesma descoberta
+// pública do web); "Reservas" e "Perfil" exigem login (useAuth().isSignedIn)
+// e buscam dado remoto do próprio usuário (useMyBookings/useMyProfile).
 export default function TabsLayout() {
   return (
     <Tabs

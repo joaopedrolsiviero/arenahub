@@ -38,7 +38,7 @@ describe('PushNotificationsService', () => {
       ok: true,
       json: jest.fn().mockResolvedValue({ data: [{ status: 'ok', id: 'ticket-1' }] }),
     });
-    global.fetch = fetchMock as unknown as typeof fetch;
+    global.fetch = fetchMock;
     delete process.env.EXPO_ACCESS_TOKEN;
 
     service = new PushNotificationsService(
@@ -101,9 +101,12 @@ describe('PushNotificationsService', () => {
       // financeiro/de autenticação (o próprio "to" é o endereço de entrega —
       // um Expo Push Token, não um token de sessão/autenticação — por isso
       // é excluído desta checagem, mesmo tendo "Token" no nome).
-      const { to: _to, ...rest } = message;
+      const rest: Record<string, unknown> = { ...message };
+      delete rest.to;
       const serialized = JSON.stringify(rest);
-      expect(serialized).not.toMatch(/qrCode|pixCopyPaste|amount|checkoutUrl|Authorization|Bearer/i);
+      expect(serialized).not.toMatch(
+        /qrCode|pixCopyPaste|amount|checkoutUrl|Authorization|Bearer/i,
+      );
     });
 
     it('reserva cancelada: título correto', async () => {
@@ -140,13 +143,19 @@ describe('PushNotificationsService', () => {
 
     it('EXPO_ACCESS_TOKEN, quando configurado, vai como Authorization; ausente, nenhum header extra', async () => {
       await service.notifyBookingConfirmed(booking());
-      const [, noTokenOptions] = fetchMock.mock.calls[0] as [string, { headers: Record<string, string> }];
+      const [, noTokenOptions] = fetchMock.mock.calls[0] as [
+        string,
+        { headers: Record<string, string> },
+      ];
       expect(noTokenOptions.headers.Authorization).toBeUndefined();
 
       fetchMock.mockClear();
       process.env.EXPO_ACCESS_TOKEN = 'expo-token-abc';
       await service.notifyBookingConfirmed(booking());
-      const [, withTokenOptions] = fetchMock.mock.calls[0] as [string, { headers: Record<string, string> }];
+      const [, withTokenOptions] = fetchMock.mock.calls[0] as [
+        string,
+        { headers: Record<string, string> },
+      ];
       expect(withTokenOptions.headers.Authorization).toBe('Bearer expo-token-abc');
     });
   });
@@ -162,7 +171,11 @@ describe('PushNotificationsService', () => {
         json: jest.fn().mockResolvedValue({
           data: [
             { status: 'ok', id: 'ticket-1' },
-            { status: 'error', message: 'device not registered', details: { error: 'DeviceNotRegistered' } },
+            {
+              status: 'error',
+              message: 'device not registered',
+              details: { error: 'DeviceNotRegistered' },
+            },
           ],
         }),
       });

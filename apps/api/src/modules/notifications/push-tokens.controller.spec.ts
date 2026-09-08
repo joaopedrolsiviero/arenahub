@@ -8,7 +8,10 @@ describe('PushTokensController', () => {
   let controller: PushTokensController;
 
   beforeEach(() => {
-    pushTokensService = { register: jest.fn().mockResolvedValue(undefined), remove: jest.fn().mockResolvedValue(undefined) };
+    pushTokensService = {
+      register: jest.fn().mockResolvedValue(undefined),
+      remove: jest.fn().mockResolvedValue(undefined),
+    };
     usersService = { findByClerkId: jest.fn().mockResolvedValue({ id: 'user-1' }) };
     controller = new PushTokensController(
       pushTokensService as unknown as PushTokensService,
@@ -39,7 +42,11 @@ describe('PushTokensController', () => {
     it('nunca usa um userId vindo do corpo da requisição, mesmo que um exista (DTO não declara esse campo)', async () => {
       await controller.register(
         { clerkId: 'clerk-1' },
-        { token: 'x', platform: 'android', ...({ userId: 'user-forjado' } as Record<string, unknown>) },
+        {
+          token: 'x',
+          platform: 'android',
+          ...({ userId: 'user-forjado' } as Record<string, unknown>),
+        },
       );
 
       expect(pushTokensService.register).toHaveBeenCalledWith('user-1', 'x', 'android');
@@ -53,7 +60,10 @@ describe('PushTokensController', () => {
 
   describe('DELETE /users/me/push-tokens', () => {
     it('resolve o userId a partir da sessão autenticada, nunca do corpo', async () => {
-      const result = await controller.remove({ clerkId: 'clerk-1' }, { token: 'ExponentPushToken[abc]' });
+      const result = await controller.remove(
+        { clerkId: 'clerk-1' },
+        { token: 'ExponentPushToken[abc]' },
+      );
 
       expect(usersService.findByClerkId).toHaveBeenCalledWith('clerk-1');
       expect(pushTokensService.remove).toHaveBeenCalledWith('user-1', 'ExponentPushToken[abc]');

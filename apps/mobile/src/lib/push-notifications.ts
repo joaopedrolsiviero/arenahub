@@ -42,12 +42,13 @@ export async function requestPushPermission(): Promise<Notifications.PermissionR
   return Notifications.requestPermissionsAsync();
 }
 
-// M7, item "critério de parada" — este projeto NUNCA teve um projeto
-// EAS vinculado (app.json não tem extra.eas.projectId; confirmado na
-// auditoria desta fase, ver relatório final). Sem esse ID, o Expo Push
-// Service não consegue emitir um token real — em vez de deixar a chamada
-// nativa falhar com um erro opaco, este erro é lançado explicitamente ANTES
-// de tentar, com uma mensagem que explica exatamente o que falta.
+// M7 — este projeto TEM um projeto EAS vinculado (app.json:
+// extra.eas.projectId) e o build de desenvolvimento Android já foi gerado
+// com sucesso. Este guard continua existindo como defesa: sem esse ID (ex:
+// um fork ou um app.json local não configurado), o Expo Push Service não
+// consegue emitir um token real — em vez de deixar a chamada nativa falhar
+// com um erro opaco, este erro é lançado explicitamente ANTES de tentar,
+// com uma mensagem que explica exatamente o que falta.
 export class MissingEasProjectIdError extends Error {
   constructor() {
     super(

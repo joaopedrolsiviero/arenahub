@@ -147,6 +147,37 @@ describe('PaymentsService', () => {
       expect(prisma.$transaction).not.toHaveBeenCalled();
     });
 
+    // Fase pós-M7 (auditoria) — lacuna de cobertura identificada: o guard de
+    // `paymentMode: 'IN_PERSON'` (item de segurança explícito — a arena vem
+    // sempre do banco via `findMyBookingDetail`, nunca de um valor enviado
+    // pelo cliente) nunca tinha teste dedicado. Mesmo padrão do teste
+    // irmão acima (Booking CANCELLED): rejeita ANTES de qualquer transação
+    // ou chamada ao provider.
+    it('rejeita ConflictException quando a arena usa paymentMode IN_PERSON — nunca chama o provider nem toca na tabela Payment', async () => {
+      bookingsService.findMyBookingDetail.mockResolvedValue(
+        myBooking({
+          court: {
+            id: 'court-1',
+            name: 'Quadra 1',
+            sport: 'BEACH_VOLLEYBALL',
+            arena: {
+              id: 'arena-1',
+              name: 'Arena A',
+              slug: 'a',
+              timezone: 'America/Sao_Paulo',
+              paymentMode: 'IN_PERSON',
+            },
+          },
+        }),
+      );
+
+      await expect(service.createPayment('user-1', 'booking-1', 'key-1')).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(paymentProvider.createPayment).not.toHaveBeenCalled();
+    });
+
     it('cria o Payment com o valor EXATO de Booking.total — nunca outro valor', async () => {
       tx.payment.create.mockResolvedValue(paymentRow({ providerPaymentId: null }));
       prisma.payment.update.mockResolvedValue(paymentRow({ providerPaymentId: 'mp-123' }));
