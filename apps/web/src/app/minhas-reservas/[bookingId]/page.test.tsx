@@ -28,11 +28,25 @@ const mockedUseCancelBooking = useCancelBooking as jest.Mock;
 const mockedUseBookingPayment = useBookingPayment as jest.Mock;
 const mockedUseCreateBookingPayment = useCreateBookingPayment as jest.Mock;
 
+// Mesmo bug temporal já corrigido nos testes E2E do backend
+// (bookings.e2e-spec.ts / customer-experience.e2e-spec.ts): uma data fixa
+// aqui eventualmente vira passado conforme o tempo real avança, e
+// `hasStarted` (calculado a partir de `Date.now()` em BookingDetail) passa
+// a esconder o botão "Cancelar reserva" que vários testes abaixo esperam
+// encontrar. Mesmo padrão: data sempre relativa a `Date.now()`, nunca fixa.
+function futureIso(daysFromNow: number, hour: number): string {
+  const target = new Date();
+  target.setUTCHours(0, 0, 0, 0);
+  target.setUTCDate(target.getUTCDate() + daysFromNow);
+  target.setUTCHours(hour, 0, 0, 0);
+  return target.toISOString();
+}
+
 const booking = {
   id: 'booking-1',
   status: 'CONFIRMED',
-  startsAt: '2026-09-07T13:00:00.000Z',
-  endsAt: '2026-09-07T14:00:00.000Z',
+  startsAt: futureIso(30, 13),
+  endsAt: futureIso(30, 14),
   total: '100',
   court: {
     id: 'court-1',

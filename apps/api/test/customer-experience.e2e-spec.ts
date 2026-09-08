@@ -37,6 +37,25 @@ function authHeader(token: keyof typeof TOKENS): [string, string] {
   return ['Authorization', `Bearer ${token}`];
 }
 
+// Mesmo bug temporal já corrigido em bookings.e2e-spec.ts: a reserva de
+// User A abaixo precisa continuar FUTURA (o teste "cancelamento continua
+// sendo a rota já existente" depende disso — BookingsService.cancel
+// rejeita com 400 uma reserva que já começou) — uma data fixa
+// eventualmente vira passado conforme o tempo real avança. Mesmo padrão
+// adotado lá: data sempre relativa a `Date.now()`, nunca fixa. América/
+// São_Paulo não observa mais horário de verão desde o Decreto 10.166/2019
+// — o offset -03:00 é constante o ano inteiro, então soma de dias em UTC é
+// suficiente (nenhuma biblioteca de timezone é necessária aqui).
+function futureDate(daysFromNow: number, time: string): string {
+  const base = new Date();
+  base.setUTCHours(0, 0, 0, 0);
+  const target = new Date(base.getTime() + daysFromNow * 86_400_000);
+  const yyyy = target.getUTCFullYear();
+  const mm = String(target.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(target.getUTCDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}T${time}-03:00`;
+}
+
 interface DiscoverySummaryBody {
   id: string;
   name: string;
@@ -115,14 +134,15 @@ describe('Customer experience — discovery & minhas reservas (e2e)', () => {
     inactiveCourtId = inactiveCourt.id;
 
     // Reserva CUSTOMER de User A — usada nos testes de "minhas reservas" e
-    // de privacidade (User B não pode vê-la).
+    // de privacidade (User B não pode vê-la). Precisa continuar futura (ver
+    // `futureDate` acima) — o teste de cancelamento depende disso.
     await prisma.booking.create({
       data: {
         courtId: activeCourtId,
         userId: userA.id,
         type: BookingType.CUSTOMER,
-        startsAt: new Date('2026-09-07T13:00:00-03:00'),
-        endsAt: new Date('2026-09-07T14:00:00-03:00'),
+        startsAt: new Date(futureDate(30, '13:00:00')),
+        endsAt: new Date(futureDate(30, '14:00:00')),
         total: 100,
       },
     });
@@ -410,13 +430,19 @@ describe('Customer experience — discovery & minhas reservas (e2e)', () => {
       });
       courtBId = courtB.id;
 
+      // Mesmo bug temporal do `futureDate` acima — A1 e A2 só precisam ser
+      // futuras e ficar em dias DISTINTOS entre si (mesma quadra `courtAId`
+      // nas duas: dias diferentes evitam qualquer risco de esbarrar na
+      // EXCLUDE constraint do Postgres, que vale mesmo pra um insert direto
+      // como este). Nenhum teste depende do dia exato, só de que sejam
+      // reservas futuras e distintas.
       const bookingA1 = await prisma.booking.create({
         data: {
           courtId: courtAId,
           userId: userA1.id,
           type: BookingType.CUSTOMER,
-          startsAt: new Date('2026-09-10T13:00:00-03:00'),
-          endsAt: new Date('2026-09-10T14:00:00-03:00'),
+          startsAt: new Date(futureDate(31, '13:00:00')),
+          endsAt: new Date(futureDate(31, '14:00:00')),
           total: 50,
         },
       });
@@ -427,8 +453,8 @@ describe('Customer experience — discovery & minhas reservas (e2e)', () => {
           courtId: courtAId,
           userId: userA2.id,
           type: BookingType.CUSTOMER,
-          startsAt: new Date('2026-09-11T13:00:00-03:00'),
-          endsAt: new Date('2026-09-11T14:00:00-03:00'),
+          startsAt: new Date(futureDate(32, '13:00:00')),
+          endsAt: new Date(futureDate(32, '14:00:00')),
           total: 50,
         },
       });
