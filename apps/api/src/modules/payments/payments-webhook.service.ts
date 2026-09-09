@@ -5,6 +5,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { PaymentsService } from './payments.service';
 import { PaymentProvider } from './providers/payment-provider';
 import { PushNotificationsService } from '../notifications/push-notifications.service';
+import { WhatsAppNotificationsService } from '../notifications/whatsapp-notifications.service';
 
 export interface ParsedPaymentNotification {
   providerEventId: string;
@@ -32,6 +33,8 @@ export class PaymentsWebhookService {
     // M7 — só esta camada de borda conhece PushNotificationsService;
     // PaymentsService continua sem nenhuma dependência de notificações.
     private readonly pushNotificationsService: PushNotificationsService,
+    // W2 — mesmo padrão, canal WhatsApp.
+    private readonly whatsappNotificationsService: WhatsAppNotificationsService,
   ) {}
 
   // Parsing defensivo do formato de notificação do Mercado Pago — nunca
@@ -156,6 +159,22 @@ export class PaymentsWebhookService {
         } catch (error) {
           this.logger.error(
             `Falha ao notificar pagamento confirmado da Booking ${applyResult.booking.id}: ${
+              error instanceof Error ? error.message : 'erro desconhecido'
+            }`,
+          );
+        }
+        // W2 — mesmo guard exato do push acima (applyResult.transitioned):
+        // dispara pra reservas de QUALQUER canal de origem (web, app,
+        // WhatsApp) — mesmo uma reserva criada pelo WhatsApp nunca recebeu
+        // esta informação especificamente (a resposta direta do bot na
+        // criação só fala do PIX pendente, nunca da aprovação em si, que
+        // sempre chega depois via este webhook), então isto nunca duplica
+        // a resposta conversacional.
+        try {
+          await this.whatsappNotificationsService.notifyPaymentConfirmed(applyResult.booking);
+        } catch (error) {
+          this.logger.error(
+            `Falha ao notificar pagamento confirmado via WhatsApp da Booking ${applyResult.booking.id}: ${
               error instanceof Error ? error.message : 'erro desconhecido'
             }`,
           );

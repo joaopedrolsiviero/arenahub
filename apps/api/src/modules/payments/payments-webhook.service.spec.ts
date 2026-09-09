@@ -5,6 +5,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { PaymentsService } from './payments.service';
 import { PaymentProvider } from './providers/payment-provider';
 import { PushNotificationsService } from '../notifications/push-notifications.service';
+import { WhatsAppNotificationsService } from '../notifications/whatsapp-notifications.service';
 
 const SECRET = 'test-webhook-secret';
 
@@ -19,6 +20,7 @@ describe('PaymentsWebhookService', () => {
   let paymentsService: { findByProviderPaymentId: jest.Mock; applyProviderStatus: jest.Mock };
   let paymentProvider: { getPaymentStatus: jest.Mock };
   let pushNotificationsService: { notifyPaymentConfirmed: jest.Mock };
+  let whatsappNotificationsService: { notifyPaymentConfirmed: jest.Mock };
   let service: PaymentsWebhookService;
 
   beforeEach(() => {
@@ -37,12 +39,16 @@ describe('PaymentsWebhookService', () => {
     };
     paymentProvider = { getPaymentStatus: jest.fn().mockResolvedValue({ status: 'PAID' }) };
     pushNotificationsService = { notifyPaymentConfirmed: jest.fn().mockResolvedValue(undefined) };
+    whatsappNotificationsService = {
+      notifyPaymentConfirmed: jest.fn().mockResolvedValue(undefined),
+    };
 
     service = new PaymentsWebhookService(
       prisma as unknown as PrismaService,
       paymentsService as unknown as PaymentsService,
       paymentProvider as unknown as PaymentProvider,
       pushNotificationsService as unknown as PushNotificationsService,
+      whatsappNotificationsService as unknown as WhatsAppNotificationsService,
     );
   });
 
@@ -180,6 +186,9 @@ describe('PaymentsWebhookService', () => {
 
       expect(pushNotificationsService.notifyPaymentConfirmed).toHaveBeenCalledWith(booking);
       expect(pushNotificationsService.notifyPaymentConfirmed).toHaveBeenCalledTimes(1);
+      // W2 — mesmo guard exato, canal WhatsApp.
+      expect(whatsappNotificationsService.notifyPaymentConfirmed).toHaveBeenCalledWith(booking);
+      expect(whatsappNotificationsService.notifyPaymentConfirmed).toHaveBeenCalledTimes(1);
     });
 
     it('evento ignorado (Payment já terminal) NUNCA notifica — nenhuma duplicação por webhook reprocessado', async () => {
@@ -191,6 +200,7 @@ describe('PaymentsWebhookService', () => {
       await service.handleEvent({ providerEventId: 'evt-1', providerPaymentId: 'mp-123' });
 
       expect(pushNotificationsService.notifyPaymentConfirmed).not.toHaveBeenCalled();
+      expect(whatsappNotificationsService.notifyPaymentConfirmed).not.toHaveBeenCalled();
     });
 
     it('transição real para um status diferente de PAID (ex: FAILED) nunca dispara notificação de pagamento confirmado', async () => {
@@ -202,6 +212,7 @@ describe('PaymentsWebhookService', () => {
       await service.handleEvent({ providerEventId: 'evt-1', providerPaymentId: 'mp-123' });
 
       expect(pushNotificationsService.notifyPaymentConfirmed).not.toHaveBeenCalled();
+      expect(whatsappNotificationsService.notifyPaymentConfirmed).not.toHaveBeenCalled();
     });
 
     it('falha ao notificar nunca impede o evento de ser marcado como processado', async () => {
@@ -217,6 +228,31 @@ describe('PaymentsWebhookService', () => {
       await expect(
         service.handleEvent({ providerEventId: 'evt-1', providerPaymentId: 'mp-123' }),
       ).resolves.toBeUndefined();
+      const [[updateManyArg]] = prisma.paymentWebhookEvent.updateMany.mock.calls as [
+        [{ data: { resultSummary: string } }],
+      ];
+      expect(updateManyArg.data.resultSummary).toBe('processed: PAID');
+    });
+
+    // W2 — canais independentes: uma falha no WhatsApp nunca impede o push
+    // (e vice-versa, provado pelo teste acima) nem o evento de ser marcado
+    // como processado. Nenhum dos dois pode reverter o estado financeiro já
+    // decidido por `applyProviderStatus`.
+    it('falha ao notificar via WhatsApp nunca impede o push nem o evento de ser marcado como processado', async () => {
+      paymentsService.applyProviderStatus.mockResolvedValue({
+        transitioned: true,
+        status: 'PAID',
+        booking,
+      });
+      whatsappNotificationsService.notifyPaymentConfirmed.mockRejectedValue(
+        new Error('Meta indisponível'),
+      );
+
+      await expect(
+        service.handleEvent({ providerEventId: 'evt-1', providerPaymentId: 'mp-123' }),
+      ).resolves.toBeUndefined();
+
+      expect(pushNotificationsService.notifyPaymentConfirmed).toHaveBeenCalledWith(booking);
       const [[updateManyArg]] = prisma.paymentWebhookEvent.updateMany.mock.calls as [
         [{ data: { resultSummary: string } }],
       ];

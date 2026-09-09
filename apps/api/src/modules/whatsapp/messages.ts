@@ -128,6 +128,13 @@ export const whatsappMessages = {
   cancelDeclined: 'Ok, sua reserva continua confirmada.',
   cancelError: 'Não consegui cancelar agora. Tente novamente em instantes.',
 
+  // W2 — notificação proativa (nunca uma resposta a mensagem do cliente):
+  // só é enviada quando `PaymentsService.refundIfPaid` confirma
+  // sincronamente `status: 'REFUNDED'` na resposta do provider (nunca um
+  // estado "solicitado"/"em processamento" — ver payments.service.ts e o
+  // relatório da fase pra decisão completa sobre o que fica de fora).
+  refundConfirmed: 'Reembolso confirmado — o valor já foi devolvido. 💸',
+
   arenaInfo: (name: string, phone: string | null, description: string | null) =>
     [`${name}`, description, phone ? `Telefone: ${phone}` : null].filter(Boolean).join('\n'),
 

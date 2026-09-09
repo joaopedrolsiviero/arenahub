@@ -412,8 +412,15 @@ export class PaymentsService {
    * Booking já bem-sucedido numa resposta de erro pro cliente — quem chama
    * decide o que fazer com uma falha de refund (ela fica logada e elegível
    * pra nova tentativa, nunca perdida).
+   *
+   * W2 — devolve `{ refunded: boolean }` (antes era `void`): `refunded:
+   * true` só quando ESTA chamada, especificamente, é quem confirma
+   * `REFUNDED` (nunca um "solicitado"/"em processamento" — ver
+   * `docs`/relatório da fase). É o sinal que `BookingsController` usa pra
+   * decidir se dispara a notificação proativa de reembolso — nenhuma lógica
+   * de reembolso duplicada lá, só reage a este resultado.
    */
-  async refundIfPaid(bookingId: string): Promise<void> {
+  async refundIfPaid(bookingId: string): Promise<{ refunded: boolean }> {
     // A chamada HTTP ao provider NUNCA pode ficar dentro da transação
     // (item 24 do prompt) — a transação aqui só reivindica localmente
     // (CAS PAID->REFUNDING) sob o mesmo advisory lock já usado por
@@ -447,7 +454,7 @@ export class PaymentsService {
     });
 
     if (!claimed) {
-      return;
+      return { refunded: false };
     }
     if (!claimed.providerPaymentId) {
       // Estruturalmente não deveria acontecer (só chega a PAID depois de ter
@@ -456,7 +463,7 @@ export class PaymentsService {
       this.logger.error(
         `Payment ${claimed.id}: PAID/REFUNDING sem providerPaymentId — refund abortado.`,
       );
-      return;
+      return { refunded: false };
     }
 
     // Estável por Payment (nunca por tentativa) — é o que permite chamar
@@ -472,7 +479,17 @@ export class PaymentsService {
       );
 
       if (result.status === 'REFUNDED') {
-        await this.prisma.payment.updateMany({
+        // W2 — CAS de verdade (checa `count`, não só dispara o update):
+        // o advisory lock acima já foi LIBERADO neste ponto (a chamada ao
+        // provider é sempre fora da transação — item 24 do prompt), então
+        // duas chamadas concorrentes a este método (ex: duplo clique bem
+        // rápido) podem ambas chegar até aqui e ambas receber `REFUNDED` do
+        // provider (mesma idempotencyKey estável). Sem checar `count`, as
+        // duas se considerariam "quem confirmou agora" e disparariam duas
+        // notificações de reembolso — a mesma classe de corrida que
+        // `applyProviderStatus` já resolve (linha ~364 acima) checando
+        // `result.count === 0`.
+        const updated = await this.prisma.payment.updateMany({
           where: { id: claimed.id, status: { in: [PaymentStatus.PAID, PaymentStatus.REFUNDING] } },
           data: {
             status: PaymentStatus.REFUNDED,
@@ -481,6 +498,7 @@ export class PaymentsService {
           },
         });
         this.logger.log(`Payment ${claimed.id}: refund confirmado em ${Date.now() - startedAt}ms.`);
+        return { refunded: updated.count > 0 };
       } else if (result.status === 'REFUNDING') {
         await this.prisma.payment.updateMany({
           where: { id: claimed.id, status: { in: [PaymentStatus.PAID, PaymentStatus.REFUNDING] } },
@@ -513,6 +531,7 @@ export class PaymentsService {
         }`,
       );
     }
+    return { refunded: false };
   }
 
   /**

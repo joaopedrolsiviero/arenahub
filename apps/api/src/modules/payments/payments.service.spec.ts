@@ -561,7 +561,7 @@ describe('PaymentsService', () => {
     it('Regra 1: sem nenhum Payment pra Booking, é um no-op — nunca chama o provider', async () => {
       tx.payment.findFirst.mockResolvedValue(null);
 
-      await service.refundIfPaid('booking-1');
+      await expect(service.refundIfPaid('booking-1')).resolves.toEqual({ refunded: false });
 
       expect(paymentProvider.refundPayment).not.toHaveBeenCalled();
       expect(tx.payment.updateMany).not.toHaveBeenCalled();
@@ -616,12 +616,37 @@ describe('PaymentsService', () => {
       tx.payment.findUniqueOrThrow.mockResolvedValue({ ...paid, status: 'REFUNDING' });
       paymentProvider.refundPayment.mockResolvedValue({ refundId: 'refund-1', status: 'REFUNDED' });
 
-      await service.refundIfPaid('booking-1');
+      const result = await service.refundIfPaid('booking-1');
 
       expect(prisma.payment.updateMany).toHaveBeenCalledWith({
         where: { id: 'payment-1', status: { in: ['PAID', 'REFUNDING'] } },
         data: { status: 'REFUNDED', refundId: 'refund-1', refundedAt: expect.any(Date) as Date },
       });
+      // W2 — `refunded: true` é o sinal que o controller usa pra decidir se
+      // dispara a notificação proativa de reembolso confirmado.
+      expect(result).toEqual({ refunded: true });
+    });
+
+    // W2 — mesma classe de corrida que `applyProviderStatus` já resolve
+    // (checar `count`, não só disparar o update): o advisory lock já foi
+    // liberado quando a chamada ao provider acontece (é sempre fora da
+    // transação), então duas chamadas concorrentes podem ambas receber
+    // REFUNDED do provider (mesma idempotencyKey estável) — só uma pode
+    // genuinamente "vencer" a escrita local (count > 0); a perdedora nunca
+    // pode se considerar "quem confirmou agora" (nunca dispara notificação
+    // duplicada).
+    it('duas chamadas concorrentes recebendo REFUNDED do provider: só uma reporta refunded=true (perdedora do CAS local)', async () => {
+      const paid = paymentRow({ status: 'PAID', providerPaymentId: 'mp-123' });
+      tx.payment.findFirst.mockResolvedValue(paid);
+      tx.payment.findUniqueOrThrow.mockResolvedValue({ ...paid, status: 'REFUNDING' });
+      paymentProvider.refundPayment.mockResolvedValue({ refundId: 'refund-1', status: 'REFUNDED' });
+      // A "vencedora" já gravou REFUNDED antes desta chamada chegar ao
+      // updateMany final — count 0, ninguém mais pra transicionar.
+      prisma.payment.updateMany.mockResolvedValue({ count: 0 });
+
+      const result = await service.refundIfPaid('booking-1');
+
+      expect(result).toEqual({ refunded: false });
     });
 
     it('refund assíncrono (in_process) marca REFUNDING com refundId — nunca REFUNDED sem confirmação real', async () => {
@@ -661,7 +686,7 @@ describe('PaymentsService', () => {
       tx.payment.findUniqueOrThrow.mockResolvedValue({ ...paid, status: 'REFUNDING' });
       paymentProvider.refundPayment.mockRejectedValue(new Error('timeout'));
 
-      await expect(service.refundIfPaid('booking-1')).resolves.toBeUndefined();
+      await expect(service.refundIfPaid('booking-1')).resolves.toEqual({ refunded: false });
 
       const calls = prisma.payment.updateMany.mock.calls as [{ data: { status?: string } }][];
       expect(calls.every(([call]) => call.data.status !== 'REFUNDED')).toBe(true);

@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
@@ -40,6 +40,10 @@ import {
 // prática: menos chamadas de IA do que mensagens trocadas).
 const APP_SECRET = 'whatsapp-e2e-app-secret';
 const VERIFY_TOKEN = 'whatsapp-e2e-verify-token';
+// W2 — secret do webhook do Mercado Pago, só usado pelo describe de
+// notificações proativas (a suíte original de W1 nunca exercita esse
+// webhook, só a criação de pagamento pela conversa).
+const PAYMENT_WEBHOOK_SECRET = 'whatsapp-e2e-payment-webhook-secret';
 
 class FakeAiProvider extends AiProvider {
   nextResponse: AiGenerateResponse = { text: '{"intent":"UNKNOWN"}' };
@@ -130,14 +134,25 @@ interface SentMessage {
 
 class FakeWhatsAppProvider extends WhatsAppProvider {
   sent: SentMessage[] = [];
+  // W2 — permite simular falha de ENTREGA (Meta indisponível) sem afetar
+  // nenhum teste existente (default null = comportamento de sempre).
+  nextSendError: Error | null = null;
 
   sendMessage(message: WhatsAppOutboundMessage): Promise<void> {
+    if (this.nextSendError) {
+      const error = this.nextSendError;
+      return Promise.reject(error);
+    }
     this.sent.push(message);
     return Promise.resolve();
   }
 
   lastTo(phone: string): string | undefined {
     return [...this.sent].reverse().find((m) => m.to === phone)?.text;
+  }
+
+  allTo(phone: string): string[] {
+    return this.sent.filter((m) => m.to === phone).map((m) => m.text);
   }
 }
 
@@ -157,10 +172,28 @@ const OWNER_B = { clerkId: 'user_e2e_wa_owner_b', email: 'wa-e2e-owner-b@example
 const TOKENS: Record<string, string> = {
   'token-owner-a': OWNER_A.clerkId,
   'token-owner-b': OWNER_B.clerkId,
+  // W2 — precisa de token de CLIENTE pra exercitar a criação/cancelamento
+  // de reserva pela rota REST (o site/app), nunca só pela conversa —
+  // exatamente o cenário que prova que a notificação proativa não depende
+  // de o cliente ter usado o WhatsApp pra reservar.
+  'token-customer-a': CUSTOMER_A.clerkId,
+  'token-customer-c': CUSTOMER_C.clerkId,
 };
+
+function authHeader(token: keyof typeof TOKENS): [string, string] {
+  return ['Authorization', `Bearer ${token}`];
+}
 
 function signBody(body: string): string {
   return `sha256=${createHmac('sha256', APP_SECRET).update(body).digest('hex')}`;
+}
+
+// W2 — mesmo esquema exato de payments.e2e-spec.ts (manifesto
+// `id/request-id/ts`, HMAC-SHA256).
+function signPaymentWebhook(providerPaymentId: string, requestId: string, ts: string): string {
+  const manifest = `id:${providerPaymentId.toLowerCase()};request-id:${requestId};ts:${ts};`;
+  const hex = createHmac('sha256', PAYMENT_WEBHOOK_SECRET).update(manifest).digest('hex');
+  return `ts=${ts},v1=${hex}`;
 }
 
 function textMessagePayload(opts: {
@@ -242,6 +275,7 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
   beforeAll(async () => {
     process.env.WHATSAPP_APP_SECRET = APP_SECRET;
     process.env.WHATSAPP_VERIFY_TOKEN = VERIFY_TOKEN;
+    process.env.PAYMENT_WEBHOOK_SECRET = PAYMENT_WEBHOOK_SECRET;
 
     prisma = new PrismaClient();
     await prisma.user.deleteMany({ where: { clerkId: { in: Object.values(TOKENS) } } });
@@ -385,6 +419,7 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
       where: { arenaId: { in: [arenaAId, arenaBId, arenaCId] } },
     });
     await prisma.whatsAppEvent.deleteMany({});
+    await prisma.paymentWebhookEvent.deleteMany({});
     await prisma.payment.deleteMany({ where: { arenaId: arenaCId } });
     await prisma.booking.deleteMany({ where: { courtId: { in: [courtAId, courtBId, courtCId] } } });
     await prisma.arena.deleteMany({ where: { id: { in: [arenaAId, arenaBId, arenaCId] } } });
@@ -396,11 +431,13 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
     await app.close();
     delete process.env.WHATSAPP_APP_SECRET;
     delete process.env.WHATSAPP_VERIFY_TOKEN;
+    delete process.env.PAYMENT_WEBHOOK_SECRET;
   });
 
   beforeEach(async () => {
     fakeAiProvider.nextResponse = { text: '{"intent":"UNKNOWN"}' };
     fakeWhatsappProvider.sent = [];
+    fakeWhatsappProvider.nextSendError = null;
     fakePaymentProvider.createCalls = [];
     fakePaymentProvider.refundCalls = [];
     fakePaymentProvider.nextCreateError = null;
@@ -958,6 +995,346 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
       const payments = await prisma.payment.findMany({ where: { bookingId: booking.id } });
       expect(payments).toHaveLength(0);
       expect(fakePaymentProvider.createCalls).toHaveLength(0);
+    });
+  });
+
+  // Fase W2 — notificações proativas via WhatsApp: eventos de negócio reais
+  // (nunca mensagem do cliente) disparando uma mensagem, sem passar pela
+  // conversa. Todos os cenários abaixo criam a reserva pela rota REST
+  // (`POST .../bookings`, o mesmo endpoint do site/app) — nunca pela
+  // conversa — precisamente pra provar que o canal proativo funciona
+  // independente de o cliente ter usado o WhatsApp pra reservar.
+  describe('W2 — Notificações proativas via WhatsApp', () => {
+    function createBookingRest(
+      arenaId: string,
+      courtId: string,
+      token: 'token-customer-a' | 'token-customer-c',
+      startsAt: string,
+      idempotencyKey: string,
+    ) {
+      return request(app.getHttpServer())
+        .post(`/v1/arenas/${arenaId}/courts/${courtId}/bookings`)
+        .set(...authHeader(token))
+        .set('Idempotency-Key', idempotencyKey)
+        .send({ startsAt });
+    }
+
+    function cancelBookingRest(
+      arenaId: string,
+      courtId: string,
+      bookingId: string,
+      token: 'token-customer-a' | 'token-customer-c',
+    ) {
+      return request(app.getHttpServer())
+        .post(`/v1/arenas/${arenaId}/courts/${courtId}/bookings/${bookingId}/cancel`)
+        .set(...authHeader(token));
+    }
+
+    function createPaymentRest(bookingId: string, idempotencyKey: string) {
+      return request(app.getHttpServer())
+        .post(`/v1/users/me/bookings/${bookingId}/payments`)
+        .set(...authHeader('token-customer-a'))
+        .set('Idempotency-Key', idempotencyKey)
+        .send();
+    }
+
+    function sendPaymentWebhook(
+      providerPaymentId: string,
+      opts?: { requestId?: string; notificationId?: string },
+    ) {
+      const requestId = opts?.requestId ?? randomUUID();
+      const notificationId = opts?.notificationId ?? randomUUID();
+      const ts = String(Math.floor(Date.now() / 1000));
+      return request(app.getHttpServer())
+        .post('/v1/webhooks/payments/mercadopago')
+        .set('x-signature', signPaymentWebhook(providerPaymentId, requestId, ts))
+        .set('x-request-id', requestId)
+        .send({
+          id: notificationId,
+          type: 'payment',
+          action: 'payment.updated',
+          data: { id: providerPaymentId },
+        });
+    }
+
+    function futureIso(hoursFromNow: number): string {
+      return new Date(Date.now() + hoursFromNow * 3_600_000).toISOString();
+    }
+
+    it('reserva confirmada via REST (arena ONLINE) dispara UMA notificação, com quadra/data/preço — retry da mesma Idempotency-Key não duplica', async () => {
+      const key = randomUUID();
+      const startsAt = futureIso(48);
+
+      const first = await createBookingRest(
+        arenaCId,
+        courtCId,
+        'token-customer-a',
+        startsAt,
+        key,
+      ).expect(201);
+      const bookingId = (first.body as { id: string }).id;
+
+      const message = fakeWhatsappProvider.lastTo(CUSTOMER_A.phone);
+      expect(message).toBeDefined();
+      expect(message).toContain('Quadra C1');
+      expect(message).toContain('R$');
+      expect(message).not.toContain(bookingId); // nunca ID interno
+
+      // Retry (mesma Idempotency-Key — mesmo padrão de um retry HTTP real).
+      await createBookingRest(arenaCId, courtCId, 'token-customer-a', startsAt, key).expect(201);
+      expect(fakeWhatsappProvider.allTo(CUSTOMER_A.phone)).toHaveLength(1);
+    });
+
+    it('reserva confirmada via REST em arena IN_PERSON também notifica (a confirmação não depende de pagamento)', async () => {
+      const startsAt = futureIso(49);
+      await createBookingRest(
+        arenaAId,
+        courtAId,
+        'token-customer-a',
+        startsAt,
+        randomUUID(),
+      ).expect(201);
+
+      const message = fakeWhatsappProvider.lastTo(CUSTOMER_A.phone);
+      expect(message).toBeDefined();
+      expect(message).toContain('Quadra A1');
+    });
+
+    it('cancelamento via REST dispara UMA notificação de cancelamento — retry (idempotente) não duplica', async () => {
+      const startsAt = futureIso(50);
+      const created = await createBookingRest(
+        arenaAId,
+        courtAId,
+        'token-customer-a',
+        startsAt,
+        randomUUID(),
+      ).expect(201);
+      const bookingId = (created.body as { id: string }).id;
+      fakeWhatsappProvider.sent = []; // só interessa o que acontece a partir do cancelamento
+
+      await cancelBookingRest(arenaAId, courtAId, bookingId, 'token-customer-a').expect(200);
+      const afterFirst = fakeWhatsappProvider.allTo(CUSTOMER_A.phone);
+      expect(afterFirst).toHaveLength(1);
+      expect(afterFirst[0]).toMatch(/cancelada/i);
+
+      // BookingsService.cancel é idempotente (200 de novo, cancelledNow=false).
+      await cancelBookingRest(arenaAId, courtAId, bookingId, 'token-customer-a').expect(200);
+      expect(fakeWhatsappProvider.allTo(CUSTOMER_A.phone)).toHaveLength(1);
+    });
+
+    it('pagamento aprovado via webhook dispara UMA notificação — webhook duplicado (mesmo evento) não duplica', async () => {
+      const startsAt = futureIso(51);
+      const created = await createBookingRest(
+        arenaCId,
+        courtCId,
+        'token-customer-a',
+        startsAt,
+        randomUUID(),
+      ).expect(201);
+      const bookingId = (created.body as { id: string }).id;
+      const paymentRes = await createPaymentRest(bookingId, randomUUID()).expect(201);
+      const providerPaymentId = (
+        await prisma.payment.findUniqueOrThrow({
+          where: { id: (paymentRes.body as { id: string }).id },
+        })
+      ).providerPaymentId!;
+      fakePaymentProvider.statusByProviderPaymentId.set(providerPaymentId, 'PAID');
+      fakeWhatsappProvider.sent = []; // só interessa o que acontece a partir do webhook
+
+      const notificationId = randomUUID();
+      await sendPaymentWebhook(providerPaymentId, { notificationId }).expect(200);
+      const afterFirst = fakeWhatsappProvider.allTo(CUSTOMER_A.phone);
+      expect(afterFirst).toHaveLength(1);
+      expect(afterFirst[0]).toMatch(/aprovado/i);
+
+      // Mesma entrega reenviada pela Meta (mesmo id de notificação — o que
+      // `claimEvent` usa como `providerEventId`) — o Payment já está PAID
+      // (estado terminal), `applyProviderStatus` nunca transiciona de novo.
+      await sendPaymentWebhook(providerPaymentId, { notificationId }).expect(200);
+      expect(fakeWhatsappProvider.allTo(CUSTOMER_A.phone)).toHaveLength(1);
+    });
+
+    it('concorrência real: duas entregas SIMULTÂNEAS do webhook de pagamento aprovado nunca geram duas notificações', async () => {
+      const startsAt = futureIso(52);
+      const created = await createBookingRest(
+        arenaCId,
+        courtCId,
+        'token-customer-a',
+        startsAt,
+        randomUUID(),
+      ).expect(201);
+      const bookingId = (created.body as { id: string }).id;
+      const paymentRes = await createPaymentRest(bookingId, randomUUID()).expect(201);
+      const providerPaymentId = (
+        await prisma.payment.findUniqueOrThrow({
+          where: { id: (paymentRes.body as { id: string }).id },
+        })
+      ).providerPaymentId!;
+      fakePaymentProvider.statusByProviderPaymentId.set(providerPaymentId, 'PAID');
+      fakeWhatsappProvider.sent = [];
+
+      // Mesmo id de notificação (o que `claimEvent` usa pra deduplicar)
+      // disparado 2x ao mesmo tempo — simula a Meta reentregando por
+      // timeout de resposta, chegando quase simultaneamente.
+      const requestId = randomUUID();
+      const notificationId = randomUUID();
+      const [resA, resB] = await Promise.all([
+        sendPaymentWebhook(providerPaymentId, { requestId, notificationId }),
+        sendPaymentWebhook(providerPaymentId, { requestId, notificationId }),
+      ]);
+      expect([resA.status, resB.status]).toEqual([200, 200]);
+
+      expect(fakeWhatsappProvider.allTo(CUSTOMER_A.phone)).toHaveLength(1);
+      const payment = await prisma.payment.findUniqueOrThrow({
+        where: { providerPaymentId },
+      });
+      expect(payment.status).toBe('PAID');
+    });
+
+    it('reembolso confirmado via cancelamento REST dispara notificação de cancelamento E de reembolso, separadamente', async () => {
+      const startsAt = futureIso(53);
+      const created = await createBookingRest(
+        arenaCId,
+        courtCId,
+        'token-customer-a',
+        startsAt,
+        randomUUID(),
+      ).expect(201);
+      const bookingId = (created.body as { id: string }).id;
+      const paymentRes = await createPaymentRest(bookingId, randomUUID()).expect(201);
+      const providerPaymentId = (
+        await prisma.payment.findUniqueOrThrow({
+          where: { id: (paymentRes.body as { id: string }).id },
+        })
+      ).providerPaymentId!;
+      fakePaymentProvider.statusByProviderPaymentId.set(providerPaymentId, 'PAID');
+      await sendPaymentWebhook(providerPaymentId).expect(200);
+      // fakePaymentProvider.refundPayment (beforeEach) já devolve REFUNDED
+      // por padrão — reembolso é confirmado SINCRONAMENTE dentro do próprio
+      // cancelamento, sem nenhum polling/scheduler novo.
+      fakeWhatsappProvider.sent = [];
+
+      await cancelBookingRest(arenaCId, courtCId, bookingId, 'token-customer-a').expect(200);
+
+      const messages = fakeWhatsappProvider.allTo(CUSTOMER_A.phone);
+      expect(messages.some((m) => /cancelada/i.test(m))).toBe(true);
+      expect(messages.some((m) => /reembolso confirmado/i.test(m))).toBe(true);
+    });
+
+    it('reembolso ainda em processamento (REFUNDING, sem confirmação síncrona) NUNCA envia mensagem de reembolso confirmado', async () => {
+      const startsAt = futureIso(54);
+      const created = await createBookingRest(
+        arenaCId,
+        courtCId,
+        'token-customer-a',
+        startsAt,
+        randomUUID(),
+      ).expect(201);
+      const bookingId = (created.body as { id: string }).id;
+      const paymentRes = await createPaymentRest(bookingId, randomUUID()).expect(201);
+      const providerPaymentId = (
+        await prisma.payment.findUniqueOrThrow({
+          where: { id: (paymentRes.body as { id: string }).id },
+        })
+      ).providerPaymentId!;
+      fakePaymentProvider.statusByProviderPaymentId.set(providerPaymentId, 'PAID');
+      await sendPaymentWebhook(providerPaymentId).expect(200);
+      // Provider responde "em processamento" (PIX assíncrono, sem
+      // confirmação síncrona) — nunca finge que o reembolso terminou.
+      fakePaymentProvider.nextRefundResult = { refundId: 'refund-pending', status: 'REFUNDING' };
+      fakeWhatsappProvider.sent = [];
+
+      await cancelBookingRest(arenaCId, courtCId, bookingId, 'token-customer-a').expect(200);
+
+      const messages = fakeWhatsappProvider.allTo(CUSTOMER_A.phone);
+      expect(messages.some((m) => /cancelada/i.test(m))).toBe(true);
+      expect(messages.some((m) => /reembolso/i.test(m))).toBe(false);
+    });
+
+    it('IN_PERSON nunca recebe notificação de pagamento aprovado (nenhum Payment chega a existir)', async () => {
+      const startsAt = futureIso(55);
+      const created = await createBookingRest(
+        arenaAId,
+        courtAId,
+        'token-customer-a',
+        startsAt,
+        randomUUID(),
+      ).expect(201);
+      const bookingId = (created.body as { id: string }).id;
+      fakeWhatsappProvider.sent = [];
+
+      // O próprio endpoint de criar pagamento já rejeita pra arena
+      // IN_PERSON (payments.e2e-spec.ts cobre isso a fundo) — aqui só
+      // confirmamos a consequência no canal WhatsApp: nunca existe sequer a
+      // POSSIBILIDADE de enviar "pagamento aprovado".
+      await createPaymentRest(bookingId, randomUUID()).expect(409);
+      expect(fakeWhatsappProvider.allTo(CUSTOMER_A.phone)).toHaveLength(0);
+    });
+
+    it('isolamento cross-user: a reserva de um cliente nunca notifica o telefone de outro cliente da mesma arena', async () => {
+      const startsAt = futureIso(56);
+      await createBookingRest(
+        arenaCId,
+        courtCId,
+        'token-customer-a',
+        startsAt,
+        randomUUID(),
+      ).expect(201);
+
+      expect(fakeWhatsappProvider.allTo(CUSTOMER_A.phone)).toHaveLength(1);
+      expect(fakeWhatsappProvider.allTo(CUSTOMER_C.phone)).toHaveLength(0);
+    });
+
+    it('remetente é sempre o whatsappPhoneNumberId da arena da própria reserva — nunca o de outra arena', async () => {
+      const startsAt = futureIso(57);
+      await createBookingRest(
+        arenaCId,
+        courtCId,
+        'token-customer-a',
+        startsAt,
+        randomUUID(),
+      ).expect(201);
+
+      const sent = fakeWhatsappProvider.sent.find((m) => m.to === CUSTOMER_A.phone);
+      expect(sent?.fromPhoneNumberId).toBe(PHONE_NUMBER_ID_C);
+      expect(sent?.fromPhoneNumberId).not.toBe(PHONE_NUMBER_ID_A);
+      expect(sent?.fromPhoneNumberId).not.toBe(PHONE_NUMBER_ID_B);
+    });
+
+    it('falha na entrega (Meta indisponível) nunca desfaz o evento de negócio — a reserva continua criada normalmente', async () => {
+      fakeWhatsappProvider.nextSendError = new Error('Meta indisponível');
+      const startsAt = futureIso(58);
+
+      const response = await createBookingRest(
+        arenaAId,
+        courtAId,
+        'token-customer-a',
+        startsAt,
+        randomUUID(),
+      ).expect(201);
+
+      const booking = await prisma.booking.findUniqueOrThrow({
+        where: { id: (response.body as { id: string }).id },
+      });
+      expect(booking.status).toBe(BookingStatus.CONFIRMED);
+    });
+
+    it('falha na entrega nunca desfaz um cancelamento já confirmado', async () => {
+      const startsAt = futureIso(59);
+      const created = await createBookingRest(
+        arenaAId,
+        courtAId,
+        'token-customer-a',
+        startsAt,
+        randomUUID(),
+      ).expect(201);
+      const bookingId = (created.body as { id: string }).id;
+      fakeWhatsappProvider.nextSendError = new Error('Meta indisponível');
+
+      await cancelBookingRest(arenaAId, courtAId, bookingId, 'token-customer-a').expect(200);
+
+      const booking = await prisma.booking.findUniqueOrThrow({ where: { id: bookingId } });
+      expect(booking.status).toBe(BookingStatus.CANCELLED);
     });
   });
 });

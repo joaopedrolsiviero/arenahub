@@ -23,6 +23,7 @@ import { UsersService } from '../users/users.service';
 import { IdempotencyService } from '../idempotency/idempotency.service';
 import { PaymentsService } from '../payments/payments.service';
 import { PushNotificationsService } from '../notifications/push-notifications.service';
+import { WhatsAppNotificationsService } from '../notifications/whatsapp-notifications.service';
 import { BookingDetailed, BookingOccupancy, BookingsService } from './bookings.service';
 import { CreateCustomerBookingDto } from './dto/create-customer-booking.dto';
 import { CreateAdminBookingDto } from './dto/create-admin-booking.dto';
@@ -55,6 +56,9 @@ export class BookingsController {
     // M7 — mesmo padrão: só o controller conhece PushNotificationsService;
     // BookingsService continua sem nenhuma dependência de notificações.
     private readonly pushNotificationsService: PushNotificationsService,
+    // W2 — mesmo padrão, canal WhatsApp: só o controller conhece
+    // WhatsAppNotificationsService.
+    private readonly whatsappNotificationsService: WhatsAppNotificationsService,
   ) {}
 
   // Fase 18 (item 4): criação de reserva é o endpoint de maior valor de
@@ -128,6 +132,19 @@ export class BookingsController {
         } catch (error) {
           this.logger.error(
             `Falha ao notificar confirmação da Booking ${booking.id}: ${
+              error instanceof Error ? error.message : 'erro desconhecido'
+            }`,
+          );
+        }
+        // W2 — mesmo guard exato do push acima (!result.replayed): nunca
+        // notifica num replay de uma requisição já processada (retry HTTP,
+        // duplo clique com a mesma Idempotency-Key). Falha de envio nunca
+        // vira erro pro cliente — mesma defesa em profundidade.
+        try {
+          await this.whatsappNotificationsService.notifyBookingConfirmed(booking);
+        } catch (error) {
+          this.logger.error(
+            `Falha ao notificar confirmação via WhatsApp da Booking ${booking.id}: ${
               error instanceof Error ? error.message : 'erro desconhecido'
             }`,
           );
@@ -266,8 +283,14 @@ export class BookingsController {
     // falha de refund virar erro na resposta de cancelamento — o
     // cancelamento em si já está confirmado; o refund fica elegível pra
     // nova tentativa na próxima chamada.
+    // W2 — `refunded` só é `true` quando ESTA chamada confirmou REFUNDED
+    // agora (nunca um "solicitado"/"em processamento" — ver
+    // PaymentsService.refundIfPaid); é o sinal que decide a notificação de
+    // reembolso abaixo, sem duplicar nenhuma lógica de reembolso aqui.
+    let refunded = false;
     try {
-      await this.paymentsService.refundIfPaid(booking.id);
+      const refundResult = await this.paymentsService.refundIfPaid(booking.id);
+      refunded = refundResult.refunded;
     } catch (error) {
       this.logger.error(
         `Falha ao processar reembolso da Booking ${booking.id}: ${
@@ -284,6 +307,34 @@ export class BookingsController {
       } catch (error) {
         this.logger.error(
           `Falha ao notificar cancelamento da Booking ${booking.id}: ${
+            error instanceof Error ? error.message : 'erro desconhecido'
+          }`,
+        );
+      }
+      // W2 — mesmo guard (cancelledNow): nunca notifica num replay.
+      try {
+        await this.whatsappNotificationsService.notifyBookingCancelled(booking);
+      } catch (error) {
+        this.logger.error(
+          `Falha ao notificar cancelamento via WhatsApp da Booking ${booking.id}: ${
+            error instanceof Error ? error.message : 'erro desconhecido'
+          }`,
+        );
+      }
+    }
+
+    // W2 — reembolso é um evento financeiro distinto do cancelamento da
+    // reserva (docs/ARCHITECTURE.md: ciclo financeiro sempre separado do
+    // operacional) — notifica independentemente de `cancelledNow` (um
+    // reembolso só pode acontecer depois de um cancelamento, mas
+    // `refunded` já garante, sozinho, que isto só dispara na chamada que
+    // realmente confirmou o reembolso agora).
+    if (refunded) {
+      try {
+        await this.whatsappNotificationsService.notifyRefundConfirmed(booking);
+      } catch (error) {
+        this.logger.error(
+          `Falha ao notificar reembolso via WhatsApp da Booking ${booking.id}: ${
             error instanceof Error ? error.message : 'erro desconhecido'
           }`,
         );
