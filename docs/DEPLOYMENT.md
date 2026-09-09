@@ -2338,6 +2338,84 @@ consciente de não deixar trabalho pronto/testado preso localmente numa troca de
 
 ---
 
+## 28. Fase — Migração para Clerk Production + domínio `sivierotech.com.br` (auditoria, 2026-09-09)
+
+**Resultado: BLOCKED** — auditoria completa concluída, código já preparado (nenhuma dependência de
+domínio hardcoded em nenhum caminho de execução), mas a migração em si depende inteiramente de
+ações manuais em dashboards externos (Clerk, Registro.br, Vercel, Railway) que este ambiente não
+tem acesso para executar. Ver relatório final da fase (entregue no chat) para a classificação
+completa.
+
+**Achado principal da auditoria**: diferente do que a Seção 8 documentava como pendência genérica,
+o código NUNCA precisou de alteração para este domínio específico — toda peça relevante já é
+inteiramente orientada por variável de ambiente, sem nenhum valor de domínio hardcoded em lógica de
+runtime:
+- CORS (`apps/api/src/main.ts`) já lê `WEB_APP_URL` (múltiplas origens, `,`-separadas, já com
+  `.trim()`).
+- `NEXT_PUBLIC_API_URL` (web) e `EXPO_PUBLIC_API_URL` (mobile) já resolvem a URL da API só via env.
+- Todo redirect de autenticação (`/sign-in?redirect_url=...`, `SignIn forceRedirectUrl`) usa path
+  relativo, nunca uma URL absoluta — o Clerk resolve contra a origem atual automaticamente.
+- `ClerkAuthGuard`/`ClerkService` (backend) validam via `CLERK_SECRET_KEY` sem `authorizedParties`
+  nem allowlist de domínio — trocar a chave de `sk_test_` para `sk_live_` já é suficiente para
+  passar a validar tokens de Production, sem tocar em código.
+- A URL do convite de equipe (Fase 11) já é montada a partir de `WEB_APP_URL` — nenhuma mudança
+  necessária além de trocar o valor dessa variável.
+- Única exceção real: `apps/web/src/lib/site-url.ts` tem um fallback fixo
+  (`https://arenahub-xi.vercel.app`) usado só quando `NEXT_PUBLIC_SITE_URL` não está definida —
+  mecanismo de escape hatch já existente desde a Fase 32, documentado como preparado exatamente
+  para este momento. Deliberadamente **não alterado** nesta auditoria (o fallback continua sendo o
+  domínio que está de fato no ar hoje — sobrescrever por um domínio ainda não verificado via DNS
+  seria regressão, não preparação).
+
+**Mudança de código real desta fase**: `apps/web/.env.example` — documentada a variável
+`NEXT_PUBLIC_SITE_URL` (já lida em código desde a Fase 32, nunca documentada no exemplo). Nenhuma
+outra alteração de código foi necessária ou feita.
+
+**`apps/mobile/eas.json`**: `EXPO_PUBLIC_API_URL` dos perfis `preview`/`production` ainda aponta
+para `https://api-production-34e0.up.railway.app/v1` — deliberadamente **não alterado** nesta
+auditoria. Trocar para `https://api.sivierotech.com.br/v1` antes do domínio customizado da API
+estar de fato resolvendo quebraria qualquer build novo gerado nesse intervalo (instalado por quem
+testar); ação adiada até a Seção "Configurações manuais" abaixo ser concluída.
+
+### O que falta — só ações manuais em dashboard
+
+1. **Registro.br**: apontar `sivierotech.com.br` (e o subdomínio `app`) para a Vercel, conforme os
+   registros que a própria Vercel exibir ao adicionar o domínio customizado do projeto — não
+   inventados aqui.
+2. **Vercel**: adicionar domínio customizado `app.sivierotech.com.br` ao projeto `arenahub`; manter
+   `arenahub-xi.vercel.app` ativo em paralelo até validar o domínio novo (Seção 5 do prompt da
+   fase).
+3. **Railway**: adicionar domínio customizado `api.sivierotech.com.br` ao serviço `api`; a Railway
+   fornece o CNAME exato a cadastrar no Registro.br.
+4. **Clerk**: criar/usar o ambiente Production, adicionar `app.sivierotech.com.br` como domínio em
+   Configure → Domains, cadastrar os registros CNAME que o próprio Clerk exibir (Frontend API,
+   Account Portal — valores gerados por domínio, nunca inventados por código). Repetir o passo a
+   passo já documentado na Seção 8 (segue válido, agora com um domínio real disponível pela
+   primeira vez).
+5. **Clerk → webhook**: cadastrar um NOVO endpoint no ambiente Production apontando para
+   `https://api.sivierotech.com.br/v1/webhooks/clerk`, copiar o Signing Secret **daquele endpoint
+   específico** para `CLERK_WEBHOOK_SIGNING_SECRET` (Railway) — nunca reaproveitar o secret do
+   endpoint de Development atual.
+6. **Vercel (env vars, Production)**: `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`/`CLERK_SECRET_KEY` para as
+   chaves `pk_live_`/`sk_live_`; `NEXT_PUBLIC_API_URL=https://api.sivierotech.com.br/v1`;
+   `NEXT_PUBLIC_SITE_URL=https://app.sivierotech.com.br`. Redeploy obrigatório depois (`NEXT_PUBLIC_*`
+   é embutido em build time).
+7. **Railway (env vars)**: `CLERK_SECRET_KEY` (`sk_live_`); `CLERK_WEBHOOK_SIGNING_SECRET` (do novo
+   endpoint); `WEB_APP_URL=https://app.sivierotech.com.br,https://arenahub-xi.vercel.app` (mantém o
+   domínio antigo como origem CORS válida durante a transição).
+8. **EAS (mobile)**: variável `EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY` (secret do EAS, fora deste
+   repositório — nunca esteve em `eas.json`) precisa mudar para a chave `pk_live_`, já que mobile
+   usa o MESMO projeto Clerk do Web (nunca um projeto separado, ver `apps/mobile/.env.example`) —
+   sem isso, tokens emitidos pro app mobile deixam de validar contra o backend assim que
+   `CLERK_SECRET_KEY` virar `sk_live_` no Railway.
+9. Só depois do passo 3 confirmado (domínio da API resolvendo de verdade): atualizar
+   `apps/mobile/eas.json` (`preview`/`production`) para `https://api.sivierotech.com.br/v1`.
+
+Nenhuma dessas ações foi executada nesta sessão — todas exigem acesso a dashboards/DNS que este
+ambiente não tem, conforme a regra explícita desta fase.
+
+---
+
 ## Troubleshooting
 
 | Sintoma | Causa provável | Onde olhar |
