@@ -2414,6 +2414,58 @@ testar); ação adiada até a Seção "Configurações manuais" abaixo ser concl
 Nenhuma dessas ações foi executada nesta sessão — todas exigem acesso a dashboards/DNS que este
 ambiente não tem, conforme a regra explícita desta fase.
 
+### Atualização — sessão de configuração manual guiada (2026-09-10)
+
+O item 4 da lista acima (domínio no Clerk Production) foi **concluído nesta sessão**, feito
+manualmente pelo usuário com orientação passo a passo. Registrado aqui para quem continuar o
+trabalho não repetir:
+
+- Domínio `app.sivierotech.com.br` adicionado em Clerk (Production) → Configure → Domains →
+  "Add custom domain".
+- Registros DNS cadastrados na Zona DNS avançada do próprio Registro.br (`Configurar zona DNS`,
+  modo avançado — não usar o assistente simplificado "Configurar endereçamento", que é só pra
+  redirecionamento de site/e-mail do domínio raiz). Os 4 registros (públicos, sem nada sensível):
+
+  | Tipo | Nome (relativo a `sivierotech.com.br`) | Dados |
+  |---|---|---|
+  | CNAME | `clerk.app` | `frontend-api.clerk.services` |
+  | CNAME | `clkmail.app` | `mail.plhuq6mvku43.clerk.services` |
+  | CNAME | `clk._domainkey.app` | `dkim1.plhuq6mvku43.clerk.services` |
+  | CNAME | `clk2._domainkey.app` | `dkim2.plhuq6mvku43.clerk.services` |
+
+  **Achado real sobre o editor do Registro.br**: o campo "Nome" da Zona DNS avançada
+  (`Powered by DNSSHIM`) já concatena `.sivierotech.com.br` automaticamente depois do que você
+  digita — inserir o nome completo ali duplicaria o sufixo. Diferente do texto de exemplo genérico
+  que a própria tela mostra ("`www.meudominio.com.br CNAME meublog.example.com`"), que sugere nome
+  completo — o exemplo é só ilustrativo do conceito, não do formato exato de preenchimento.
+- **Achado real sobre domínio recém-registrado no Registro.br**: um domínio `.com.br` registrado no
+  mesmo dia mostra um aviso de "domínio em transição" por algumas horas (visto: ~2h) antes de
+  liberar totalmente edição/propagação de zona — não é erro, é comportamento esperado do Registro.br
+  para domínios novos. Ainda assim, editar registros na própria Zona DNS (diferente de delegar para
+  DNS externo) funcionou antes desse período terminar.
+- Propagação levou cerca de 1h (registros salvos ~09:35, verificados às 11:42 do mesmo dia) — mais
+  rápido que a janela de transição inteira, mas mais que o TTL de 300s configurado no registro.
+- **Resultado no Clerk, confirmado via "Verify Records"**: `app.sivierotech.com.br` →
+  **Verified**; Frontend API → **Verified**; Email → **3/3 Verified**.
+- **Pendência dentro do próprio Clerk**: SSL Certificates (Frontend API) ainda em status
+  **"Issuing"** no momento em que esta sessão terminou — precisa terminar de virar "Issued" antes de
+  confiar que login real via `app.sivierotech.com.br` vai funcionar de ponta a ponta. Conferir isso
+  primeiro na próxima sessão, na mesma tela (Configure → Domains → `app.sivierotech.com.br`).
+
+**O que ainda falta, atualizado** (itens 1-3 e 5-9 da lista original continuam pendentes; o item 4
+está concluído):
+1. Confirmar SSL Certificates = "Issued" (ver acima).
+2. Copiar as chaves `pk_live_`/`sk_live_` de Instance → API keys (Production) — identificadas nesta
+   sessão como existentes e acessíveis, mas **ainda não copiadas** para nenhum serviço.
+3. Cadastrar o webhook de Production (`https://api.sivierotech.com.br/v1/webhooks/clerk`) — ainda
+   não feito.
+4. Domínio customizado na Vercel (`app.sivierotech.com.br`) e no Railway (`api.sivierotech.com.br`)
+   — ainda não feito; sem isso, mesmo com o Clerk pronto, as URLs finais do produto continuam sendo
+   `arenahub-xi.vercel.app`/`api-production-34e0.up.railway.app`.
+5. Variáveis de ambiente na Vercel e no Railway (Seção "Configurações manuais" acima) — ainda não
+   atualizadas.
+6. EAS (mobile) — ainda não atualizado.
+
 ---
 
 ## Troubleshooting
