@@ -2466,6 +2466,118 @@ está concluído):
    atualizadas.
 6. EAS (mobile) — ainda não atualizado.
 
+### Atualização — migração concluída e validada de ponta a ponta (2026-09-11)
+
+**Resultado: GO para o fluxo web principal** (cadastro/login/sessão/dashboard). Google OAuth em
+Production e a atualização do EAS/mobile continuam pendentes — ver ao final desta seção.
+
+Todos os itens 1-7 da lista da atualização anterior foram concluídos nesta sessão, guiados passo a
+passo pela interface (Clerk, Registro.br, Vercel, Railway) e validados ao vivo. Resumo do que foi
+feito, na ordem real:
+
+1. **SSL do Clerk** confirmado "Issued".
+2. **Chaves `pk_live_`/`sk_live_`** copiadas de Clerk → Instance → API keys para a Vercel
+   (`NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`) e para a Railway (`CLERK_SECRET_KEY`).
+3. **Webhook de Production** cadastrado (`https://api.sivierotech.com.br/v1/webhooks/clerk`, eventos
+   `user.created`/`user.updated`/`user.deleted`), Signing Secret copiado para
+   `CLERK_WEBHOOK_SIGNING_SECRET` na Railway.
+   - **Achado real, corrigido**: já existia um segundo endpoint de webhook em Production, sobrando de
+     uma sessão muito anterior (Fase 19, quando o projeto ainda tentava rodar em Production antes de
+     reverter pra Development) — apontando pro domínio antigo
+     (`https://api-production-34e0.up.railway.app/v1/webhooks/clerk`) e nunca removido. Com os dois
+     endpoints ativos, todo evento chegava duplicado quase simultaneamente nos dois, causando uma
+     corrida (ver achado abaixo). **Removido** o endpoint antigo — só o do domínio novo ficou.
+4. **Domínio customizado na Vercel** (`app.sivierotech.com.br`): adicionado em Settings → Domains do
+   projeto `arenahub`, ambiente "Production" (não "Redirect"); 1 registro CNAME
+   (`app` → `<hash>.vercel-dns-017.com`, valor específico gerado por projeto, nunca reaproveitável de
+   outro) cadastrado no Registro.br; SSL emitido automaticamente após propagação.
+5. **Domínio customizado na Railway** (`api.sivierotech.com.br`): adicionado em Settings → Networking
+   do serviço `api`, exige selecionar a porta alvo (a mesma já usada pelo domínio antigo). A Railway
+   pede **dois** registros (diferente da Vercel, que só pediu um): um CNAME (`api` → `<hash>.up.railway.app`)
+   e um TXT de verificação de propriedade (`_railway-verify.api` → `railway-verify=<token>`) — os dois
+   precisam ser cadastrados, senão o domínio nunca sai do estado "pendente".
+6. **Variáveis de ambiente, atualizadas nas duas plataformas**:
+   - Vercel: `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`, `NEXT_PUBLIC_API_URL`,
+     `NEXT_PUBLIC_SITE_URL` (as duas últimas: valores literais, sem segredo).
+   - Railway: `CLERK_SECRET_KEY`, `CLERK_WEBHOOK_SIGNING_SECRET`, `WEB_APP_URL` (com os dois domínios,
+     separados por vírgula, mantendo o antigo ativo durante a transição).
+   - **Achado real sobre tipos de variável na Vercel**: o painel oferece "Secret" (nunca mais legível
+     depois de salvo) e "Config" (legível). `NEXT_PUBLIC_*` nunca deveria ser "Secret" — é
+     literalmente embutido no bundle público do navegador, então marcar como "Secret" só atrapalha
+     manutenção futura (ninguém consegue conferir o valor depois), sem ganho nenhum de segurança.
+     Reservar "Secret" só pra `CLERK_SECRET_KEY`.
+7. **Ordem de corte coordenada, pra não derrubar a produção atual**: a Vercel só aplica
+   `NEXT_PUBLIC_*` num build novo (salvar no painel não afeta o site já publicado); a Railway aplica a
+   variável imediatamente, reiniciando o backend sozinha ao salvar. Sequência usada: (a) salvar os
+   valores novos na Vercel primeiro — zero risco, nada entra em produção ainda; (b) salvar as
+   variáveis da Railway — a partir daqui o backend já exige sessão de Production; (c) disparar o
+   redeploy manual da Vercel imediatamente em seguida, sem demora. Existiu uma janela curta (poucos
+   minutos) de login potencialmente quebrado no site então-corrente entre (b) e (c) — aceitável dado
+   que só havia dados de teste em produção; **numa migração com usuários reais, planejar essa janela
+   com mais cuidado** (ex.: fora de horário de uso).
+
+**Dois bugs reais encontrados e corrigidos ao testar de ponta a ponta** (nunca visíveis só por
+auditoria de código — só apareceram testando contra o ambiente real):
+
+1. **Login social (Google) exige credenciais próprias em Production** — em Development, o Clerk usa
+   credenciais OAuth compartilhadas dele mesmo; em Production, `Configure → SSO connections → Google`
+   mostra "Setup required" até você cadastrar um Client ID/Secret **seu**, criado no Google Cloud
+   Console, com o Redirect URI que o próprio Clerk mostra
+   (`https://clerk.app.sivierotech.com.br/v1/oauth_callback`). Sem isso, tentar "Continuar com Google"
+   resulta em `Erro 400: invalid_request — Missing required parameter: client_id` do lado do Google.
+   **Não é um bug do ArenaHub nem desta migração** — é a primeira vez que login real foi testado em
+   Production. **Pendência real, adiada deliberadamente** para uma sessão futura (requer configurar um
+   projeto no Google Cloud Console, fora do escopo desta sessão). Cadastro por e-mail/senha funciona
+   normalmente e foi o caminho usado pra validar o resto da migração.
+2. **Usuário de teste pré-existente colidia com o cadastro novo em Production** — o banco Postgres é
+   compartilhado entre os ambientes Clerk Development e Production (só o Clerk separa usuários; a
+   tabela `User` do ArenaHub é uma só). Um e-mail já usado em teste durante Development (linha criada
+   em 2026-08-27, ~Fase 19) tem um `clerkId` de Development; ao cadastrar o MESMO e-mail em Production,
+   o Clerk gera um `clerkId` novo e diferente, e o webhook `user.created` tenta criar uma segunda linha
+   com o mesmo e-mail — colidindo com a restrição única de `email` na tabela `User` (`409 Conflict`,
+   `"Conflito: recurso já existe ou viola uma restrição única."`). Sintoma no frontend: **"Algo deu
+   errado — Não foi possível carregar suas reservas"**, e no backend, o 404 já documentado
+   ("Usuário autenticado ainda não sincronizado"). **Corrigido sem perda de dados**: em vez de criar um
+   usuário novo (o que deixaria as arenas/quadras de teste já existentes órfãs, presas ao `clerkId`
+   antigo), foi rodado um `UPDATE` direto no Postgres (via Railway → serviço Postgres → aba
+   "Database" → "Query", que permite consultas SQL diretas pelo navegador — não precisa de acesso à
+   rede privada da Railway pra isso) trocando o `clerkId` da linha existente pro novo, preservando
+   ownership de arena e todo o resto:
+   ```sql
+   UPDATE "User" SET "clerkId" = '<novo clerkId>' WHERE "clerkId" = '<clerkId antigo de Development>';
+   ```
+   **Isso é uma pegadinha real pra qualquer e-mail que já tenha sido usado em Development** — vale a
+   pena verificar antes de cadastrar um novo usuário em Production com um e-mail que já foi usado pra
+   testar no passado.
+
+**Testes reais realizados, todos com resultado OK**:
+- [x] Home pública (`app.sivierotech.com.br`) — abre sem erro.
+- [x] Cadastro por e-mail/senha — completo, sem erro.
+- [x] Login — funciona.
+- [x] Logout — funciona.
+- [x] Sessão persiste após logout/login novamente.
+- [x] Chamada autenticada ao backend (`GET /v1/users/me/bookings`) — `200`, sem mais o 404 de
+      "não sincronizado".
+- [x] OWNER — dashboard (`/dashboard/:arenaId`) carrega, arenas/quadras de teste preservadas e
+      administráveis.
+- [ ] Login via Google — **não funciona ainda** (ver bug 1 acima, pendência real).
+- [ ] ADMIN — não testado explicitamente nesta sessão (não há indício de que seria diferente do
+      OWNER, já que a mudança foi só de ambiente/chaves, nunca de RBAC, mas fica como pendência real
+      até ser testado de fato).
+
+**Pendências reais, atualizadas**:
+1. Configurar credenciais próprias do Google OAuth em Clerk Production (Google Cloud Console) — ver
+   bug 1 acima. Sem isso, login social não funciona; e-mail/senha continua sendo o caminho funcional.
+2. `apps/mobile/eas.json` (`preview`/`production`) — ainda aponta pro domínio antigo da Railway; só
+   trocar depois de confirmar que o domínio novo está estável (já está, então pode ser feito a
+   qualquer momento agora).
+3. Secret do EAS (`EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY`) — ainda não atualizado pra `pk_live_`; mobile
+   continua efetivamente em Development até isso ser feito.
+4. Testar papel ADMIN explicitamente (ver acima).
+5. Considerar, numa sessão futura, remover os domínios antigos (`arenahub-xi.vercel.app`,
+   `api-production-34e0.up.railway.app`) de `WEB_APP_URL`/CORS depois de um período de validação sem
+   incidentes — mantidos deliberadamente por enquanto, conforme o plano original desta fase.
+
 ---
 
 ## Troubleshooting
