@@ -27,6 +27,7 @@ import {
   ProviderPaymentStatus,
   ProviderRefundStatus,
 } from '../src/modules/payments/providers/payment-provider';
+import { safeBookingIso } from './utils/booking-dates';
 
 // Fase 16: WhatsApp é só mais um canal de entrada pro domínio já existente
 // (ver docs/ARCHITECTURE.md) — esta suíte prova a integração PONTA A PONTA
@@ -1057,13 +1058,9 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
         });
     }
 
-    function futureIso(hoursFromNow: number): string {
-      return new Date(Date.now() + hoursFromNow * 3_600_000).toISOString();
-    }
-
     it('reserva confirmada via REST (arena ONLINE) dispara UMA notificação, com quadra/data/preço — retry da mesma Idempotency-Key não duplica', async () => {
       const key = randomUUID();
-      const startsAt = futureIso(48);
+      const startsAt = safeBookingIso(1);
 
       const first = await createBookingRest(
         arenaCId,
@@ -1086,7 +1083,7 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
     });
 
     it('reserva confirmada via REST em arena IN_PERSON também notifica (a confirmação não depende de pagamento)', async () => {
-      const startsAt = futureIso(49);
+      const startsAt = safeBookingIso(2);
       await createBookingRest(
         arenaAId,
         courtAId,
@@ -1101,7 +1098,7 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
     });
 
     it('cancelamento via REST dispara UMA notificação de cancelamento — retry (idempotente) não duplica', async () => {
-      const startsAt = futureIso(50);
+      const startsAt = safeBookingIso(3);
       const created = await createBookingRest(
         arenaAId,
         courtAId,
@@ -1123,7 +1120,7 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
     });
 
     it('pagamento aprovado via webhook dispara UMA notificação — webhook duplicado (mesmo evento) não duplica', async () => {
-      const startsAt = futureIso(51);
+      const startsAt = safeBookingIso(4);
       const created = await createBookingRest(
         arenaCId,
         courtCId,
@@ -1155,7 +1152,7 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
     });
 
     it('concorrência real: duas entregas SIMULTÂNEAS do webhook de pagamento aprovado nunca geram duas notificações', async () => {
-      const startsAt = futureIso(52);
+      const startsAt = safeBookingIso(5);
       const created = await createBookingRest(
         arenaCId,
         courtCId,
@@ -1192,7 +1189,7 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
     });
 
     it('reembolso confirmado via cancelamento REST dispara notificação de cancelamento E de reembolso, separadamente', async () => {
-      const startsAt = futureIso(53);
+      const startsAt = safeBookingIso(6);
       const created = await createBookingRest(
         arenaCId,
         courtCId,
@@ -1222,7 +1219,7 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
     });
 
     it('reembolso ainda em processamento (REFUNDING, sem confirmação síncrona) NUNCA envia mensagem de reembolso confirmado', async () => {
-      const startsAt = futureIso(54);
+      const startsAt = safeBookingIso(7);
       const created = await createBookingRest(
         arenaCId,
         courtCId,
@@ -1252,7 +1249,7 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
     });
 
     it('IN_PERSON nunca recebe notificação de pagamento aprovado (nenhum Payment chega a existir)', async () => {
-      const startsAt = futureIso(55);
+      const startsAt = safeBookingIso(8);
       const created = await createBookingRest(
         arenaAId,
         courtAId,
@@ -1272,7 +1269,7 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
     });
 
     it('isolamento cross-user: a reserva de um cliente nunca notifica o telefone de outro cliente da mesma arena', async () => {
-      const startsAt = futureIso(56);
+      const startsAt = safeBookingIso(9);
       await createBookingRest(
         arenaCId,
         courtCId,
@@ -1286,7 +1283,7 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
     });
 
     it('remetente é sempre o whatsappPhoneNumberId da arena da própria reserva — nunca o de outra arena', async () => {
-      const startsAt = futureIso(57);
+      const startsAt = safeBookingIso(10);
       await createBookingRest(
         arenaCId,
         courtCId,
@@ -1303,7 +1300,7 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
 
     it('falha na entrega (Meta indisponível) nunca desfaz o evento de negócio — a reserva continua criada normalmente', async () => {
       fakeWhatsappProvider.nextSendError = new Error('Meta indisponível');
-      const startsAt = futureIso(58);
+      const startsAt = safeBookingIso(11);
 
       const response = await createBookingRest(
         arenaAId,
@@ -1320,7 +1317,7 @@ describe('WhatsApp — assistente de reservas controlado (e2e)', () => {
     });
 
     it('falha na entrega nunca desfaz um cancelamento já confirmado', async () => {
-      const startsAt = futureIso(59);
+      const startsAt = safeBookingIso(12);
       const created = await createBookingRest(
         arenaAId,
         courtAId,

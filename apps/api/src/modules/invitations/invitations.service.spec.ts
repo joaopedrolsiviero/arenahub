@@ -143,6 +143,34 @@ describe('InvitationsService', () => {
         ),
       ).rejects.toBeInstanceOf(ConflictException);
     });
+
+    // Fase de fechamento de convites (2026-09) — achado real: com um
+    // provedor de e-mail real (Resend), sendInvitation pode lançar de
+    // verdade (rede, domínio não verificado). Antes desta fase, nada
+    // capturava esse erro: ele propagava pra fora de createInvitation
+    // DEPOIS da Invitation já persistida, devolvendo um erro pro OWNER
+    // para uma operação que na verdade já tinha sucedido.
+    it('nunca falha quando o envio de e-mail lança erro — o convite já foi criado, e-mail é best-effort', async () => {
+      prisma.arenaInvitation.create.mockResolvedValue({
+        id: 'inv-1',
+        email: 'novo@example.com',
+        role: ArenaRole.ADMIN,
+        createdAt: new Date(),
+        expiresAt: new Date(Date.now() + 1000),
+        acceptedAt: null,
+        revokedAt: null,
+      });
+      emailService.sendInvitation.mockRejectedValue(new Error('Resend indisponível'));
+
+      const result = await service.createInvitation(
+        'arena-1',
+        { email: 'novo@example.com', role: 'ADMIN' },
+        'clerk-owner',
+      );
+
+      expect(result.id).toBe('inv-1');
+      expect(prisma.arenaInvitation.create).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('revokeInvitation', () => {
@@ -217,6 +245,31 @@ describe('InvitationsService', () => {
         include: { invitedBy: { select: { id: true, name: true, email: true } } },
       });
       expect(emailService.sendInvitation).toHaveBeenCalled();
+    });
+
+    it('nunca falha quando o envio de e-mail lança erro — o token já foi renovado, e-mail é best-effort', async () => {
+      prisma.arenaInvitation.findUnique.mockResolvedValue({
+        id: 'inv-1',
+        arenaId: 'arena-1',
+        acceptedAt: null,
+        revokedAt: null,
+      });
+      prisma.arenaInvitation.update.mockResolvedValue({
+        id: 'inv-1',
+        email: 'convidado@example.com',
+        role: ArenaRole.ADMIN,
+        createdAt: new Date(),
+        expiresAt: new Date(Date.now() + 1000),
+        acceptedAt: null,
+        revokedAt: null,
+        invitedBy: { id: 'owner-1', name: 'Dona', email: 'dona@example.com' },
+      });
+      emailService.sendInvitation.mockRejectedValue(new Error('Resend indisponível'));
+
+      const result = await service.resendInvitation('arena-1', 'inv-1');
+
+      expect(result.id).toBe('inv-1');
+      expect(prisma.arenaInvitation.update).toHaveBeenCalledTimes(1);
     });
 
     it('rejeita reenviar convite já aceito', async () => {

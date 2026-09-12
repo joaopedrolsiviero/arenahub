@@ -5,6 +5,7 @@ import { App } from 'supertest/types';
 import { ArenaRole, PrismaClient, Sport, Weekday } from '@prisma/client';
 import { AppModule } from '../src/app.module';
 import { ClerkService } from '../src/modules/auth/clerk.service';
+import { safeBookingIso } from './utils/booking-dates';
 
 // Fase 8 (Hardening): varredura de segurança que não se encaixa
 // naturalmente em nenhum spec de domínio existente — mass assignment,
@@ -171,12 +172,12 @@ describe('Hardening — mass assignment, IDOR e idempotência (e2e)', () => {
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'mass-assign-booking-1')
         .send({
-          startsAt: '2026-09-10T13:00:00.000Z',
+          startsAt: safeBookingIso(7, { hour: 13 }),
           userId: 'user-forjado',
           type: 'BLOCK',
           status: 'CANCELLED',
           total: 0,
-          endsAt: '2026-09-10T23:00:00.000Z',
+          endsAt: safeBookingIso(7, { hour: 23 }),
           bufferMinutesSnapshot: 999,
         })
         .expect(400);
@@ -188,8 +189,8 @@ describe('Hardening — mass assignment, IDOR e idempotência (e2e)', () => {
         .set(...authHeader('token-owner-a'))
         .set('Idempotency-Key', 'mass-assign-block-1')
         .send({
-          startsAt: '2026-09-10T13:00:00.000Z',
-          endsAt: '2026-09-10T14:00:00.000Z',
+          startsAt: safeBookingIso(7, { hour: 13 }),
+          endsAt: safeBookingIso(7, { hour: 14 }),
           userId: 'user-forjado',
           type: 'CUSTOMER',
           total: 500,
@@ -258,7 +259,7 @@ describe('Hardening — mass assignment, IDOR e idempotência (e2e)', () => {
         .post(`/v1/arenas/${arenaAId}/courts/${courtBId}/bookings`)
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', 'idor-cross-court-1')
-        .send({ startsAt: '2026-09-10T13:00:00.000Z' })
+        .send({ startsAt: safeBookingIso(7, { hour: 13 }) })
         .expect(404);
     });
   });
@@ -304,14 +305,14 @@ describe('Hardening — mass assignment, IDOR e idempotência (e2e)', () => {
         .post(`/v1/arenas/${arenaAId}/courts/${courtAId}/bookings`)
         .set(...authHeader('token-owner-a'))
         .set('Idempotency-Key', key)
-        .send({ startsAt: '2026-09-11T10:00:00.000Z' })
+        .send({ startsAt: safeBookingIso(8, { hour: 10 }) })
         .expect(201);
 
       const responseCustomer = await request(app.getHttpServer())
         .post(`/v1/arenas/${arenaAId}/courts/${courtAId}/bookings`)
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', key)
-        .send({ startsAt: '2026-09-11T14:00:00.000Z' })
+        .send({ startsAt: safeBookingIso(8, { hour: 14 }) })
         .expect(201);
 
       const bodyA = responseA.body as BookingBody;
@@ -325,14 +326,17 @@ describe('Hardening — mass assignment, IDOR e idempotência (e2e)', () => {
         .post(`/v1/arenas/${arenaAId}/courts/${courtAId}/bookings`)
         .set(...authHeader('token-owner-a'))
         .set('Idempotency-Key', key)
-        .send({ startsAt: '2026-09-11T18:00:00.000Z' })
+        .send({ startsAt: safeBookingIso(8, { hour: 18 }) })
         .expect(201);
 
       const blockResponse = await request(app.getHttpServer())
         .post(`/v1/arenas/${arenaAId}/courts/${courtAId}/bookings/blocks`)
         .set(...authHeader('token-owner-a'))
         .set('Idempotency-Key', key)
-        .send({ startsAt: '2026-09-12T18:00:00.000Z', endsAt: '2026-09-12T19:00:00.000Z' })
+        .send({
+          startsAt: safeBookingIso(9, { hour: 18 }),
+          endsAt: safeBookingIso(9, { hour: 19 }),
+        })
         .expect(201);
 
       const bookingBody = bookingResponse.body as BookingBody;
@@ -350,7 +354,7 @@ describe('Hardening — mass assignment, IDOR e idempotência (e2e)', () => {
         .post(`/v1/arenas/${arenaAId}/courts/${courtAId}/bookings`)
         .set(...authHeader('token-owner-a'))
         .set('Idempotency-Key', 'occupy-for-retry-test')
-        .send({ startsAt: '2026-09-13T09:00:00.000Z' })
+        .send({ startsAt: safeBookingIso(10, { hour: 9 }) })
         .expect(201);
 
       // Primeira tentativa com a chave: conflita de verdade (409), não é sobre idempotência.
@@ -358,7 +362,7 @@ describe('Hardening — mass assignment, IDOR e idempotência (e2e)', () => {
         .post(`/v1/arenas/${arenaAId}/courts/${courtAId}/bookings`)
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', key)
-        .send({ startsAt: '2026-09-13T09:00:00.000Z' })
+        .send({ startsAt: safeBookingIso(10, { hour: 9 }) })
         .expect(409);
 
       // Retry com a MESMA chave, mas horário diferente (o cliente real faria
@@ -369,7 +373,7 @@ describe('Hardening — mass assignment, IDOR e idempotência (e2e)', () => {
         .post(`/v1/arenas/${arenaAId}/courts/${courtAId}/bookings`)
         .set(...authHeader('token-customer'))
         .set('Idempotency-Key', key)
-        .send({ startsAt: '2026-09-13T11:00:00.000Z' })
+        .send({ startsAt: safeBookingIso(10, { hour: 11 }) })
         .expect(201);
     });
   });

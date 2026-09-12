@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { ArenaRole, Prisma } from '@prisma/client';
@@ -85,6 +86,8 @@ function expiresAtFromNow(): Date {
 
 @Injectable()
 export class InvitationsService {
+  private readonly logger = new Logger(InvitationsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly usersService: UsersService,
@@ -336,14 +339,32 @@ export class InvitationsService {
 
     const webAppUrl = process.env.WEB_APP_URL ?? 'http://localhost:3000';
     // Item 71: e-mail é efeito posterior best-effort — nunca faz o convite
-    // falhar se o "provedor" (ou a falta de um) tiver problema.
-    await this.emailService.sendInvitation({
-      to: invitation.email,
-      arenaName,
-      invitedByName,
-      acceptUrl: `${webAppUrl.split(',')[0]}/convites/${token}`,
-      expiresAt: invitation.expiresAt,
-    });
+    // falhar se o "provedor" (ou a falta de um) tiver problema. Até a Fase
+    // de estabilização (2026-09) esse comentário não era garantido pelo
+    // código: com `ConsoleInvitationEmailService` (nunca lança) isso nunca
+    // se manifestava, mas um provedor real (Resend) pode lançar de verdade
+    // (rede, domínio não verificado, rate limit) — sem o try/catch, esse
+    // erro propagava pra `createInvitation`/`resendInvitation` DEPOIS da
+    // Invitation já ter sido persistida/atualizada, devolvendo um erro ao
+    // OWNER para uma operação que na verdade já tinha sucedido (o convite
+    // existe, só o e-mail não chegou) — o OWNER usa "reenviar" pra tentar
+    // de novo, nenhum convite fica "preso" ou duplicado.
+    try {
+      await this.emailService.sendInvitation({
+        to: invitation.email,
+        arenaName,
+        invitedByName,
+        acceptUrl: `${webAppUrl.split(',')[0]}/convites/${token}`,
+        expiresAt: invitation.expiresAt,
+      });
+    } catch (error) {
+      // Nunca loga a URL/token (item 8) — só o suficiente para investigar.
+      this.logger.error(
+        `Falha ao enviar e-mail do convite ${invitation.id} (arena ${arenaName}): ${
+          error instanceof Error ? error.message : 'erro desconhecido'
+        }`,
+      );
+    }
   }
 
   private toSummary(
