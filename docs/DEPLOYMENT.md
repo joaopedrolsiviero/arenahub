@@ -558,6 +558,8 @@ Conforme o item 12 do prompt — Vercel usa o mecanismo nativo dela pra Next.js
 | `PAYMENT_API_KEY` | Não* (ver abaixo) | Secret — access token da conta Mercado Pago (mercadopago.com.br/developers). Novo na Fase 17 |
 | `PAYMENT_WEBHOOK_SECRET` | Não* (ver abaixo) | Secret — usado para verificar `X-Signature` de `POST /v1/webhooks/payments/mercadopago`. Novo na Fase 17 |
 | `PAYMENT_TIMEOUT_MS` | Não (default `15000`) | Timeout (ms) de cada chamada ao Mercado Pago |
+| `RESEND_API_KEY` | Não* (ver abaixo) | Secret — chave da API do Resend (resend.com/api-keys). Novo na fase de fechamento de convites |
+| `RESEND_TIMEOUT_MS` | Não (default `15000`) | Timeout (ms) de cada chamada ao Resend |
 
 As três primeiras são validadas no boot (`assertRequiredEnv()` em
 `apps/api/src/main.ts`, Fase 9): se qualquer uma faltar, o processo termina
@@ -581,29 +583,51 @@ WhatsApp" abaixo. Das duas de pagamento, `PAYMENT_API_KEY` ausente faz
 tratado do provider — nenhum Payment fica "meio criado" (ver "Pagamentos"
 abaixo); `PAYMENT_WEBHOOK_SECRET` ausente faz TODO
 `POST /v1/webhooks/payments/mercadopago` ser rejeitado com 403, mesmo fail
-closed do WhatsApp).
+closed do WhatsApp; `RESEND_API_KEY` ausente faz `ResendInvitationEmailService`
+degradar pro mesmo comportamento do antigo `ConsoleInvitationEmailService`
+— nunca impede a criação do convite, só o e-mail não sai de verdade).
 
-### Convites por e-mail (Fase 11) — sem provedor real configurado
+### Convites por e-mail (Fase 11; Resend configurado na fase de fechamento de convites) — IMPLEMENTADO e TESTADO em produção
 
 `WEB_APP_URL` (já existente desde a Fase 9, **reaproveitada, não é uma
-variável nova**) agora também compõe o link de aceite do convite
+variável nova**) compõe o link de aceite do convite
 (`${WEB_APP_URL}/convites/:token`) — se ela estiver errada em produção, o
 link enviado por e-mail aponta pro lugar errado, do mesmo jeito que hoje
-afeta CORS (Seção 9).
+afeta CORS (Seção 9). A URL usada é sempre a PRIMEIRA da lista separada por
+vírgula — em produção, `WEB_APP_URL` deve listar o domínio oficial
+(`https://app.sivierotech.com.br`) primeiro.
 
-O envio em si passa por uma abstração (`InvitationEmailService`) com um
-único adapter implementado, `ConsoleInvitationEmailService` — ele só loga o
-link via `Logger` do Nest, e **somente fora de produção**
+O envio passa por uma abstração (`InvitationEmailService`, inalterada desde
+a Fase 11) — o adapter real registrado em `InvitationsModule` agora é
+`ResendInvitationEmailService` (`fetch` nativo contra `api.resend.com/emails`,
+sem SDK — mesma filosofia de dependência mínima do resto do backend).
+Remetente: `ArenaHub <convites@sivierotech.com.br>` — domínio
+`sivierotech.com.br` verificado no Resend (registros DKIM/SPF/DMARC
+cadastrados na Zona DNS avançada do Registro.br). Sem `RESEND_API_KEY`
+configurada, degrada pro MESMO comportamento do antigo
+`ConsoleInvitationEmailService` (ainda existe, usado internamente como
+fallback): loga o link via `Logger` só fora de produção
 (`NODE_ENV !== 'production'`); em produção, loga um aviso genérico (nome da
-arena, nunca o link/token) e retorna sem lançar, porque a criação do convite
-nunca deve falhar por causa da notificação. **Nenhum provedor de e-mail real
-(SendGrid/Postmark/Resend/SES) foi integrado nesta fase** — em produção,
-hoje, o OWNER precisaria copiar o link manualmente dos logs do servidor
-(inviável na prática). Antes de usar convites em produção de verdade:
-implemente um novo adapter de `InvitationEmailService` para o provedor
-escolhido e troque o `provide: InvitationEmailService, useClass:
-ConsoleInvitationEmailService` em `InvitationsModule` — nenhuma outra parte
-do sistema precisa mudar, é só trocar a implementação da mesma interface.
+arena, nunca o link/token) — a criação do convite nunca falha por causa da
+notificação (best-effort, ver abaixo).
+
+**Bug real corrigido nesta fase**: `InvitationsService.sendInvitationEmail`
+chamava `emailService.sendInvitation(...)` sem `try/catch`. Com o adapter
+antigo (nunca lançava) isso nunca se manifestava; com um provedor real que
+pode genuinamente falhar (rede, domínio não verificado, rate limit), o erro
+propagava DEPOIS da `Invitation` já persistida/atualizada, devolvendo um
+erro HTTP pro OWNER para uma operação que na verdade já tinha sucedido.
+Corrigido capturando e logando (nunca o token/URL) — a mensagem de erro em
+log inclui só `invitation.id` e o nome da arena.
+
+**Validado ao vivo em produção** (2026-09): OWNER criou/reenviou um convite
+real → e-mail chegou de verdade na caixa de entrada → destinatário
+autenticou via Clerk Production (conta nova, cadastro por e-mail/senha) →
+aceitou → `ArenaMember` criado com `role = ADMIN`, confirmado na UI
+("Administrador", nunca "Proprietário") e no log real
+(`POST /v1/invitations/.../accept` → `204`). Confirmado também que o ADMIN
+resultante não vê/acessa a opção de transferência de ownership (bloqueada
+tanto na UI quanto no backend, `@RequireArenaRole(OWNER)`).
 
 **Expiração** (`INVITATION_EXPIRES_DAYS`, default 7 dias) é avaliada em
 tempo de leitura (não há job/cron marcando convites como expirados) — um
@@ -851,12 +875,42 @@ de integração real além dos já existentes), lint/typecheck/build limpos nos 
 
 **Ainda pendente (dependência externa, não do ArenaHub)**: criar o app WhatsApp Business real no
 Meta for Developers, gerar token de acesso permanente, configurar o webhook real no painel apontando
-pra `https://api-production-34e0.up.railway.app/v1/webhooks/whatsapp`, configurar
-`WHATSAPP_ACCESS_TOKEN`/`WHATSAPP_APP_SECRET`/`WHATSAPP_VERIFY_TOKEN` no Railway, e validar uma
-conversa real (mensagem → resposta) com um número de teste da Meta. Nenhum desses passos foi
-simulado como concluído — ver relatório da Fase 34 (entregue no chat) para o procedimento exato.
-Sem commit/push/deploy nesta passada (instrução explícita) — as 4 mudanças de arquivo (só specs)
-ficam locais até autorização.
+pra `https://api.sivierotech.com.br/v1/webhooks/whatsapp` (domínio oficial — atualizado depois da
+migração de domínio; o endpoint já está no ar e responde `403` corretamente a um handshake sem
+token válido, confirmado ao vivo), configurar
+`WHATSAPP_ACCESS_TOKEN`/`WHATSAPP_APP_SECRET`/`WHATSAPP_VERIFY_TOKEN` no Railway (nenhuma das três
+existe hoje no ambiente — confirmado listando só os NOMES das variáveis, nunca os valores), e
+validar uma conversa real com um número de teste da Meta. **Em andamento** (fase de fechamento do
+WhatsApp em produção, 2026-09): app `ArenaHub` já criado no Meta for Developers, caso de uso
+"Conectar-se com clientes pelo WhatsApp" adicionado, portfólio empresarial "Siviero Tech" criado
+(verificação formal do portfólio adiada de propósito — só necessária pra volume/escala, não pro
+teste inicial) — sessão pausada antes de obter o Phone Number ID/token de teste e configurar o
+webhook. Nenhum desses passos foi simulado como concluído.
+
+#### Fase W1 — Pagamento PIX via WhatsApp para arenas ONLINE — IMPLEMENTADO e TESTADO
+
+Fecha um gap real encontrado na auditoria completa do canal (produto + código): o fluxo
+conversacional confirmava a reserva mas nunca criava `Payment` mesmo em arenas `ONLINE`, e o
+cancelamento pelo WhatsApp pulava `refundIfPaid` (diferente do REST, que sempre chama os dois
+juntos desde a Fase 17/27). Reaproveita 100% `PaymentsService`/`PaymentProvider`/Mercado Pago —
+nenhuma segunda implementação. A mesma Idempotency-Key da reserva (`pendingActionId`) também
+protege a criação do Payment (escopos de unicidade diferentes, sem colisão). Nenhum
+`WhatsAppConversationState` novo — `pendingBookingId` (campo já existente) passa a também rastrear
+"qual foi a última reserva com pagamento" para que "status" resolva sem perguntar de novo. Nova
+intenção `PAYMENT_STATUS` (nunca carrega `bookingId`/`paymentId` do LLM). Ver
+`docs/ARCHITECTURE.md`, "Fase W1", para o detalhe arquitetural completo. 20 cenários de teste
+novos (unit + e2e).
+
+#### Fase W2 — Notificações Proativas via WhatsApp — IMPLEMENTADO e TESTADO
+
+`WhatsAppNotificationsService` cobre os 4 eventos de domínio (reserva confirmada, pagamento
+aprovado, cancelamento, reembolso confirmado) reaproveitando o MESMO `WhatsAppProvider`/
+`MetaWhatsAppProviderService` das respostas conversacionais e os MESMOS pontos de disparo já
+usados por `PushNotificationsService` (M7) — nenhum sistema de eventos novo. Idempotência via
+sinais já calculados pelo chamador (`result.replayed`, `cancelledNow`, `applyResult.transitioned`,
+confirmação síncrona de `refundIfPaid`) — nenhum mecanismo de dedup novo. Falha de entrega à Meta
+nunca desfaz o evento de negócio já commitado. Ver `docs/ARCHITECTURE.md`, "Fase W2", para o
+detalhe completo.
 
 ### Pagamentos (Fase 17) — gateway, webhook, idempotência e limitações
 
@@ -2469,7 +2523,9 @@ está concluído):
 ### Atualização — migração concluída e validada de ponta a ponta (2026-09-11)
 
 **Resultado: GO para o fluxo web principal** (cadastro/login/sessão/dashboard). Google OAuth em
-Production e a atualização do EAS/mobile continuam pendentes — ver ao final desta seção.
+Production e a atualização do EAS/mobile continuavam pendentes ao final desta sessão — **Google
+OAuth e ADMIN foram fechados numa sessão seguinte, ver "Atualização — Google OAuth + ADMIN
+fechados" logo abaixo**; EAS/mobile continua pendente.
 
 Todos os itens 1-7 da lista da atualização anterior foram concluídos nesta sessão, guiados passo a
 passo pela interface (Clerk, Registro.br, Vercel, Railway) e validados ao vivo. Resumo do que foi
@@ -2560,23 +2616,49 @@ auditoria de código — só apareceram testando contra o ambiente real):
       "não sincronizado".
 - [x] OWNER — dashboard (`/dashboard/:arenaId`) carrega, arenas/quadras de teste preservadas e
       administráveis.
-- [ ] Login via Google — **não funciona ainda** (ver bug 1 acima, pendência real).
-- [ ] ADMIN — não testado explicitamente nesta sessão (não há indício de que seria diferente do
-      OWNER, já que a mudança foi só de ambiente/chaves, nunca de RBAC, mas fica como pendência real
-      até ser testado de fato).
+- [ ] Login via Google — **não funciona ainda nesta sessão** (ver bug 1 acima) — **fechado numa
+      sessão seguinte, ver "Atualização — Google OAuth + ADMIN fechados" abaixo**.
+- [ ] ADMIN — não testado explicitamente nesta sessão — **testado e fechado numa sessão seguinte,
+      ver abaixo**.
 
 **Pendências reais, atualizadas**:
-1. Configurar credenciais próprias do Google OAuth em Clerk Production (Google Cloud Console) — ver
-   bug 1 acima. Sem isso, login social não funciona; e-mail/senha continua sendo o caminho funcional.
-2. `apps/mobile/eas.json` (`preview`/`production`) — ainda aponta pro domínio antigo da Railway; só
+1. `apps/mobile/eas.json` (`preview`/`production`) — ainda aponta pro domínio antigo da Railway; só
    trocar depois de confirmar que o domínio novo está estável (já está, então pode ser feito a
    qualquer momento agora).
-3. Secret do EAS (`EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY`) — ainda não atualizado pra `pk_live_`; mobile
+2. Secret do EAS (`EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY`) — ainda não atualizado pra `pk_live_`; mobile
    continua efetivamente em Development até isso ser feito.
-4. Testar papel ADMIN explicitamente (ver acima).
-5. Considerar, numa sessão futura, remover os domínios antigos (`arenahub-xi.vercel.app`,
+3. Considerar, numa sessão futura, remover os domínios antigos (`arenahub-xi.vercel.app`,
    `api-production-34e0.up.railway.app`) de `WEB_APP_URL`/CORS depois de um período de validação sem
    incidentes — mantidos deliberadamente por enquanto, conforme o plano original desta fase.
+
+### Atualização — Google OAuth + ADMIN fechados (2026-09-11/12)
+
+**Resultado: GO.** Fecha as duas pendências reais deixadas pela sessão anterior (bug 1 e checklist
+acima).
+
+**Google OAuth**: credenciais próprias criadas no Google Cloud Console (projeto "My First
+Project", suficiente — não precisou de projeto dedicado), tipo **Web application**, com a
+**Authorized redirect URI** exata que o Clerk já mostrava
+(`https://clerk.app.sivierotech.com.br/v1/oauth_callback`, nunca inventada). Client ID/Secret
+colados em Clerk → Configure → SSO connections → Google → "Use custom credentials". Status mudou
+de "Setup required" para **"Used for sign-in"**. **Testado ao vivo, sem código alterado** (o
+componente `<SignIn />` do Clerk já suportava login social automaticamente — só precisava da
+credencial configurada no painel): botão "Continue with Google" apareceu, login completo sem erro,
+sessão + acesso ao dashboard + logout + novo login, tudo confirmado. Webhook do Clerk confirmado
+sincronizando um `clerkId` novo (evento `user.created`, `200` real) sem repetir a colisão de e-mail
+do bug 2 da sessão anterior.
+
+**ADMIN**: fluxo completo de convite testado ao vivo, mas em duas etapas — na primeira tentativa,
+bloqueado porque nenhum provedor de e-mail real existia em produção ainda (`ConsoleInvitationEmailService`,
+Fase 11 — ver "Convites por e-mail" acima); fechado de verdade só depois da fase de Resend (ver
+`docs/ARCHITECTURE.md`, "Fase — Fechamento de Convites"): OWNER criou/reenviou convite → e-mail
+real chegou → destinatário autenticou (conta nova) → aceitou → `ArenaMember.role = ADMIN`
+confirmado na UI e via log (`204` real). Confirmado também que o ADMIN resultante não vê nem
+consegue acessar a opção de transferência de ownership (bloqueada na UI e no backend,
+`@RequireArenaRole(OWNER)`).
+
+**Pendências reais que continuam**: EAS/mobile (itens 1-2 acima) e remoção dos domínios antigos
+(item 3 acima) — nada relacionado a Clerk/Google/ADMIN.
 
 ---
 

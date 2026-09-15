@@ -1,4 +1,4 @@
-# ArenaHub — Documento de Arquitetura Inicial (v0.19)
+# ArenaHub — Documento de Arquitetura Inicial (v0.20)
 
 > Status: **arquitetura geral aprovada**, em implementação incremental por fases (Fase 1 — Setup,
 > Fase 2 — Autenticação, Fase 3 — Arenas/Quadras, Fase 4 — Disponibilidade e Booking, Fase 5 —
@@ -8,15 +8,56 @@
 > Fase 12 — Assistente de IA Operacional, Fase 13 — Customer Booking Lifecycle, Fase 14 —
 > Customer & Arena Client Management, Fase 15 — Operational Reports & Analytics, Fase 16 —
 > WhatsApp + Assistente de Reservas Controlado, Fase 17 — Pagamentos e Ciclo de Vida Financeiro,
-> Fase 18 — Production Readiness, Observabilidade e Hardening Final e Fase 27 — Cancelamento de
-> Reservas e Reembolso Automático já concluídas; deploy real, PIX de produção validado com dinheiro
-> real e webhook de produção configurados nas Fases 19/23/25/26 (não documentadas em detalhe neste
-> arquivo — ver `docs/DEPLOYMENT.md` e o histórico de commits para o desenho real dessas fases; as
-> decisões desta revisão pressupõem esse estado real de produção).
-> Esta revisão (v0.19) registra as decisões tomadas durante a Fase 27 — cancelamento de reservas com
-> reembolso automático e integral via Mercado Pago para reservas já pagas, incluindo dois novos
-> estados de `Payment` (`REFUNDING`/`REFUNDED`). Este documento é a fonte de verdade da arquitetura
-> até que decisões aqui descritas sejam revisadas.
+> Fase 18 — Production Readiness, Observabilidade e Hardening Final, Fase 27 — Cancelamento de
+> Reservas e Reembolso Automático, Fase W1 — Pagamento PIX via WhatsApp, Fase W2 — Notificações
+> Proativas via WhatsApp e a fase de Fechamento de Convites (Resend + estabilização e2e) já
+> concluídas; deploy real, PIX de produção validado com dinheiro real e webhook de produção
+> configurados nas Fases 19/23/25/26 (não documentadas em detalhe neste arquivo — ver
+> `docs/DEPLOYMENT.md` e o histórico de commits para o desenho real dessas fases; as decisões desta
+> revisão pressupõem esse estado real de produção).
+> Esta revisão (v0.20) registra as decisões tomadas nas Fases W1/W2 (pagamento PIX e notificações
+> proativas via WhatsApp) e na fase de fechamento de convites (troca do adapter de e-mail por um
+> provedor real — Resend — e estabilização da suíte e2e contra fixtures de data obsoletas). Este
+> documento é a fonte de verdade da arquitetura até que decisões aqui descritas sejam revisadas.
+
+---
+
+## Decisões revisadas na v0.20
+
+Resumo das mudanças desta revisão (Fases W1/W2 — pagamento PIX e notificações proativas via
+WhatsApp — e a fase de fechamento de convites via Resend). Detalhe completo nas seções "Fase W1",
+"Fase W2" e "Fase — Fechamento de Convites (Resend)" do Roadmap abaixo.
+
+1. **WhatsApp passa a criar Payment para arenas `ONLINE`** — gap identificado em auditoria: o
+   fluxo de confirmação de reserva pelo WhatsApp nunca chamava `PaymentsService`, mesmo quando
+   `Arena.paymentMode === 'ONLINE'`, e o cancelamento pelo WhatsApp chamava `BookingsService.cancel`
+   diretamente, nunca `refundIfPaid` (o REST sempre chama os dois juntos desde a Fase 17/27). Ambos
+   corrigidos reaproveitando 100% da infraestrutura já existente — nenhuma segunda implementação de
+   pagamento/reembolso.
+2. **Nenhum novo `WhatsAppConversationState`** — em vez de uma migração de schema para representar
+   "pagamento pendente", `pendingBookingId` (campo já existente, usado até então só pelo fluxo de
+   cancelamento) passa a também guardar "qual foi a última reserva com pagamento desta conversa"
+   depois que ela volta a `IDLE` — permite que uma mensagem de acompanhamento ("status") resolva sem
+   perguntar de novo, sem estado novo.
+3. **Notificações proativas via WhatsApp (`WhatsAppNotificationsService`, Fase W2)** — reaproveita
+   literalmente `WhatsAppProvider`/`MetaWhatsAppProviderService` (o mesmo adapter das respostas
+   conversacionais) e os MESMOS pontos de disparo já usados por `PushNotificationsService` (M7) —
+   nenhum sistema de eventos novo. Idempotência vem inteiramente de sinais que o próprio chamador já
+   calculava (`result.replayed`, `cancelledNow`, `applyResult.transitioned`, confirmação síncrona de
+   `refundIfPaid`) — nenhum mecanismo de dedup novo.
+4. **`ConsoleInvitationEmailService` (Fase 11) substituído por um adapter real (`Resend`)** — mesma
+   filosofia de dependências mínimas do resto do backend (`fetch` nativo, sem SDK), mesmo padrão de
+   degradação graciosa sem credencial configurada (`AiProvider`/`PaymentProvider`/`WhatsAppProvider`).
+   Corrigido de quebra um bug real: `InvitationsService.sendInvitationEmail` chamava o provider sem
+   `try/catch` — com o `ConsoleInvitationEmailService` (nunca lançava) isso nunca se manifestava, mas
+   um provedor real pode lançar de verdade (rede, domínio não verificado), e o erro propagava DEPOIS
+   da `Invitation` já persistida, devolvendo erro pro OWNER numa operação que já tinha sucedido.
+5. **Suíte e2e passa a ser determinística independente da data real** — `hardening.e2e-spec.ts` e
+   `whatsapp.e2e-spec.ts` tinham fixtures de data calendário fixa (ex: `'2026-09-11T10:00:00.000Z'`)
+   que envelheciam e passavam a ser rejeitadas por `assertNotPast`/checagem de horário de
+   funcionamento assim que o calendário real as ultrapassava. Substituídas por um helper
+   compartilhado (`test/utils/booking-dates.ts`, Luxon) que sempre calcula um instante seguro a
+   partir do "agora" real no momento em que o teste roda.
 
 ---
 
@@ -3093,6 +3134,96 @@ testar em cada uma — mas a definição geral vale para todas.
   pública), Fase 28 (`isReady`).
 - **Critério de conclusão:** ver relatório da fase para os números reais de teste e as
   validações em produção.
+
+---
+
+### Fase W1 — Pagamento PIX via WhatsApp para Arenas ONLINE ✅ concluída
+- **Objetivo:** fechar um gap real encontrado na auditoria completa do canal de WhatsApp (produto +
+  código): o fluxo conversacional (Fase 16) confirmava a reserva mas nunca criava `Payment`, mesmo
+  para arenas com `paymentMode === 'ONLINE'` — o cliente ficava com uma reserva "confirmada" sem
+  nunca ter pago, sem que o sistema alertasse ninguém. E o cancelamento pelo WhatsApp chamava
+  `BookingsService.cancel` diretamente, pulando `refundIfPaid` — diferente do REST
+  (`BookingsController.cancel`), que sempre chama os dois juntos desde a Fase 17/27.
+- **Regra**: fluxo ONLINE = WhatsApp → seleção de horário → confirmação explícita → criação da
+  reserva → criação do pagamento PIX → envio do código PIX → consulta/atualização de status. Fluxo
+  IN_PERSON permanece inalterado (só reserva, nenhum `Payment` é criado).
+- **Reaproveitamento total**: `PaymentsService.createPayment(userId, bookingId, idempotencyKey)` já
+  fazia toda a validação/idempotência/lock necessária — nenhuma segunda implementação. A MESMA
+  Idempotency-Key da reserva (`conversation.pendingActionId`, já gerada uma vez ao entrar em
+  `CONFIRMING_BOOKING`) também protege a criação do Payment — seguro porque `Payment` tem escopo de
+  unicidade `(bookingId, idempotencyKey)`, completamente separado de
+  `IdempotencyKey.(userId, endpoint, key)`, então reaproveitar a mesma string não colide.
+- **Nenhum `WhatsAppConversationState` novo**: em vez de uma migração de schema, o campo já existente
+  `pendingBookingId` passa a também guardar "qual foi a última reserva com pagamento desta conversa"
+  depois que ela volta a `IDLE` — assim uma mensagem de acompanhamento ("status") resolve sozinha
+  qual reserva consultar, sem precisar perguntar de novo e sem estado novo no banco.
+- **Nova intenção `PAYMENT_STATUS`** — nunca carrega `bookingId`/`paymentId`: o backend sempre
+  resolve o pagamento a partir de `conversation.pendingBookingId`, nunca de um campo devolvido pelo
+  LLM (mesmo princípio "never trust the model" do resto do classificador). Status mapeado
+  reaproveitando o `PaymentStatus` já existente — nenhum mapeamento novo.
+- **Falha na criação do pagamento nunca desfaz a reserva** — `PaymentsService.createPayment` já
+  marca o `Payment` como `FAILED` (em vez de lançar) para `PaymentProviderError`; a reserva
+  permanece `CONFIRMED`, e o cliente recebe uma mensagem clara de que precisa tentar de novo (via
+  "status"), nunca uma cobrança duplicada automática.
+- **Cancelamento agora chama `refundIfPaid` incondicionalmente** após `BookingsService.cancel`,
+  dentro de um try/catch que nunca propaga — exatamente o padrão já usado pelo REST.
+- **Dependências:** Fase 16 (WhatsApp), Fase 17 (Payments), Fase 27 (`refundIfPaid`).
+- **Testes:** 20 cenários novos (unit + e2e) cobrindo criação de Payment, idempotência (dupla
+  confirmação, evento de webhook duplicado), imunidade a manipulação de preço/paymentId pelo
+  cliente/LLM, falha de provider, e reembolso no cancelamento.
+
+### Fase W2 — Notificações Proativas via WhatsApp ✅ concluída
+- **Objetivo:** o cliente que reserva/paga/cancela pelo site ou app não recebia nenhum aviso
+  proativo no WhatsApp (só a notificação push do M7) — mesmo já tendo vínculo de telefone.
+- **`WhatsAppNotificationsService`** cobre os 4 eventos de domínio já existentes: reserva
+  confirmada, pagamento aprovado, cancelamento, reembolso confirmado — reaproveitando literalmente
+  `WhatsAppProvider`/`MetaWhatsAppProviderService` (o MESMO adapter usado pelas respostas
+  conversacionais da Fase 16) e os MESMOS pontos de disparo já usados por `PushNotificationsService`
+  (M7) em `BookingsController`/`PaymentsWebhookService` — nenhum sistema de eventos paralelo.
+- **Idempotência sem mecanismo novo**: reaproveita sinais que o próprio chamador já calculava —
+  `result.replayed` (criação de reserva idempotente), `cancelledNow` (cancelamento),
+  `applyResult.transitioned` (CAS do webhook de pagamento), e a confirmação SÍNCRONA de
+  `refundIfPaid` (nunca dispara para `REFUNDING`, só para `REFUNDED` confirmado na mesma chamada).
+- **Falha de entrega (Meta indisponível) nunca desfaz o evento de negócio** — a reserva/pagamento/
+  cancelamento/reembolso já foi commitado antes da tentativa de notificação; falha de envio só é
+  logada.
+- **Dependências:** Fase 16 (WhatsApp/`WhatsAppProvider`), M7 (mesmos pontos de disparo de
+  `PushNotificationsService`), Fase W1 (Payment via WhatsApp).
+
+### Fase — Fechamento de Convites: Resend + Estabilização E2E ✅ concluída
+- **Objetivo:** fechar duas pendências reais encontradas em auditoria de produção — convites de
+  equipe nunca eram entregues de verdade (Fase 11 só tinha `ConsoleInvitationEmailService`, que
+  nunca chama um provedor real) e a suíte e2e do backend tinha caído para 194/376 por fixtures de
+  data calendário fixa que envelheceram.
+- **`ResendInvitationEmailService`** — novo adapter real de `InvitationEmailService` via Resend
+  (`api.resend.com/emails`, `fetch` nativo, sem SDK — mesma filosofia de dependência mínima de
+  `OpenAiAiProviderService`/`MetaWhatsAppProviderService`/`MercadoPagoPaymentProviderService`),
+  remetente `ArenaHub <convites@sivierotech.com.br>` (domínio `sivierotech.com.br` verificado no
+  Resend via DNS no Registro.br). Sem `RESEND_API_KEY` configurada, degrada pro MESMO comportamento
+  do antigo `ConsoleInvitationEmailService` (loga o link só fora de produção) — dev/teste local
+  nunca precisa da credencial real.
+- **Bug real corrigido**: `InvitationsService.sendInvitationEmail` chamava
+  `emailService.sendInvitation(...)` sem `try/catch`. Com o adapter antigo (nunca lançava) isso
+  nunca se manifestava; com um provedor real que pode genuinamente falhar (rede, domínio não
+  verificado, rate limit), o erro propagava DEPOIS da `Invitation` já persistida/atualizada,
+  devolvendo um erro HTTP pro OWNER para uma operação que na verdade já tinha sucedido. Corrigido
+  capturando e logando (nunca o token/URL), restaurando o comportamento "best-effort" que o próprio
+  comentário do código já prometia.
+- **Validado ao vivo em produção**: OWNER criou/reenviou um convite real → e-mail chegou de
+  verdade → destinatário autenticou via Clerk Production (conta nova) → aceitou → `ArenaMember`
+  criado com `role = ADMIN`, confirmado na UI e nos logs (`POST /v1/invitations/.../accept` → `204`
+  real).
+- **Estabilização e2e**: `hardening.e2e-spec.ts` e `whatsapp.e2e-spec.ts` tinham datas literais
+  (`'2026-09-11T10:00:00.000Z'`, `futureIso(58)`/`futureIso(59)` caindo fora do expediente
+  conforme o horário real de execução) que rejeitavam com `assertNotPast`/checagem de horário de
+  funcionamento assim que o calendário real avançava. Substituídas por um helper compartilhado
+  (`apps/api/test/utils/booking-dates.ts`, Luxon — já usado pelo resto do projeto, nenhuma
+  biblioteca nova) que sempre calcula um instante seguro no futuro a partir do "agora" real no
+  momento em que o teste roda, nunca uma data calendário fixa.
+- **Dependências:** Fase 11 (convites/`InvitationEmailService`), migração Clerk Production +
+  domínio `sivierotech.com.br`.
+- **Testes:** backend unit 502/502 (6 novos: adapter Resend + resiliência a falha de e-mail), e2e
+  376/376 (0 falhas relacionadas a data, eram 182/376 antes desta fase).
 
 ---
 
