@@ -1,0 +1,67 @@
+name: Database Backup
+
+# Backup diário do Postgres de produção (pg_dump --format=custom) para
+# Cloudflare R2 (compatível com S3). Retenção é controlada por uma
+# Lifecycle Rule configurada direto no bucket R2 (30 dias) — deliberadamente
+# nenhuma lógica de exclusão aqui, pra nunca correr o risco de um bug neste
+# workflow apagar backups em massa.
+#
+# BACKUP_DATABASE_URL deve apontar para um usuário Postgres dedicado,
+# somente leitura (role pg_read_all_data, nunca a credencial de
+# leitura/escrita do próprio backend) — ver docs/DEPLOYMENT.md, Seção 13.
+
+on:
+  schedule:
+    # 03:00 UTC ~= 00:00 America/Sao_Paulo (Brasil não observa horário de
+    # verão desde 2019, então esse offset é fixo).
+    - cron: "0 3 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  R2_BUCKET: arenahub-db-backups
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Instalar cliente PostgreSQL (pg_dump)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Gerar dump do banco (formato custom, comprimido)
+        env:
+          DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+        run: |
+          TIMESTAMP=$(date -u +%Y-%m-%dT%H-%M-%SZ)
+          BACKUP_FILE="arenahub-${TIMESTAMP}.dump"
+          echo "BACKUP_FILE=${BACKUP_FILE}" >> "$GITHUB_ENV"
+          # --no-owner/--no-privileges: dump portável, sem depender de o
+          # role original existir no ambiente onde for restaurado (ex:
+          # Postgres local de teste).
+          pg_dump "$DATABASE_URL" \
+            --format=custom \
+            --no-owner \
+            --no-privileges \
+            --file="$BACKUP_FILE"
+
+      - name: Enviar backup para o Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 cp "$BACKUP_FILE" "s3://${R2_BUCKET}/$BACKUP_FILE" \
+            --endpoint-url "${{ secrets.R2_ENDPOINT }}"
+
+      - name: Confirmar que o arquivo chegou no bucket
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 ls "s3://${R2_BUCKET}/$BACKUP_FILE" \
+            --endpoint-url "${{ secrets.R2_ENDPOINT }}"

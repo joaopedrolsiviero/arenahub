@@ -1359,21 +1359,82 @@ um primeiro deploy real de produção, não como algo que foi montado.
 
 ## 13. Backup e restore
 
-**NÃO configurado** — depende do provedor de Postgres gerenciado escolhido
-(Railway oferece backups automáticos diários no plano pago do addon de
-Postgres; point-in-time recovery depende do plano). Como nenhum banco
-gerenciado real foi provisionado nesta fase, não há nada pra configurar
-ainda, e seria falso afirmar que existe uma rotina de backup funcionando.
+**Status real, confirmado ao vivo no dashboard da Railway (auditoria de
+2026-09-17)**: o texto anterior desta seção dizia "nenhum banco gerenciado
+real foi provisionado nesta fase" — isso está desatualizado. Existe sim um
+Postgres real de produção rodando (volume `postgres-volume`, projeto
+`bubbly-simplicity`, serviço `Postgres`), e a aba **Backups** desse serviço
+mostra explicitamente: **"No Backups — This service's volume does not have
+any backups."**, com o aviso **"Backups and point-in-time recovery (PITR)
+are only available for customers on the Pro plan."** — a conta está no
+plano Hobby, que não inclui esse recurso nativo. Confirmado também que o
+CLI da Railway não expõe nenhum comando de backup (`railway volume --help`
+não lista nada de backup/snapshot) — só o dashboard responde isso.
 
-Procedimento documentado para quando houver banco gerenciado:
-1. Confirmar no dashboard do provedor que o backup automático diário está
-   ativo.
-2. Antes de qualquer migration em produção, tirar um snapshot manual
-   adicional, se a plataforma permitir (Seção 6 já cobre a estratégia seura
-   de migration em si).
-3. Restore: usar o mecanismo de restore point-in-time ou snapshot do
-   provedor — nunca reconstruir o banco rodando as migrations do zero como
-   "restore" (isso perde todos os dados).
+**Decisão tomada**: em vez de assinar o plano Pro (que resolveria isso mas
+manteria o backup dentro do mesmo provedor/conta do banco principal), foi
+escolhida a opção de um `pg_dump` agendado, independente da Railway,
+guardado em storage externo (Cloudflare R2) — mais barato no estágio atual
+do projeto e elimina o risco de depender só do mesmo provedor pra banco e
+backup ao mesmo tempo. Comparação completa das opções (nativo Railway Pro
+vs. `pg_dump`+R2 vs. híbrido) discutida e decidida em sessão de auditoria,
+não repetida aqui em detalhe.
+
+### Progresso desta fase (em andamento, retomar daqui)
+
+**Já feito**:
+- Bucket criado no Cloudflare R2: `arenahub-db-backups` (privado, "Public
+  Access: Disabled" confirmado), free tier (10 GB, bem acima do uso atual
+  do banco, ~200 MB).
+- Account API Token da Cloudflare criado, com permissão **Object Read &
+  Write** restrita **só a esse bucket** (nunca "Apply to all buckets") —
+  segue o princípio do menor privilégio também no lado do storage.
+- Workflow do GitHub Actions criado: [`​.github/workflows/backup-db.yml`](../.github/workflows/backup-db.yml)
+  — `pg_dump --format=custom --no-owner --no-privileges`, agendado
+  diariamente (03:00 UTC ≈ meia-noite BRT) + `workflow_dispatch` pra
+  disparo manual, envia via AWS CLI (compatível com S3) pro bucket R2. Sem
+  nenhuma lógica de exclusão/retenção no próprio workflow (deliberado — ver
+  abaixo).
+- Auditoria técnica de permissões do `pg_dump` contra o schema real deste
+  projeto (sem tocar produção, via grep nas migrations + checagem no
+  Postgres local de desenvolvimento): confirmado que não há Row-Level
+  Security, não há dados binários (`bytea`/large objects — fotos de quadra
+  são URL, não bytes no banco), e a única extensão usada é `btree_gist`
+  (métodos de leitura de catálogo, sem privilégio especial necessário).
+  Concluído que o role pré-definido `pg_read_all_data` (nativo desde
+  Postgres 14, confirmado presente tanto no Postgres 16 local quanto no 18
+  de produção) é a forma correta e à prova de migrations futuras de dar
+  privilégio de leitura — melhor que `GRANT SELECT` tabela por tabela, que
+  não cobre tabelas criadas depois sem manutenção manual.
+
+**Pendente — retomar exatamente daqui**:
+1. **Criar o usuário Postgres dedicado `arenahub_backup`**, somente
+   leitura, direto pelo **Console** do serviço Postgres no dashboard da
+   Railway (não pelo CLI — registrar uma chave SSH pra abrir túnel local
+   foi deliberadamente evitado, decisão tomada em sessão). SQL exato:
+   ```sql
+   CREATE ROLE arenahub_backup WITH LOGIN PASSWORD '<gerada localmente, nunca exposta ao Claude>'
+     NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+
+   GRANT CONNECT ON DATABASE <nome do banco, confirmar com SELECT current_database()> TO arenahub_backup;
+   GRANT pg_read_all_data TO arenahub_backup;
+   ```
+2. Montar `BACKUP_DATABASE_URL` com esse usuário novo (nunca reaproveitar a
+   `DATABASE_URL` do backend).
+3. Cadastrar 4 GitHub Secrets no repositório: `BACKUP_DATABASE_URL`,
+   `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ENDPOINT`.
+4. Configurar Lifecycle Rule de 30 dias no bucket R2 (Settings do bucket —
+   apagar objetos automaticamente depois desse prazo; deliberadamente fora
+   do workflow, pra nunca correr risco de um bug de código apagar backups
+   em massa).
+5. Disparar o workflow manualmente (`workflow_dispatch`) pra validar o
+   primeiro backup real.
+6. Teste de restauração completo, **nunca em produção** — ambiente local/
+   separado, confirmar que as tabelas e dados essenciais voltam íntegros.
+7. Só depois de tudo validado: atualizar esta seção com o resultado real
+   (frequência confirmada, retenção confirmada, RPO/RTO reais, e a frase
+   "já validamos uma restauração fora da produção" só quando for
+   literalmente verdade).
 
 ---
 
