@@ -27,10 +27,16 @@ jobs:
   backup:
     runs-on: ubuntu-latest
     steps:
-      - name: Instalar cliente PostgreSQL (pg_dump)
+      - name: Instalar cliente PostgreSQL 18 (pg_dump)
+        # O pacote padrão do Ubuntu do runner instala pg_dump 16, mas o
+        # Postgres de produção é a versão 18 — pg_dump recusa dumpar um
+        # servidor mais novo que ele mesmo. Usa o script oficial do PGDG
+        # (postgresql-common) pra instalar o cliente na versão certa.
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-client
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-client-18
 
       - name: Gerar dump do banco (formato custom, comprimido)
         env:
