@@ -1407,34 +1407,89 @@ não repetida aqui em detalhe.
   privilégio de leitura — melhor que `GRANT SELECT` tabela por tabela, que
   não cobre tabelas criadas depois sem manutenção manual.
 
-**Pendente — retomar exatamente daqui**:
-1. **Criar o usuário Postgres dedicado `arenahub_backup`**, somente
-   leitura, direto pelo **Console** do serviço Postgres no dashboard da
-   Railway (não pelo CLI — registrar uma chave SSH pra abrir túnel local
-   foi deliberadamente evitado, decisão tomada em sessão). SQL exato:
-   ```sql
-   CREATE ROLE arenahub_backup WITH LOGIN PASSWORD '<gerada localmente, nunca exposta ao Claude>'
-     NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+### Concluído e validado (2026-09-18)
 
-   GRANT CONNECT ON DATABASE <nome do banco, confirmar com SELECT current_database()> TO arenahub_backup;
-   GRANT pg_read_all_data TO arenahub_backup;
-   ```
-2. Montar `BACKUP_DATABASE_URL` com esse usuário novo (nunca reaproveitar a
-   `DATABASE_URL` do backend).
-3. Cadastrar 4 GitHub Secrets no repositório: `BACKUP_DATABASE_URL`,
-   `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ENDPOINT`.
-4. Configurar Lifecycle Rule de 30 dias no bucket R2 (Settings do bucket —
-   apagar objetos automaticamente depois desse prazo; deliberadamente fora
-   do workflow, pra nunca correr risco de um bug de código apagar backups
-   em massa).
-5. Disparar o workflow manualmente (`workflow_dispatch`) pra validar o
-   primeiro backup real.
-6. Teste de restauração completo, **nunca em produção** — ambiente local/
-   separado, confirmar que as tabelas e dados essenciais voltam íntegros.
-7. Só depois de tudo validado: atualizar esta seção com o resultado real
-   (frequência confirmada, retenção confirmada, RPO/RTO reais, e a frase
-   "já validamos uma restauração fora da produção" só quando for
-   literalmente verdade).
+Todos os itens do checklist anterior foram executados e **validados com
+evidência real**, não presumidos:
+
+1. **Usuário Postgres dedicado `arenahub_backup`** criado direto pelo
+   Console do serviço Postgres na Railway (nunca por túnel SSH local —
+   decisão deliberada de não registrar chave SSH na conta Railway).
+   Confirmado: `LOGIN`, `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`,
+   `NOREPLICATION`, `CONNECT` só no banco `railway`, membro de
+   `pg_read_all_data` (leitura de tudo, presente e futuro, sem nenhum
+   privilégio de escrita). Senha gerada com `openssl rand -hex 24` (só
+   hexadecimal — evita qualquer problema de caractere especial precisando
+   de URL-encoding na connection string).
+2. **Acesso público ao Postgres** habilitado (Settings → Networking → "Add
+   Public Access" no serviço Postgres da Railway) — necessário porque o
+   GitHub Actions roda fora da rede privada da Railway; endpoint gerado:
+   `interchange.proxy.rlwy.net:14428` → `:5432` interno. SSL confirmado
+   ativo (TLSv1.3). Tradeoff documentado: expõe a porta do banco à
+   internet, mitigado por ser um usuário só-leitura com senha forte.
+3. **4 GitHub Secrets** cadastrados (`BACKUP_DATABASE_URL`,
+   `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ENDPOINT`).
+4. **Lifecycle Rule de 30 dias** configurada no bucket R2 (Settings →
+   Object Lifecycle Rules → "Delete uploaded objects after 30 days") —
+   retenção fica inteiramente fora do workflow, por design.
+5. **Dois bugs reais corrigidos no workflow, achados só ao rodar de
+   verdade** (nunca visíveis por inspeção de código):
+   - `pg_dump` do pacote padrão do runner `ubuntu-latest` é a versão 16;
+     o Postgres de produção é a versão 18. `pg_dump` recusa dumpar um
+     servidor mais novo que ele mesmo. Corrigido instalando o cliente
+     certo via repositório oficial do PGDG.
+   - Mesmo depois de instalar `postgresql-client-18`, `/usr/bin/pg_dump`
+     continuava resolvendo pra versão 16 (pré-instalada no runner).
+     Corrigido chamando o binário pelo caminho completo
+     (`/usr/lib/postgresql/18/bin/pg_dump`), sem depender de `PATH`.
+6. **Primeiro backup real disparado manualmente**
+   (`workflow_dispatch`) — sucesso, 35s de execução total. Arquivo real
+   confirmado no bucket: `arenahub-2026-09-18T13-21-51Z.dump`, 67,79 KB
+   (banco de produção real, ~200MB de dados, comprime bem porque a maior
+   parte é índice/metadado, não texto livre).
+7. **Teste de restauração real, fora de produção**: arquivo baixado do
+   R2, restaurado com `pg_restore --no-owner --no-privileges` num
+   container Postgres 18 novo e descartável (nunca no banco de
+   desenvolvimento nem em produção). Resultado, com evidência:
+   - Todas as tabelas, constraints, índices e foreign keys recriados sem
+     erro, incluindo a EXCLUDE constraint anti-double-booking
+     (`Booking_no_overlap_excl`) e a extensão `btree_gist` que ela
+     depende.
+   - Contagem de linhas confirmada: `Arena` 2, `ArenaMember` 3,
+     `ArenaInvitation` 2, `Court` 2, `Booking` 21, `Payment` 23, `User` 3
+     — batendo com os dados reais de produção no momento do backup.
+   - Container de teste removido depois (descartável, não deixou rastro).
+
+**As 10 perguntas do início desta fase, respondidas com evidência real**:
+
+| Pergunta | Resposta |
+|---|---|
+| 1. Onde o banco está hospedado? | Railway, projeto `bubbly-simplicity`, serviço `Postgres`, volume `postgres-volume` |
+| 2. Qual mecanismo de backup? | `pg_dump --format=custom` via GitHub Actions, upload pra Cloudflare R2 (não é o backup nativo da Railway — esse exige plano Pro, indisponível no plano atual) |
+| 3. Frequência? | Diária, 03:00 UTC (`.github/workflows/backup-db.yml`) |
+| 4. Retenção? | 30 dias, via Lifecycle Rule do bucket R2 |
+| 5. Onde ficam armazenados? | Cloudflare R2, bucket `arenahub-db-backups`, privado |
+| 6. Sobrevivem a um problema grave na Railway? | Sim — storage num provedor totalmente diferente (Cloudflare), decisão deliberada pra não depender só de um provedor |
+| 7. É possível restaurar? | Sim, confirmado |
+| 8. Já testamos uma restauração real? | **Sim** — 2026-09-18, ambiente isolado, dados íntegros confirmados |
+| 9. Como saber se um backup futuro falhou? | O GitHub Actions marca a execução como falha (visível na aba Actions) e notifica por e-mail por padrão; não há alerta mais robusto (Slack, etc.) configurado ainda — ver pendência abaixo |
+| 10. Procedimento documentado de restauração? | Esta seção — resumo: baixar o `.dump` mais recente do bucket R2, `pg_restore --no-owner --no-privileges --dbname=<destino>`, nunca direto sobre produção sem antes validar num ambiente separado |
+
+**Pendências reais, não bloqueantes pra considerar essa fase concluída**:
+- RPO efetivo é de até 24h (intervalo entre backups diários) — aceitável
+  no estágio atual (poucos dados, baixo volume de transações), mas vale
+  revisar se o volume de reservas/pagamentos crescer.
+  RTO não foi formalmente medido em escala real de produção — o teste
+  validou o mecanismo com o volume de dados atual (~200KB comprimido);
+  esperado que cresça de forma aproximadamente linear com o tamanho do
+  banco.
+- Nenhum alerta ativo além do e-mail padrão do GitHub Actions em caso de
+  falha — considerar integrar com algo mais visível (Slack, etc.) quando
+  fizer sentido.
+- O acesso público ao Postgres (item 2 acima) fica permanentemente
+  habilitado — reavaliar se vale restringir por IP allowlist (GitHub
+  Actions usa IPs dinâmicos, então não é trivial) ou outra mitigação, se o
+  perfil de risco do projeto mudar.
 
 ---
 
