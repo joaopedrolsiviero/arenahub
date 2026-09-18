@@ -482,13 +482,106 @@ describe('PaymentsService', () => {
       expect(result).toEqual({ transitioned: false, status: 'PAID' });
     });
 
-    it('EXPIRED é terminal: um PAID que chega depois nunca reverte pra PAID', async () => {
+    it('EXPIRED + FAILED do provider continua ignorado (terminal) — só PAID reabre um EXPIRED', async () => {
       tx.payment.findUnique.mockResolvedValue(paymentRow({ status: 'EXPIRED' }));
 
-      const result = await service.applyProviderStatus('payment-1', 'PAID', {});
+      const result = await service.applyProviderStatus('payment-1', 'FAILED', {});
 
       expect(tx.payment.updateMany).not.toHaveBeenCalled();
       expect(result).toEqual({ transitioned: false, status: 'EXPIRED' });
+    });
+
+    it('EXPIRED + CANCELLED do provider continua ignorado (terminal) — só PAID reabre um EXPIRED', async () => {
+      tx.payment.findUnique.mockResolvedValue(paymentRow({ status: 'EXPIRED' }));
+
+      const result = await service.applyProviderStatus('payment-1', 'CANCELLED', {});
+
+      expect(tx.payment.updateMany).not.toHaveBeenCalled();
+      expect(result).toEqual({ transitioned: false, status: 'EXPIRED' });
+    });
+
+    // BLOCKER (correção desta fase) — o Mercado Pago não recebe
+    // `date_of_expiration` e pode aprovar um PIX depois do nosso prazo
+    // local de 30min; antes desta correção, um Payment já EXPIRED
+    // descartava silenciosamente esse PAID (dinheiro real recebido, nunca
+    // refletido no banco). Reconciliação: reabre EXCLUSIVAMENTE
+    // EXPIRED+PAID, reaproveitando as MESMAS checagens de Booking do
+    // caminho PENDING normal — nunca confirma uma reserva que não é mais
+    // válida.
+    describe('BLOCKER — aprovação tardia do provider sobre um Payment já EXPIRED localmente', () => {
+      it('reconcilia EXPIRED -> PAID quando a Booking continua CONFIRMED — nunca perde um pagamento aprovado', async () => {
+        tx.payment.findUnique.mockResolvedValue(paymentRow({ status: 'EXPIRED' }));
+        tx.booking.findUnique.mockResolvedValue({ id: 'booking-1', status: 'CONFIRMED' });
+
+        const result = await service.applyProviderStatus('payment-1', 'PAID', {
+          paidAt: new Date('2026-01-01'),
+        });
+
+        expect(tx.payment.updateMany).toHaveBeenCalledWith({
+          where: { id: 'payment-1', status: 'EXPIRED' },
+          data: { status: 'PAID', paidAt: new Date('2026-01-01'), failureReason: null },
+        });
+        expect(result).toEqual({
+          transitioned: true,
+          status: 'PAID',
+          booking: { id: 'booking-1', status: 'CONFIRMED' },
+        });
+      });
+
+      it('Booking já CANCELLED quando a aprovação tardia chega: reconcilia pra CANCELLED, nunca reabre a reserva', async () => {
+        tx.payment.findUnique.mockResolvedValue(paymentRow({ status: 'EXPIRED' }));
+        tx.booking.findUnique.mockResolvedValue({ id: 'booking-1', status: 'CANCELLED' });
+
+        const result = await service.applyProviderStatus('payment-1', 'PAID', {});
+
+        expect(tx.payment.updateMany).toHaveBeenCalledWith({
+          where: { id: 'payment-1', status: 'EXPIRED' },
+          data: {
+            status: 'CANCELLED',
+            paidAt: null,
+            failureReason: 'BOOKING_CANCELLED_BEFORE_PAYMENT',
+          },
+        });
+        // Nunca notifica/reconfirma — resultado final é CANCELLED, não PAID.
+        expect(result).toEqual({ transitioned: true, status: 'CANCELLED', booking: undefined });
+      });
+
+      it('Booking inexistente quando a aprovação tardia chega: reconcilia pra CANCELLED, nunca lança', async () => {
+        tx.payment.findUnique.mockResolvedValue(paymentRow({ status: 'EXPIRED' }));
+        tx.booking.findUnique.mockResolvedValue(null);
+
+        const result = await service.applyProviderStatus('payment-1', 'PAID', {});
+
+        expect(result.status).toBe('CANCELLED');
+        expect(result.transitioned).toBe(true);
+      });
+
+      it('corrida perdida na reconciliação (outra transação já resolveu o EXPIRED) nunca sinaliza transição', async () => {
+        tx.payment.findUnique.mockResolvedValue(paymentRow({ status: 'EXPIRED' }));
+        tx.booking.findUnique.mockResolvedValue({ id: 'booking-1', status: 'CONFIRMED' });
+        tx.payment.updateMany.mockResolvedValue({ count: 0 });
+
+        const result = await service.applyProviderStatus('payment-1', 'PAID', {});
+
+        expect(result).toEqual({ transitioned: false, status: 'PAID' });
+      });
+
+      it('violação do índice único (outra tentativa da mesma Booking já PAID) recupera marcando FAILED a partir de EXPIRED, nunca de PENDING', async () => {
+        tx.payment.findUnique.mockResolvedValue(paymentRow({ status: 'EXPIRED' }));
+        tx.booking.findUnique.mockResolvedValue({ id: 'booking-1', status: 'CONFIRMED' });
+        tx.payment.updateMany.mockRejectedValue(uniqueViolation());
+
+        const result = await service.applyProviderStatus('payment-1', 'PAID', {});
+
+        // A recuperação precisa casar o WHERE com o estado de origem REAL
+        // (EXPIRED aqui) — usar PENDING por engano faria 0 linhas baterem e
+        // devolveria `transitioned: true` sem nada ter sido escrito.
+        expect(prisma.payment.updateMany).toHaveBeenCalledWith({
+          where: { id: 'payment-1', status: 'EXPIRED' },
+          data: { status: 'FAILED', failureReason: 'DUPLICATE_PAYMENT_FOR_BOOKING' },
+        });
+        expect(result).toEqual({ transitioned: true, status: 'FAILED' });
+      });
     });
 
     it('PENDING (sem mudança real) é sempre um no-op, nunca escreve', async () => {

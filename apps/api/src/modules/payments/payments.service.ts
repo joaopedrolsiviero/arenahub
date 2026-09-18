@@ -297,20 +297,28 @@ export class PaymentsService {
 
   /**
    * Aplica o status AUTORITATIVO já buscado do provider (nunca o que veio
-   * no corpo do webhook) — CAS condicionado a `status: PENDING` (item 9 do
-   * prompt): PENDING é o ÚNICO estado não-terminal desta máquina de
-   * estados. Qualquer Payment que já não esteja PENDING ignora o evento
-   * silenciosamente (logado) — PAID nunca volta a FAILED, EXPIRED nunca
-   * vira PAID, não importa a ordem de chegada dos eventos.
+   * no corpo do webhook) — CAS condicionado ao estado de origem observado
+   * (item 9 do prompt). PENDING é o único estado que aceita QUALQUER
+   * desfecho (PAID/FAILED/CANCELLED). EXPIRED é quase terminal, com UMA
+   * exceção deliberada: um PAID que chega depois da expiração LOCAL ainda
+   * pode ser dinheiro genuinamente recebido (o Mercado Pago não garante,
+   * hoje, que respeita nosso prazo de 30min — não enviamos
+   * `date_of_expiration`, e mesmo enviando não há confirmação de que o
+   * gateway invalida o PIX no instante exato). Ignorar esse evento seria
+   * perder um pagamento aprovado silenciosamente — por isso EXPIRED+PAID
+   * reconcilia (EXPIRED -> PAID), passando pelas MESMAS checagens de
+   * Booking do caminho normal. Qualquer outro evento sobre um Payment já
+   * terminal (PAID, FAILED, CANCELLED, REFUNDING, REFUNDED, ou
+   * EXPIRED+FAILED/CANCELLED) continua ignorado como antes.
    *
    * M7, item 8 (idempotência de notificações): o retorno passou a incluir
-   * `transitioned` — true SÓ quando ESTE CAS é quem realmente moveu
-   * PENDING -> outro status agora (nunca quando o Payment já estava
-   * terminal, nunca quando outra transação venceu a corrida). Junto com
-   * `booking` (só presente quando o novo status é PAID), isso é o
-   * suficiente para `PaymentsWebhookService` disparar a notificação de
-   * pagamento confirmado sem nenhum mecanismo novo de deduplicação —
-   * reaproveita o MESMO CAS que já protegia a máquina de estados.
+   * `transitioned` — true SÓ quando ESTE CAS é quem realmente moveu o
+   * Payment pra outro status agora (nunca quando já estava terminal, nunca
+   * quando outra transação venceu a corrida). Junto com `booking` (só
+   * presente quando o novo status é PAID), isso é o suficiente para
+   * `PaymentsWebhookService` disparar a notificação de pagamento confirmado
+   * sem nenhum mecanismo novo de deduplicação — reaproveita o MESMO CAS que
+   * já protegia a máquina de estados.
    */
   async applyProviderStatus(
     paymentId: string,
@@ -322,6 +330,8 @@ export class PaymentsService {
     }
 
     let attemptedStatus: PaymentStatus | null = null;
+    let attemptedSourceStatus: PaymentStatus = PaymentStatus.PENDING;
+    let lateApproval = false;
     try {
       return await this.prisma.$transaction(async (tx) => {
         const payment = await tx.payment.findUnique({ where: { id: paymentId } });
@@ -329,12 +339,20 @@ export class PaymentsService {
           this.logger.warn(`Evento de pagamento para Payment ${paymentId} inexistente — ignorado.`);
           return { transitioned: false, status: null };
         }
-        if (payment.status !== PaymentStatus.PENDING) {
+
+        // Única reabertura de um estado terminal nesta máquina de estados:
+        // EXPIRED localmente + PAID autoritativo no provider (o blocker
+        // original — ver comentário do método). Qualquer outra combinação
+        // sobre um Payment não-PENDING continua ignorada abaixo.
+        lateApproval = payment.status === PaymentStatus.EXPIRED && providerStatus === 'PAID';
+
+        if (payment.status !== PaymentStatus.PENDING && !lateApproval) {
           this.logger.log(
             `Payment ${paymentId} já está em estado terminal (${payment.status}) — evento ${providerStatus} ignorado.`,
           );
           return { transitioned: false, status: payment.status };
         }
+        attemptedSourceStatus = payment.status;
 
         let nextStatus: PaymentStatus = providerStatus;
         let failureReason = meta.failureReason ?? null;
@@ -343,7 +361,9 @@ export class PaymentsService {
         // Item 12 do prompt: "se a Booking for cancelada antes do
         // pagamento, o pagamento não pode ser concluído" — checado DENTRO
         // da mesma transação que aplica a transição, nunca antes (evita
-        // corrida entre checar e escrever).
+        // corrida entre checar e escrever). Reaproveitado tal e qual pra
+        // reconciliação de aprovação tardia: uma Booking cancelada (ou
+        // removida) nunca é reconfirmada só porque o dinheiro chegou depois.
         if (providerStatus === 'PAID') {
           booking = await tx.booking.findUnique({ where: { id: payment.bookingId } });
           if (!booking || booking.status === 'CANCELLED') {
@@ -354,7 +374,7 @@ export class PaymentsService {
         attemptedStatus = nextStatus;
 
         const result = await tx.payment.updateMany({
-          where: { id: paymentId, status: PaymentStatus.PENDING },
+          where: { id: paymentId, status: attemptedSourceStatus },
           data: {
             status: nextStatus,
             paidAt: nextStatus === PaymentStatus.PAID ? (meta.paidAt ?? new Date()) : null,
@@ -363,12 +383,22 @@ export class PaymentsService {
         });
         if (result.count === 0) {
           // Outra transação venceu a corrida entre o findUnique acima e
-          // este updateMany (ex: dois webhooks concorrentes) — o resultado
-          // já é o que a vencedora gravou, nunca um erro.
+          // este updateMany (ex: dois webhooks concorrentes, ou uma leitura
+          // que expirou o Payment no meio do caminho) — o resultado já é o
+          // que a vencedora gravou, nunca um erro.
           this.logger.log(
             `Payment ${paymentId}: corrida perdida ao aplicar ${nextStatus}, ignorado.`,
           );
           return { transitioned: false, status: nextStatus };
+        }
+        if (lateApproval) {
+          // Log dedicado (nível warn — nunca só `.log`) pra dar visibilidade
+          // operacional a quantas vezes isto acontece de verdade em
+          // produção: é o sinal de que o prazo local de 30min está sendo
+          // ultrapassado por pagamentos reais no Mercado Pago.
+          this.logger.warn(
+            `Payment ${paymentId}: aprovação recebida do provider após expiração local — reconciliado (EXPIRED -> ${nextStatus}).`,
+          );
         }
         return {
           transitioned: true,
@@ -381,17 +411,19 @@ export class PaymentsService {
       // disparar em teoria se dois Payment DIFERENTES da mesma Booking
       // tentassem ficar PAID ao mesmo tempo (não deveria acontecer dado o
       // lock de criação em `createPayment`, mas é defesa em profundidade,
-      // nunca confiada como caminho principal). A recuperação roda FORA da
-      // transação que falhou — o Postgres aborta toda a transação corrente
-      // após uma violação de constraint; tentar mais uma escrita dentro
-      // dela só produziria "current transaction is aborted" (item 24:
-      // nenhum SAVEPOINT foi adicionado só pra este caso raro).
+      // nunca confiada como caminho principal — inclui agora também o caso
+      // de uma reconciliação tardia colidir com outra tentativa da mesma
+      // Booking já PAID). A recuperação roda FORA da transação que falhou —
+      // o Postgres aborta toda a transação corrente após uma violação de
+      // constraint; tentar mais uma escrita dentro dela só produziria
+      // "current transaction is aborted" (item 24: nenhum SAVEPOINT foi
+      // adicionado só pra este caso raro).
       if (this.isUniqueViolation(error) && attemptedStatus === PaymentStatus.PAID) {
         this.logger.error(
           `Payment ${paymentId}: outra tentativa da mesma Booking já está PAID — marcado FAILED.`,
         );
         await this.prisma.payment.updateMany({
-          where: { id: paymentId, status: PaymentStatus.PENDING },
+          where: { id: paymentId, status: attemptedSourceStatus },
           data: { status: PaymentStatus.FAILED, failureReason: 'DUPLICATE_PAYMENT_FOR_BOOKING' },
         });
         return { transitioned: true, status: PaymentStatus.FAILED };

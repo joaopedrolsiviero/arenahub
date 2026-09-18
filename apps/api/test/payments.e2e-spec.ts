@@ -658,6 +658,203 @@ describe('Pagamentos (e2e)', () => {
       const final = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
       expect(['PAID', 'FAILED']).toContain(final.status); // determinístico, nunca um estado inválido
     });
+
+    // Nested (não uma describe irmã) para reaproveitar `createPendingPaymentWithWebhookId`
+    // e `sendWebhook`, definidas acima só neste escopo.
+    describe('BLOCKER — aprovação tardia do Mercado Pago sobre um Payment já EXPIRED (Fase pós-M7)', () => {
+      // Helper: cria um Payment já EXPIRED — o MESMO estado final que o
+      // lazy-expiry de produção alcançaria numa leitura após o TTL real de
+      // 30min (`resolveExpiry`), só que sem esperar o prazo nem passar pelo
+      // endpoint de criação (`POST /payments` é limitado a 30 req/min —
+      // já bem exercitado pelos testes acima deste describe; o que ESTE bloco
+      // prova é a reconciliação do webhook sobre um Payment EXPIRED, não o
+      // fluxo de criação em si, que já tem cobertura própria).
+      let expiredProviderIdCounter = 0;
+      async function createExpiredPayment(hoursFromNow: number) {
+        const booking = await createConfirmedBooking(courtAId, customerAId, hoursFromNow);
+        expiredProviderIdCounter += 1;
+        const payment = await prisma.payment.create({
+          data: {
+            bookingId: booking.id,
+            userId: customerAId,
+            arenaId: arenaAId,
+            amount: 75,
+            currency: 'BRL',
+            status: 'EXPIRED',
+            provider: 'MERCADO_PAGO',
+            providerPaymentId: `mp-fake-expired-${expiredProviderIdCounter}`,
+            idempotencyKey: randomUUID(),
+            expiresAt: new Date(Date.now() - 1000),
+          },
+        });
+        return { booking, payment };
+      }
+
+      it('Payment EXPIRED + webhook aprovado (PAID real no provider): nunca perde o pagamento — reconcilia EXPIRED -> PAID', async () => {
+        const { payment, booking } = await createExpiredPayment(120);
+        fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PAID');
+
+        await sendWebhook(payment.providerPaymentId!).expect(200);
+
+        const final = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+        expect(final.status).toBe('PAID');
+        expect(final.paidAt).not.toBeNull();
+        const bookingRow = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+        expect(bookingRow.status).toBe('CONFIRMED');
+      });
+
+      it('genuinamente nunca pago: Payment expirado + provider ainda PENDING permanece EXPIRED, Booking nunca é tocada', async () => {
+        const { payment, booking } = await createExpiredPayment(121);
+        fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PENDING');
+
+        await sendWebhook(payment.providerPaymentId!).expect(200);
+
+        const final = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+        expect(final.status).toBe('EXPIRED');
+        const bookingRow = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+        expect(bookingRow.status).toBe('CONFIRMED');
+      });
+
+      it('webhook duplicado (mesmo evento) sobre uma reconciliação tardia só aplica uma vez', async () => {
+        const { payment } = await createExpiredPayment(122);
+        fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PAID');
+        const requestId = randomUUID();
+        const ts = String(Math.floor(Date.now() / 1000));
+        const signature = signWebhook(payment.providerPaymentId!, requestId, ts);
+        const notificationId = randomUUID();
+
+        const send = () =>
+          request(app.getHttpServer())
+            .post('/v1/webhooks/payments/mercadopago')
+            .set('x-signature', signature)
+            .set('x-request-id', requestId)
+            .send({ id: notificationId, type: 'payment', data: { id: payment.providerPaymentId } });
+
+        await send().expect(200);
+        await send().expect(200);
+
+        const final = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+        expect(final.status).toBe('PAID');
+      });
+
+      it('retry do webhook (notificação diferente, mesmo pagamento) após reconciliação já aplicada continua estável em PAID', async () => {
+        const { payment } = await createExpiredPayment(123);
+        fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PAID');
+
+        await sendWebhook(payment.providerPaymentId!).expect(200);
+        await sendWebhook(payment.providerPaymentId!).expect(200); // segunda notificação, id diferente
+
+        const final = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+        expect(final.status).toBe('PAID');
+      });
+
+      it('duas aprovações tardias concorrentes (Promise.all) sobre o MESMO Payment EXPIRED: resolvem no mesmo estado final PAID, sem erro', async () => {
+        const { payment } = await createExpiredPayment(124);
+        fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PAID');
+
+        const [r1, r2] = await Promise.all([
+          sendWebhook(payment.providerPaymentId!),
+          sendWebhook(payment.providerPaymentId!),
+        ]);
+
+        expect(r1.status).toBe(200);
+        expect(r2.status).toBe(200);
+        const final = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+        expect(final.status).toBe('PAID');
+      });
+
+      it('Booking cancelada DEPOIS da expiração local: a aprovação tardia nunca reabre a reserva, Payment reconcilia pra CANCELLED', async () => {
+        const { payment, booking } = await createExpiredPayment(125);
+
+        await request(app.getHttpServer())
+          .post(`/v1/arenas/${arenaAId}/courts/${courtAId}/bookings/${booking.id}/cancel`)
+          .set(...authHeader('token-customer-a'))
+          .expect(200);
+
+        fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PAID');
+        await sendWebhook(payment.providerPaymentId!).expect(200);
+
+        const final = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+        expect(final.status).toBe('CANCELLED'); // nunca PAID — a reserva já não é mais válida
+        expect(final.failureReason).toBe('BOOKING_CANCELLED_BEFORE_PAYMENT');
+      });
+
+      it('concorrência: Booking cancelada e o slot ocupado por OUTRA reserva antes da aprovação tardia — o Payment antigo nunca confirma sobre a reserva nova', async () => {
+        const startsAt = new Date(Date.now() + 126 * 3_600_000);
+        const original = await prisma.booking.create({
+          data: {
+            courtId: courtAId,
+            userId: customerAId,
+            type: BookingType.CUSTOMER,
+            status: BookingStatus.CONFIRMED,
+            startsAt,
+            endsAt: new Date(startsAt.getTime() + 3_600_000),
+            total: 75,
+          },
+        });
+        const payment = await prisma.payment.create({
+          data: {
+            bookingId: original.id,
+            userId: customerAId,
+            arenaId: arenaAId,
+            amount: 75,
+            currency: 'BRL',
+            status: 'EXPIRED',
+            provider: 'MERCADO_PAGO',
+            providerPaymentId: `mp-fake-expired-concurrency-${randomUUID()}`,
+            idempotencyKey: randomUUID(),
+            expiresAt: new Date(Date.now() - 1000),
+          },
+        });
+
+        // Slot liberado (Booking original cancelada) e reocupado por outra
+        // reserva — protegido pelo MESMO `Booking_no_overlap_excl` de sempre,
+        // nunca por esta correção.
+        await request(app.getHttpServer())
+          .post(`/v1/arenas/${arenaAId}/courts/${courtAId}/bookings/${original.id}/cancel`)
+          .set(...authHeader('token-customer-a'))
+          .expect(200);
+        const replacement = await prisma.booking.create({
+          data: {
+            courtId: courtAId,
+            userId: customerAId,
+            type: BookingType.CUSTOMER,
+            status: BookingStatus.CONFIRMED,
+            startsAt,
+            endsAt: new Date(startsAt.getTime() + 3_600_000),
+            total: 75,
+          },
+        });
+
+        fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PAID');
+        await sendWebhook(payment.providerPaymentId!).expect(200);
+
+        const finalOldPayment = await prisma.payment.findUniqueOrThrow({
+          where: { id: payment.id },
+        });
+        expect(finalOldPayment.status).toBe('CANCELLED'); // nunca PAID
+        const replacementRow = await prisma.booking.findUniqueOrThrow({
+          where: { id: replacement.id },
+        });
+        expect(replacementRow.status).toBe('CONFIRMED'); // intocada pelo Payment antigo
+        const noPaymentLinkedToReplacement = await prisma.payment.findFirst({
+          where: { bookingId: replacement.id },
+        });
+        expect(noPaymentLinkedToReplacement).toBeNull(); // nenhum efeito cruzado entre Bookings
+      });
+
+      it('Payment aponta pra Booking já em outro estado (inconsistência): nenhuma transição inválida é aplicada', async () => {
+        const { payment, booking } = await createExpiredPayment(127);
+        await prisma.booking.update({ where: { id: booking.id }, data: { status: 'CANCELLED' } });
+
+        fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PAID');
+        await sendWebhook(payment.providerPaymentId!).expect(200);
+
+        const final = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+        expect(final.status).toBe('CANCELLED');
+        expect(final.status).not.toBe('PAID');
+      });
+    });
   });
 
   describe('Cancelamento durante o pagamento (itens 12, 12.1)', () => {
