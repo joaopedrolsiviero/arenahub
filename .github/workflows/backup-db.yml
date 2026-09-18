@@ -60,6 +60,27 @@ jobs:
             --no-privileges \
             --file="$BACKUP_FILE"
 
+      - name: Verificar integridade estrutural do dump (pg_restore --list)
+        # Só lê o cabeçalho/TOC do arquivo local — nunca conecta em nenhum
+        # banco, não precisa de nenhum secret. Pega arquivo vazio,
+        # corrompido logo no início, ou que não é um dump Postgres de
+        # verdade — falha o job aqui, o upload nunca roda nesses casos.
+        #
+        # NÃO É uma garantia de integridade completa: testado
+        # empiricamente nesta fase que um dump truncado a partir de ~25%
+        # do arquivo passa por este comando sem erro (o TOC fica nos
+        # primeiros bytes, --list nunca lê o resto). A garantia real de
+        # integridade do arquivo inteiro vem da comparação de SHA-256
+        # depois do upload, mais abaixo.
+        run: |
+          /usr/lib/postgresql/18/bin/pg_restore --list "$BACKUP_FILE" > /dev/null
+
+      - name: Calcular SHA-256 do dump local
+        run: |
+          LOCAL_SHA256=$(sha256sum "$BACKUP_FILE" | awk '{print $1}')
+          echo "LOCAL_SHA256=${LOCAL_SHA256}" >> "$GITHUB_ENV"
+          echo "SHA-256 local: ${LOCAL_SHA256}"
+
       - name: Enviar backup para o Cloudflare R2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -69,11 +90,31 @@ jobs:
           aws s3 cp "$BACKUP_FILE" "s3://${R2_BUCKET}/$BACKUP_FILE" \
             --endpoint-url "${{ secrets.R2_ENDPOINT }}"
 
-      - name: Confirmar que o arquivo chegou no bucket
+      - name: Baixar do R2 e validar SHA-256 ponta a ponta
+        # Não confia em "o upload não deu erro" nem em `aws s3 ls` como
+        # prova de integridade (nenhum dos dois garante que os bytes
+        # armazenados são os mesmos que foram gerados). Baixa o objeto de
+        # volta pra um arquivo temporário e compara o SHA-256 com o do
+        # passo anterior — só assim confirma, com evidência real, que o
+        # que está no R2 é byte-a-byte idêntico ao que o pg_dump gerou.
+        # Custo de banda é zero (R2 não cobra egress).
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
         run: |
-          aws s3 ls "s3://${R2_BUCKET}/$BACKUP_FILE" \
+          TMP_DOWNLOAD=$(mktemp)
+          trap 'rm -f "$TMP_DOWNLOAD"' EXIT
+
+          aws s3 cp "s3://${R2_BUCKET}/$BACKUP_FILE" "$TMP_DOWNLOAD" \
             --endpoint-url "${{ secrets.R2_ENDPOINT }}"
+
+          REMOTE_SHA256=$(sha256sum "$TMP_DOWNLOAD" | awk '{print $1}')
+          echo "SHA-256 remoto (R2): ${REMOTE_SHA256}"
+
+          if [ "$LOCAL_SHA256" != "$REMOTE_SHA256" ]; then
+            echo "::error::SHA-256 não bate — local=${LOCAL_SHA256} remoto=${REMOTE_SHA256}. O backup no R2 pode estar corrompido."
+            exit 1
+          fi
+
+          echo "Integridade confirmada: SHA-256 local e remoto idênticos (${LOCAL_SHA256})."
