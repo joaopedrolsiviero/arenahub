@@ -48,7 +48,13 @@ jobs:
           # --no-owner/--no-privileges: dump portável, sem depender de o
           # role original existir no ambiente onde for restaurado (ex:
           # Postgres local de teste).
-          pg_dump "$DATABASE_URL" \
+          #
+          # Caminho completo (não "pg_dump" solto): o runner já vem com
+          # postgresql-client 16 pré-instalado, e /usr/bin/pg_dump continua
+          # apontando pra ele mesmo depois de instalar a v18 via PGDG —
+          # chamar o binário certo direto evita depender de como o sistema
+          # resolve qual versão fica em PATH.
+          /usr/lib/postgresql/18/bin/pg_dump "$DATABASE_URL" \
             --format=custom \
             --no-owner \
             --no-privileges \
