@@ -1,6 +1,7 @@
 import { ConflictException, Injectable, Logger } from '@nestjs/common';
 import { Booking, Payment, PaymentStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { RequestContext } from '../../common/request-context';
 import { BookingsService } from '../bookings/bookings.service';
 import {
   PaymentProvider,
@@ -23,6 +24,20 @@ const REFUNDABLE_STATUSES: PaymentStatus[] = [PaymentStatus.PAID, PaymentStatus.
 // `ArenaInvitation.expiresAt`, Fase 11 — nunca um job/cron marcando
 // expiração).
 const PAYMENT_TTL_MINUTES = 30;
+
+export interface ApplyProviderStatusResult {
+  transitioned: boolean;
+  status: PaymentStatus | null;
+  /** Só presente quando o Payment virou PAID sobre uma Booking válida — dispara as notificações de pagamento confirmado. */
+  booking?: Booking;
+  /**
+   * Só presente quando o provider aprovou um pagamento (tardio) de uma
+   * Booking que JÁ estava cancelada/inexistente: o Payment ficou PAID e a
+   * borda do webhook precisa acionar `refundIfPaid(bookingId)`. Nunca
+   * dispara `booking` (não é "pagamento confirmado" de uma reserva viva).
+   */
+  refundRequired?: { bookingId: string; booking: Booking | null };
+}
 
 // View segura devolvida ao cliente — nunca `providerPaymentId` (ID interno
 // do gateway, sem utilidade pro cliente e superfície de enumeração
@@ -131,21 +146,40 @@ export class PaymentsService {
     const { payment, isNew } = await this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${bookingId}))`;
 
+      // Precedência financeira (invariante pós EXPIRED -> PAID): um PAID em
+      // QUALQUER tentativa da Booking vale mais que uma tentativa mais nova
+      // PENDING — o PIX antigo de A pode ser aprovado depois de B já ter
+      // sido gerada. O índice único parcial garante no máximo um PAID por
+      // Booking, então este lookup é determinístico. Checa o `status` de
+      // fato (não só a presença de uma linha) pra nunca depender de como o
+      // filtro `where` é interpretado.
+      const paidRow = await tx.payment.findFirst({
+        where: { bookingId, status: PaymentStatus.PAID },
+      });
+      const alreadyPaid = paidRow?.status === PaymentStatus.PAID ? paidRow : null;
+
       const existingByKey = await tx.payment.findUnique({
         where: { bookingId_idempotencyKey: { bookingId, idempotencyKey } },
       });
       if (existingByKey) {
+        // Replay da MESMA chave só é devolvido se for a própria tentativa
+        // paga (ou se nada está pago) — reexecutar a chave de uma tentativa
+        // PENDING/EXPIRED de uma Booking já paga devolveria um PIX que não
+        // deve mais ser pago (segunda cobrança).
+        if (alreadyPaid && alreadyPaid.id !== existingByKey.id) {
+          throw new ConflictException('Esta reserva já está paga.');
+        }
         return { payment: existingByKey, isNew: false };
+      }
+      if (alreadyPaid) {
+        throw new ConflictException('Esta reserva já está paga.');
       }
 
       const active = await tx.payment.findFirst({
-        where: { bookingId, status: { in: [PaymentStatus.PAID, PaymentStatus.PENDING] } },
+        where: { bookingId, status: PaymentStatus.PENDING },
         orderBy: { createdAt: 'desc' },
       });
       if (active) {
-        if (active.status === PaymentStatus.PAID) {
-          throw new ConflictException('Esta reserva já está paga.');
-        }
         // PENDING: se ainda não expirou, é a mesma tentativa em andamento —
         // devolve ela (nunca abre uma segunda cobrança em paralelo).
         if (active.expiresAt && active.expiresAt.getTime() > Date.now()) {
@@ -240,10 +274,10 @@ export class PaymentsService {
     // Booking não existir, não for do usuário, ou não for CUSTOMER.
     await this.bookingsService.findMyBookingDetail(userId, bookingId);
 
-    const payment = await this.prisma.payment.findFirst({
-      where: { bookingId },
-      orderBy: { createdAt: 'desc' },
-    });
+    // Precedência financeira (ver `findRelevantPayment`): uma Booking com um
+    // Payment PAID/REFUNDING é representada por ele, nunca por uma
+    // tentativa mais nova PENDING/EXPIRED/FAILED.
+    const payment = await this.findRelevantPayment(this.prisma, bookingId);
     if (!payment) {
       return null;
     }
@@ -272,6 +306,13 @@ export class PaymentsService {
    * `EXPIRED` só nesta resposta, pra exibição; a escrita real (lazy expiry)
    * continua acontecendo só quando o cliente abre os detalhes da reserva,
    * evitando N escritas concorrentes toda vez que a lista é carregada.
+   *
+   * Precedência financeira (ver `findRelevantPayment`): depois de escolher
+   * a tentativa mais recente de cada Booking, uma tentativa PAID (ou
+   * REFUNDING) da MESMA Booking sobrescreve essa escolha — uma reserva
+   * paga por um PIX antigo (aprovado tardiamente) nunca aparece como se
+   * ainda tivesse um pagamento PENDING/EXPIRED. Segunda query, também sem
+   * N+1 e só sobre as poucas linhas realmente financeiras do usuário.
    */
   async getLatestPaymentStatusesForUser(userId: string): Promise<Record<string, PaymentStatus>> {
     const payments = await this.prisma.payment.findMany({
@@ -292,7 +333,46 @@ export class PaymentsService {
           : payment.status;
       result[payment.bookingId] = displayStatus;
     }
+
+    const financial = await this.prisma.payment.findMany({
+      where: { userId, status: { in: REFUNDABLE_STATUSES } },
+      select: { bookingId: true, status: true },
+    });
+    for (const payment of financial) {
+      if (!REFUNDABLE_STATUSES.includes(payment.status)) continue;
+      // PAID nunca é sobrescrito por REFUNDING; REFUNDING só vence uma
+      // tentativa mais recente que não seja financeira.
+      if (result[payment.bookingId] !== PaymentStatus.PAID) {
+        result[payment.bookingId] = payment.status;
+      }
+    }
     return result;
+  }
+
+  /**
+   * Payment que REPRESENTA o estado financeiro de uma Booking.
+   *
+   * Invariante de domínio (desde que EXPIRED -> PAID passou a existir, ver
+   * `applyProviderStatus`): "o Payment mais recente" deixou de ser uma regra
+   * válida — o PIX de uma tentativa ANTIGA (A, expirada localmente) pode ser
+   * pago depois de uma tentativa mais nova (B, ainda PENDING) já existir. Se
+   * a Booking tem um Payment PAID ou REFUNDING, ele tem precedência sobre
+   * qualquer outro; só se não houver é que vale o mais recente. O índice
+   * único parcial `Payment_bookingId_single_paid` garante no máximo um PAID
+   * por Booking, então a escolha é determinística.
+   */
+  private async findRelevantPayment(
+    db: Pick<Prisma.TransactionClient, 'payment'>,
+    bookingId: string,
+  ): Promise<Payment | null> {
+    const financial = await db.payment.findFirst({
+      where: { bookingId, status: { in: REFUNDABLE_STATUSES } },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (financial) {
+      return financial;
+    }
+    return db.payment.findFirst({ where: { bookingId }, orderBy: { createdAt: 'desc' } });
   }
 
   /**
@@ -319,93 +399,188 @@ export class PaymentsService {
    * `PaymentsWebhookService` disparar a notificação de pagamento confirmado
    * sem nenhum mecanismo novo de deduplicação — reaproveita o MESMO CAS que
    * já protegia a máquina de estados.
+   *
+   * Aprovação tardia sobre Booking JÁ CANCELADA (ou inexistente): o dinheiro
+   * foi de fato recebido pelo provider, então o Payment é registrado como
+   * PAID (a verdade financeira — mesmo modelo de "reserva paga e depois
+   * cancelada" da Fase 27), nunca como CANCELLED "fingindo" que nada entrou.
+   * O reembolso em si NÃO acontece aqui (é uma chamada HTTP externa, nunca
+   * dentro da transação): o retorno sinaliza `refundRequired` e a borda do
+   * webhook aciona `refundIfPaid` — o MESMO caminho idempotente/CAS/advisory
+   * lock de qualquer cancelamento de reserva paga. Vale igualmente para PENDING+PAID+Booking
+   * cancelada (a regra da Fase 17 que gravava CANCELLED sem reembolso foi
+   * substituída — "sem refund" era só limite de escopo daquela fase).
    */
   async applyProviderStatus(
     paymentId: string,
     providerStatus: ProviderPaymentStatus,
     meta: { paidAt?: Date; failureReason?: string },
-  ): Promise<{ transitioned: boolean; status: PaymentStatus | null; booking?: Booking }> {
+  ): Promise<ApplyProviderStatusResult> {
     if (providerStatus === 'PENDING') {
       return { transitioned: false, status: null }; // nada muda; PENDING->PENDING não é uma transição.
     }
 
     let attemptedStatus: PaymentStatus | null = null;
     let attemptedSourceStatus: PaymentStatus = PaymentStatus.PENDING;
-    let lateApproval = false;
+    let attemptedBookingId = '';
+    // Preenchido só quando a reconciliação tardia foi efetivamente gravada —
+    // o log é emitido DEPOIS do commit (nunca de dentro da transação, que
+    // ainda poderia falhar). Objeto-holder porque o TS não rastreia
+    // atribuições feitas dentro do callback da transação.
+    const lateLog: {
+      entry: {
+        bookingId: string;
+        sourceStatus: PaymentStatus;
+        nextStatus: PaymentStatus;
+        bookingInvalid: boolean;
+        lateApproval: boolean;
+      } | null;
+    } = { entry: null };
     try {
-      return await this.prisma.$transaction(async (tx) => {
-        const payment = await tx.payment.findUnique({ where: { id: paymentId } });
-        if (!payment) {
-          this.logger.warn(`Evento de pagamento para Payment ${paymentId} inexistente — ignorado.`);
-          return { transitioned: false, status: null };
-        }
-
-        // Única reabertura de um estado terminal nesta máquina de estados:
-        // EXPIRED localmente + PAID autoritativo no provider (o blocker
-        // original — ver comentário do método). Qualquer outra combinação
-        // sobre um Payment não-PENDING continua ignorada abaixo.
-        lateApproval = payment.status === PaymentStatus.EXPIRED && providerStatus === 'PAID';
-
-        if (payment.status !== PaymentStatus.PENDING && !lateApproval) {
-          this.logger.log(
-            `Payment ${paymentId} já está em estado terminal (${payment.status}) — evento ${providerStatus} ignorado.`,
-          );
-          return { transitioned: false, status: payment.status };
-        }
-        attemptedSourceStatus = payment.status;
-
-        let nextStatus: PaymentStatus = providerStatus;
-        let failureReason = meta.failureReason ?? null;
-        let booking: Booking | null = null;
-
-        // Item 12 do prompt: "se a Booking for cancelada antes do
-        // pagamento, o pagamento não pode ser concluído" — checado DENTRO
-        // da mesma transação que aplica a transição, nunca antes (evita
-        // corrida entre checar e escrever). Reaproveitado tal e qual pra
-        // reconciliação de aprovação tardia: uma Booking cancelada (ou
-        // removida) nunca é reconfirmada só porque o dinheiro chegou depois.
-        if (providerStatus === 'PAID') {
-          booking = await tx.booking.findUnique({ where: { id: payment.bookingId } });
-          if (!booking || booking.status === 'CANCELLED') {
-            nextStatus = PaymentStatus.CANCELLED;
-            failureReason = 'BOOKING_CANCELLED_BEFORE_PAYMENT';
+      const outcome = await this.prisma.$transaction(
+        async (tx): Promise<ApplyProviderStatusResult> => {
+          const payment = await tx.payment.findUnique({ where: { id: paymentId } });
+          if (!payment) {
+            this.logger.warn(
+              `Evento de pagamento para Payment ${paymentId} inexistente — ignorado.`,
+            );
+            return { transitioned: false, status: null };
           }
-        }
-        attemptedStatus = nextStatus;
+          attemptedBookingId = payment.bookingId;
 
-        const result = await tx.payment.updateMany({
-          where: { id: paymentId, status: attemptedSourceStatus },
-          data: {
-            status: nextStatus,
-            paidAt: nextStatus === PaymentStatus.PAID ? (meta.paidAt ?? new Date()) : null,
-            failureReason: nextStatus === PaymentStatus.PAID ? null : failureReason,
-          },
-        });
-        if (result.count === 0) {
-          // Outra transação venceu a corrida entre o findUnique acima e
-          // este updateMany (ex: dois webhooks concorrentes, ou uma leitura
-          // que expirou o Payment no meio do caminho) — o resultado já é o
-          // que a vencedora gravou, nunca um erro.
-          this.logger.log(
-            `Payment ${paymentId}: corrida perdida ao aplicar ${nextStatus}, ignorado.`,
+          // Única reabertura de um estado terminal nesta máquina de estados:
+          // EXPIRED localmente + PAID autoritativo no provider (o blocker
+          // original — ver comentário do método). Qualquer outra combinação
+          // sobre um Payment não-PENDING continua ignorada abaixo.
+          let lateApproval = payment.status === PaymentStatus.EXPIRED && providerStatus === 'PAID';
+
+          if (payment.status !== PaymentStatus.PENDING && !lateApproval) {
+            this.logger.log(
+              `Payment ${paymentId} já está em estado terminal (${payment.status}) — evento ${providerStatus} ignorado.`,
+            );
+            return { transitioned: false, status: payment.status };
+          }
+          attemptedSourceStatus = payment.status;
+
+          // Item 12 do prompt: "se a Booking for cancelada antes do
+          // pagamento, o pagamento não pode ser concluído" — checado DENTRO
+          // da mesma transação que aplica a transição, nunca antes (evita
+          // corrida entre checar e escrever). Reaproveitado pra
+          // reconciliação de aprovação tardia: uma Booking cancelada (ou
+          // removida) nunca é reconfirmada só porque o dinheiro chegou
+          // depois — o Booking nunca é escrito aqui, só lido.
+          let booking: Booking | null = null;
+          let bookingInvalid = false;
+          if (providerStatus === 'PAID') {
+            booking = await tx.booking.findUnique({ where: { id: payment.bookingId } });
+            bookingInvalid = !booking || booking.status === 'CANCELLED';
+          }
+
+          // Desfecho local do evento: o status do provider é gravado como está.
+          // PAID sobre Booking inválida (cancelada/inexistente) também vira
+          // PAID, tanto a partir de PENDING quanto de EXPIRED — dinheiro
+          // recebido não pode ser registrado como "não pago"; o reembolso é
+          // sinalizado via `refundRequired` (o `CANCELLED` histórico da Fase
+          // 17, que reteria o dinheiro, foi removido).
+          const decide = (): { status: PaymentStatus; failureReason: string | null } => ({
+            status: providerStatus,
+            failureReason: meta.failureReason ?? null,
+          });
+          const apply = (
+            source: PaymentStatus,
+            next: { status: PaymentStatus; failureReason: string | null },
+          ) =>
+            tx.payment.updateMany({
+              where: { id: paymentId, status: source },
+              data: {
+                status: next.status,
+                paidAt: next.status === PaymentStatus.PAID ? (meta.paidAt ?? new Date()) : null,
+                failureReason: next.status === PaymentStatus.PAID ? null : next.failureReason,
+              },
+            });
+
+          let next = decide();
+          attemptedStatus = next.status;
+          let result = await apply(attemptedSourceStatus, next);
+
+          // Corrida com o lazy-expiry de uma LEITURA (PENDING -> EXPIRED
+          // entre o findUnique acima e este updateMany): sem isto o PAID
+          // aprovado seria descartado como "corrida perdida" e o evento já
+          // estaria consumido. Relê e, se o Payment virou EXPIRED, refaz a
+          // MESMA reconciliação tardia a partir do estado realmente
+          // observado — mesmo CAS, uma única retentativa.
+          if (
+            result.count === 0 &&
+            attemptedSourceStatus === PaymentStatus.PENDING &&
+            providerStatus === 'PAID'
+          ) {
+            const fresh = await tx.payment.findUnique({ where: { id: paymentId } });
+            if (fresh?.status === PaymentStatus.EXPIRED) {
+              lateApproval = true;
+              attemptedSourceStatus = PaymentStatus.EXPIRED;
+              next = decide();
+              attemptedStatus = next.status;
+              result = await apply(PaymentStatus.EXPIRED, next);
+            }
+          }
+
+          if (result.count === 0) {
+            // Outra transação venceu a corrida entre o findUnique acima e
+            // este updateMany (ex: dois webhooks concorrentes) — o
+            // resultado já é o que a vencedora gravou, nunca um erro.
+            this.logger.log(
+              `Payment ${paymentId}: corrida perdida ao aplicar ${next.status}, ignorado.`,
+            );
+            return { transitioned: false, status: next.status };
+          }
+
+          if (lateApproval || (bookingInvalid && next.status === PaymentStatus.PAID)) {
+            lateLog.entry = {
+              bookingId: payment.bookingId,
+              sourceStatus: attemptedSourceStatus,
+              nextStatus: next.status,
+              bookingInvalid,
+              lateApproval,
+            };
+          }
+          return {
+            transitioned: true,
+            status: next.status,
+            booking:
+              next.status === PaymentStatus.PAID && !bookingInvalid && booking
+                ? booking
+                : undefined,
+            refundRequired:
+              next.status === PaymentStatus.PAID && bookingInvalid
+                ? { bookingId: payment.bookingId, booking }
+                : undefined,
+          };
+        },
+      );
+
+      if (lateLog.entry) {
+        const { bookingId, sourceStatus, nextStatus, bookingInvalid, lateApproval } = lateLog.entry;
+        const requestId = RequestContext.getRequestId() ?? 'n/a';
+        if (bookingInvalid) {
+          // Dinheiro REAL recebido para uma reserva que já não existe — alta
+          // importância operacional (nível error, tag pesquisável).
+          this.logger.error(
+            `[late-approval][ACAO-OPERACIONAL] payment=${paymentId} booking=${bookingId} requestId=${requestId}: ` +
+              `pagamento APROVADO pelo provider para uma reserva já cancelada/inexistente ` +
+              `(${sourceStatus} -> ${nextStatus}). Registrado como PAID; reembolso automático solicitado ` +
+              `pelo chamador. Se o Payment permanecer PAID/REFUNDING, repita o cancelamento ` +
+              `(idempotente) ou reembolse manualmente.`,
           );
-          return { transitioned: false, status: nextStatus };
-        }
-        if (lateApproval) {
-          // Log dedicado (nível warn — nunca só `.log`) pra dar visibilidade
-          // operacional a quantas vezes isto acontece de verdade em
-          // produção: é o sinal de que o prazo local de 30min está sendo
-          // ultrapassado por pagamentos reais no Mercado Pago.
+        } else if (lateApproval) {
+          // Visibilidade operacional de quantas vezes o prazo local de 30min
+          // está sendo ultrapassado por pagamentos reais no Mercado Pago.
           this.logger.warn(
-            `Payment ${paymentId}: aprovação recebida do provider após expiração local — reconciliado (EXPIRED -> ${nextStatus}).`,
+            `[late-approval] payment=${paymentId} booking=${bookingId} requestId=${requestId}: ` +
+              `aprovação recebida do provider após expiração local (EXPIRED -> ${nextStatus}).`,
           );
         }
-        return {
-          transitioned: true,
-          status: nextStatus,
-          booking: nextStatus === PaymentStatus.PAID && booking ? booking : undefined,
-        };
-      });
+      }
+      return outcome;
     } catch (error) {
       // Índice único parcial "no máximo um PAID por bookingId" — só pode
       // disparar em teoria se dois Payment DIFERENTES da mesma Booking
@@ -420,7 +595,10 @@ export class PaymentsService {
       // adicionado só pra este caso raro).
       if (this.isUniqueViolation(error) && attemptedStatus === PaymentStatus.PAID) {
         this.logger.error(
-          `Payment ${paymentId}: outra tentativa da mesma Booking já está PAID — marcado FAILED.`,
+          `Payment ${paymentId}: outra tentativa da mesma Booking já está PAID — marcado FAILED ` +
+            `(DUPLICATE_PAYMENT_FOR_BOOKING) booking=${attemptedBookingId} ` +
+            `requestId=${RequestContext.getRequestId() ?? 'n/a'}. Se o provider aprovou ESTE ` +
+            `pagamento, há cobrança em duplicidade a reembolsar manualmente.`,
         );
         await this.prisma.payment.updateMany({
           where: { id: paymentId, status: attemptedSourceStatus },
@@ -461,10 +639,12 @@ export class PaymentsService {
     const claimed = await this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${bookingId}))`;
 
-      const latest = await tx.payment.findFirst({
-        where: { bookingId },
-        orderBy: { createdAt: 'desc' },
-      });
+      // Precedência financeira (ver `findRelevantPayment`): o Payment
+      // PAID/REFUNDING da Booking, nunca "o mais recente" — uma tentativa
+      // nova PENDING/EXPIRED/FAILED não pode esconder um pagamento antigo
+      // aprovado tardiamente. Sem PAID/REFUNDING, cai no mais recente e o
+      // `REFUNDABLE_STATUSES.includes` abaixo continua tornando isso no-op.
+      const latest = await this.findRelevantPayment(tx, bookingId);
       if (!latest || !REFUNDABLE_STATUSES.includes(latest.status)) {
         // Nunca pago (Regra 1), ou pagamento nunca chegou a ser confirmado
         // (FAILED/CANCELLED/EXPIRED — Regra 7), ou já REFUNDED — nada a fazer.

@@ -265,6 +265,52 @@ describe('PaymentsService', () => {
       expect(tx.payment.create).not.toHaveBeenCalled();
     });
 
+    // Precedência financeira (pós EXPIRED -> PAID): A (antigo, expirado
+    // localmente) foi aprovado tardiamente e está PAID; B, mais novo, ainda
+    // é PENDING. "A tentativa mais recente" deixou de ser uma regra válida.
+    it('Booking com Payment PAID mais ANTIGO e uma tentativa PENDING mais nova: ConflictException — nunca devolve o PIX da tentativa nova nem cria uma terceira cobrança', async () => {
+      tx.payment.findFirst
+        .mockResolvedValueOnce(
+          paymentRow({ id: 'payment-A', status: 'PAID', idempotencyKey: 'key-A' }),
+        )
+        .mockResolvedValue(
+          paymentRow({ id: 'payment-B', status: 'PENDING', idempotencyKey: 'key-B' }),
+        );
+
+      await expect(service.createPayment('user-1', 'booking-1', 'key-nova')).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(tx.payment.create).not.toHaveBeenCalled();
+      expect(paymentProvider.createPayment).not.toHaveBeenCalled();
+    });
+
+    it('replay da chave da tentativa PENDING (B) depois que A já está PAID: ConflictException, nunca devolve o PIX de B', async () => {
+      tx.payment.findFirst.mockResolvedValueOnce(
+        paymentRow({ id: 'payment-A', status: 'PAID', idempotencyKey: 'key-A' }),
+      );
+      tx.payment.findUnique.mockResolvedValue(
+        paymentRow({ id: 'payment-B', status: 'PENDING', idempotencyKey: 'key-B' }),
+      );
+
+      await expect(service.createPayment('user-1', 'booking-1', 'key-B')).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(paymentProvider.createPayment).not.toHaveBeenCalled();
+    });
+
+    it('replay da chave da PRÓPRIA tentativa paga (A): continua idempotente — devolve o Payment PAID, sem erro e sem chamar o provider', async () => {
+      const paidA = paymentRow({ id: 'payment-A', status: 'PAID', idempotencyKey: 'key-A' });
+      tx.payment.findFirst.mockResolvedValueOnce(paidA);
+      tx.payment.findUnique.mockResolvedValue(paidA);
+
+      const result = await service.createPayment('user-1', 'booking-1', 'key-A');
+
+      expect(result.id).toBe('payment-A');
+      expect(result.status).toBe('PAID');
+      expect(paymentProvider.createPayment).not.toHaveBeenCalled();
+      expect(tx.payment.create).not.toHaveBeenCalled();
+    });
+
     it('tentativa PENDING expirada: expira a antiga e cria uma nova, chamando o provider só para a nova', async () => {
       const expired = paymentRow({ id: 'payment-old', expiresAt: new Date(Date.now() - 1000) });
       tx.payment.findFirst.mockResolvedValue(expired);
@@ -310,6 +356,35 @@ describe('PaymentsService', () => {
 
       await expect(service.getPaymentForBooking('user-1', 'booking-1')).resolves.toBeNull();
       expect(bookingsService.findMyBookingDetail).toHaveBeenCalledWith('user-1', 'booking-1');
+    });
+
+    it('precedência financeira: Payment PAID (antigo) + tentativa PENDING mais nova — devolve o PAID, e a 1ª consulta pede só PAID/REFUNDING', async () => {
+      prisma.payment.findFirst.mockResolvedValueOnce(
+        paymentRow({ id: 'payment-A', status: 'PAID' }),
+      );
+
+      const result = await service.getPaymentForBooking('user-1', 'booking-1');
+
+      expect(result?.id).toBe('payment-A');
+      expect(result?.status).toBe('PAID');
+      expect(prisma.payment.findFirst).toHaveBeenNthCalledWith(1, {
+        where: { bookingId: 'booking-1', status: { in: ['PAID', 'REFUNDING'] } },
+        orderBy: { createdAt: 'desc' },
+      });
+    });
+
+    it('sem PAID/REFUNDING, cai no Payment mais recente (regra anterior preservada)', async () => {
+      prisma.payment.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(paymentRow({ id: 'payment-B', status: 'FAILED' }));
+
+      const result = await service.getPaymentForBooking('user-1', 'booking-1');
+
+      expect(result?.id).toBe('payment-B');
+      expect(prisma.payment.findFirst).toHaveBeenNthCalledWith(2, {
+        where: { bookingId: 'booking-1' },
+        orderBy: { createdAt: 'desc' },
+      });
     });
 
     it('propaga 404 quando a Booking não existe/não é do usuário', async () => {
@@ -423,6 +498,46 @@ describe('PaymentsService', () => {
       expect(result).toEqual({ 'booking-1': 'PENDING' });
     });
 
+    it('precedência financeira: Booking com PAID antigo e uma tentativa PENDING mais nova aparece como PAID, nunca PENDING', async () => {
+      prisma.payment.findMany
+        .mockResolvedValueOnce([
+          { bookingId: 'booking-1', status: 'PENDING', expiresAt: new Date(Date.now() + 60_000) },
+        ])
+        .mockResolvedValueOnce([{ bookingId: 'booking-1', status: 'PAID' }]);
+
+      const result = await service.getLatestPaymentStatusesForUser('user-1');
+
+      expect(result).toEqual({ 'booking-1': 'PAID' });
+      expect(prisma.payment.findMany).toHaveBeenNthCalledWith(2, {
+        where: { userId: 'user-1', status: { in: ['PAID', 'REFUNDING'] } },
+        select: { bookingId: true, status: true },
+      });
+    });
+
+    it('REFUNDING vence uma tentativa mais nova não financeira, e PAID nunca é sobrescrito por REFUNDING (em qualquer ordem)', async () => {
+      prisma.payment.findMany
+        .mockResolvedValueOnce([
+          { bookingId: 'booking-1', status: 'FAILED', expiresAt: null },
+          { bookingId: 'booking-2', status: 'EXPIRED', expiresAt: null },
+          { bookingId: 'booking-3', status: 'EXPIRED', expiresAt: null },
+        ])
+        .mockResolvedValueOnce([
+          { bookingId: 'booking-1', status: 'REFUNDING' },
+          { bookingId: 'booking-2', status: 'PAID' },
+          { bookingId: 'booking-2', status: 'REFUNDING' },
+          { bookingId: 'booking-3', status: 'REFUNDING' },
+          { bookingId: 'booking-3', status: 'PAID' },
+        ]);
+
+      const result = await service.getLatestPaymentStatusesForUser('user-1');
+
+      expect(result).toEqual({
+        'booking-1': 'REFUNDING',
+        'booking-2': 'PAID',
+        'booking-3': 'PAID',
+      });
+    });
+
     it('sem nenhuma tentativa de pagamento, devolve mapa vazio', async () => {
       prisma.payment.findMany.mockResolvedValue([]);
 
@@ -528,32 +643,107 @@ describe('PaymentsService', () => {
         });
       });
 
-      it('Booking já CANCELLED quando a aprovação tardia chega: reconcilia pra CANCELLED, nunca reabre a reserva', async () => {
+      // Decisão desta fase (substitui o comportamento anterior, que gravava
+      // CANCELLED e deixava dinheiro real recebido sem tratamento): o
+      // provider APROVOU o pagamento, então o Payment é registrado como PAID
+      // (verdade financeira) e o resultado sinaliza `refundRequired` pra
+      // borda do webhook acionar o refund idempotente. A Booking cancelada
+      // nunca é reaberta, e nunca há `booking` no resultado (nada de
+      // notificação de "pagamento confirmado" pra uma reserva que não existe).
+      it('Booking já CANCELLED quando a aprovação tardia chega: Payment vira PAID (dinheiro recebido) e sinaliza refundRequired — nunca reabre a reserva', async () => {
         tx.payment.findUnique.mockResolvedValue(paymentRow({ status: 'EXPIRED' }));
         tx.booking.findUnique.mockResolvedValue({ id: 'booking-1', status: 'CANCELLED' });
 
-        const result = await service.applyProviderStatus('payment-1', 'PAID', {});
+        const result = await service.applyProviderStatus('payment-1', 'PAID', {
+          paidAt: new Date('2026-01-01'),
+        });
 
         expect(tx.payment.updateMany).toHaveBeenCalledWith({
           where: { id: 'payment-1', status: 'EXPIRED' },
-          data: {
-            status: 'CANCELLED',
-            paidAt: null,
-            failureReason: 'BOOKING_CANCELLED_BEFORE_PAYMENT',
-          },
+          data: { status: 'PAID', paidAt: new Date('2026-01-01'), failureReason: null },
         });
-        // Nunca notifica/reconfirma — resultado final é CANCELLED, não PAID.
-        expect(result).toEqual({ transitioned: true, status: 'CANCELLED', booking: undefined });
+        expect(result.transitioned).toBe(true);
+        expect(result.status).toBe('PAID');
+        expect(result.booking).toBeUndefined(); // nunca dispara "pagamento confirmado"
+        expect(result.refundRequired).toEqual({
+          bookingId: 'booking-1',
+          booking: { id: 'booking-1', status: 'CANCELLED' },
+        });
       });
 
-      it('Booking inexistente quando a aprovação tardia chega: reconcilia pra CANCELLED, nunca lança', async () => {
+      it('Booking inexistente quando a aprovação tardia chega: Payment vira PAID e sinaliza refundRequired, nunca lança', async () => {
         tx.payment.findUnique.mockResolvedValue(paymentRow({ status: 'EXPIRED' }));
         tx.booking.findUnique.mockResolvedValue(null);
 
         const result = await service.applyProviderStatus('payment-1', 'PAID', {});
 
-        expect(result.status).toBe('CANCELLED');
+        expect(result.status).toBe('PAID');
         expect(result.transitioned).toBe(true);
+        expect(result.booking).toBeUndefined();
+        expect(result.refundRequired).toEqual({ bookingId: 'booking-1', booking: null });
+      });
+
+      it('Booking CONFIRMED (aprovação tardia normal) nunca sinaliza refundRequired', async () => {
+        tx.payment.findUnique.mockResolvedValue(paymentRow({ status: 'EXPIRED' }));
+        tx.booking.findUnique.mockResolvedValue({ id: 'booking-1', status: 'CONFIRMED' });
+
+        const result = await service.applyProviderStatus('payment-1', 'PAID', {});
+
+        expect(result.refundRequired).toBeUndefined();
+      });
+
+      it('aprovação tardia sobre Booking cancelada loga em nível error com paymentId/bookingId (nunca só warn)', async () => {
+        const errorSpy = jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
+        tx.payment.findUnique.mockResolvedValue(paymentRow({ status: 'EXPIRED' }));
+        tx.booking.findUnique.mockResolvedValue({ id: 'booking-1', status: 'CANCELLED' });
+
+        await service.applyProviderStatus('payment-1', 'PAID', {});
+
+        const logged = errorSpy.mock.calls.map((call) => String(call[0])).join('\n');
+        expect(logged).toContain('[late-approval][ACAO-OPERACIONAL]');
+        expect(logged).toContain('payment=payment-1');
+        expect(logged).toContain('booking=booking-1');
+        errorSpy.mockRestore();
+      });
+
+      // Race levantada na revisão: o webhook lê PENDING, uma LEITURA expira
+      // o Payment (PENDING -> EXPIRED) e o CAS do webhook devolve count 0 —
+      // sem a retentativa, o PAID aprovado seria descartado como "corrida
+      // perdida" com o evento já consumido.
+      it('race com o lazy-expiry: CAS a partir de PENDING dá count 0, mas o Payment virou EXPIRED — refaz a reconciliação tardia a partir de EXPIRED', async () => {
+        tx.payment.findUnique
+          .mockResolvedValueOnce(paymentRow({ status: 'PENDING' })) // leitura inicial
+          .mockResolvedValueOnce(paymentRow({ status: 'EXPIRED' })); // releitura após o count 0
+        tx.booking.findUnique.mockResolvedValue({ id: 'booking-1', status: 'CONFIRMED' });
+        tx.payment.updateMany
+          .mockResolvedValueOnce({ count: 0 }) // WHERE status = PENDING: já expirou
+          .mockResolvedValueOnce({ count: 1 }); // WHERE status = EXPIRED
+
+        const result = await service.applyProviderStatus('payment-1', 'PAID', {});
+
+        expect(tx.payment.updateMany).toHaveBeenNthCalledWith(
+          1,
+          expect.objectContaining({ where: { id: 'payment-1', status: 'PENDING' } }),
+        );
+        expect(tx.payment.updateMany).toHaveBeenNthCalledWith(
+          2,
+          expect.objectContaining({ where: { id: 'payment-1', status: 'EXPIRED' } }),
+        );
+        expect(result.transitioned).toBe(true);
+        expect(result.status).toBe('PAID');
+      });
+
+      it('race com o lazy-expiry: se a releitura NÃO mostra EXPIRED (outra transação já aplicou o desfecho), continua "corrida perdida" sem retentar', async () => {
+        tx.payment.findUnique
+          .mockResolvedValueOnce(paymentRow({ status: 'PENDING' }))
+          .mockResolvedValueOnce(paymentRow({ status: 'PAID' }));
+        tx.booking.findUnique.mockResolvedValue({ id: 'booking-1', status: 'CONFIRMED' });
+        tx.payment.updateMany.mockResolvedValue({ count: 0 });
+
+        const result = await service.applyProviderStatus('payment-1', 'PAID', {});
+
+        expect(tx.payment.updateMany).toHaveBeenCalledTimes(1);
+        expect(result.transitioned).toBe(false);
       });
 
       it('corrida perdida na reconciliação (outra transação já resolveu o EXPIRED) nunca sinaliza transição', async () => {
@@ -591,23 +781,42 @@ describe('PaymentsService', () => {
       expect(result).toEqual({ transitioned: false, status: null });
     });
 
-    it('Booking cancelada antes da confirmação: PAID vira CANCELLED, nunca PAID (item 12)', async () => {
+    it('Booking cancelada enquanto o Payment está PENDING: PAID do provider é registrado como PAID (dinheiro recebido) e sinaliza refundRequired — nunca CANCELLED, nunca reabre a reserva', async () => {
       tx.payment.findUnique.mockResolvedValue(paymentRow());
       tx.booking.findUnique.mockResolvedValue({ id: 'booking-1', status: 'CANCELLED' });
+      const errorLog = jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
 
-      const result = await service.applyProviderStatus('payment-1', 'PAID', {});
+      const result = await service.applyProviderStatus('payment-1', 'PAID', {
+        paidAt: new Date('2026-01-01'),
+      });
 
       expect(tx.payment.updateMany).toHaveBeenCalledWith({
         where: { id: 'payment-1', status: 'PENDING' },
-        data: {
-          status: 'CANCELLED',
-          paidAt: null,
-          failureReason: 'BOOKING_CANCELLED_BEFORE_PAYMENT',
-        },
+        data: { status: 'PAID', paidAt: new Date('2026-01-01'), failureReason: null },
       });
-      // M7 — nunca notifica "pagamento confirmado" quando o desfecho real
-      // foi CANCELLED (Booking cancelada antes da confirmação chegar).
-      expect(result).toEqual({ transitioned: true, status: 'CANCELLED', booking: undefined });
+      // Nunca "pagamento confirmado" (sem `booking`) — só sinal de refund.
+      expect(result.booking).toBeUndefined();
+      expect(result.refundRequired).toEqual({
+        bookingId: 'booking-1',
+        booking: { id: 'booking-1', status: 'CANCELLED' },
+      });
+      // Nenhuma escrita em Booking e nenhuma chamada HTTP ao provider dentro
+      // (ou fora) da transação — o refund é responsabilidade da borda.
+      expect(paymentProvider.refundPayment).not.toHaveBeenCalled();
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining('[late-approval][ACAO-OPERACIONAL]'),
+      );
+      expect(errorLog).toHaveBeenCalledWith(expect.stringContaining('PENDING -> PAID'));
+    });
+
+    it('PENDING + PAID sobre Booking CONFIRMED (caminho normal) segue igual: PAID com `booking`, sem refundRequired', async () => {
+      tx.payment.findUnique.mockResolvedValue(paymentRow());
+      tx.booking.findUnique.mockResolvedValue({ id: 'booking-1', status: 'CONFIRMED' });
+
+      const result = await service.applyProviderStatus('payment-1', 'PAID', {});
+
+      expect(result.booking).toEqual({ id: 'booking-1', status: 'CONFIRMED' });
+      expect(result.refundRequired).toBeUndefined();
     });
 
     it('corrida perdida (count 0) é logada, nunca lança', async () => {
@@ -685,6 +894,59 @@ describe('PaymentsService', () => {
       await service.refundIfPaid('booking-1');
 
       expect(paymentProvider.refundPayment).not.toHaveBeenCalled();
+    });
+
+    // Precedência financeira: o Payment PAID/REFUNDING da Booking manda, nunca
+    // "o mais recente" — uma tentativa nova PENDING/EXPIRED/FAILED não pode
+    // esconder um pagamento antigo aprovado tardiamente (senão o cliente que
+    // pagou A perderia o reembolso ao cancelar).
+    it('precedência financeira: Payment PAID antigo + tentativa PENDING mais nova — reembolsa O PAID (a 1ª consulta pede só PAID/REFUNDING), nunca a tentativa nova', async () => {
+      const paidA = paymentRow({ id: 'payment-A', status: 'PAID', providerPaymentId: 'mp-A' });
+      tx.payment.findFirst.mockResolvedValueOnce(paidA);
+      tx.payment.findUniqueOrThrow.mockResolvedValue({ ...paidA, status: 'REFUNDING' });
+      paymentProvider.refundPayment.mockResolvedValue({ refundId: 'refund-A', status: 'REFUNDED' });
+
+      const result = await service.refundIfPaid('booking-1');
+
+      expect(tx.payment.findFirst).toHaveBeenNthCalledWith(1, {
+        where: { bookingId: 'booking-1', status: { in: ['PAID', 'REFUNDING'] } },
+        orderBy: { createdAt: 'desc' },
+      });
+      expect(tx.payment.updateMany).toHaveBeenCalledWith({
+        where: { id: 'payment-A', status: 'PAID' },
+        data: { status: 'REFUNDING' },
+      });
+      expect(paymentProvider.refundPayment).toHaveBeenCalledWith('mp-A', 'refund:payment-A');
+      expect(result).toEqual({ refunded: true });
+    });
+
+    it('precedência financeira: só tentativas PENDING/EXPIRED/FAILED (nenhuma PAID/REFUNDING) — no-op, nunca reembolsa uma tentativa não paga', async () => {
+      tx.payment.findFirst
+        .mockResolvedValueOnce(null) // consulta PAID/REFUNDING
+        .mockResolvedValueOnce(paymentRow({ id: 'payment-B', status: 'PENDING' })); // mais recente
+
+      const result = await service.refundIfPaid('booking-1');
+
+      expect(paymentProvider.refundPayment).not.toHaveBeenCalled();
+      expect(tx.payment.updateMany).not.toHaveBeenCalled();
+      expect(result).toEqual({ refunded: false });
+    });
+
+    it('precedência financeira: Payment REFUNDING tem precedência sobre uma tentativa mais nova e NÃO é reivindicado de novo — reusa a MESMA idempotency key', async () => {
+      const refunding = paymentRow({
+        id: 'payment-A',
+        status: 'REFUNDING',
+        providerPaymentId: 'mp-A',
+        refundId: 'refund-A',
+      });
+      tx.payment.findFirst.mockResolvedValueOnce(refunding);
+      tx.payment.findUniqueOrThrow.mockResolvedValue(refunding);
+      paymentProvider.refundPayment.mockResolvedValue({ refundId: 'refund-A', status: 'REFUNDED' });
+
+      await service.refundIfPaid('booking-1');
+
+      expect(tx.payment.updateMany).not.toHaveBeenCalled(); // sem novo CAS PAID -> REFUNDING
+      expect(paymentProvider.refundPayment).toHaveBeenCalledWith('mp-A', 'refund:payment-A');
     });
 
     it('Regra 2: Payment PAID — reivindica (CAS pra REFUNDING) sob advisory lock e chama o provider', async () => {

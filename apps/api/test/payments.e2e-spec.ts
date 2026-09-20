@@ -1,12 +1,13 @@
 import { createHmac } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
 import { Test, TestingModule } from '@nestjs/testing';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { ConflictException, INestApplication, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { ArenaRole, BookingStatus, BookingType, PrismaClient, Sport } from '@prisma/client';
 import { AppModule } from '../src/app.module';
 import { ClerkService } from '../src/modules/auth/clerk.service';
+import { PaymentsService } from '../src/modules/payments/payments.service';
 import {
   PaymentProvider,
   PaymentProviderCreateRequest,
@@ -270,6 +271,11 @@ describe('Pagamentos (e2e)', () => {
     fakeProvider.createCalls = [];
     fakeProvider.nextCreateError = null;
     fakeProvider.statusByProviderPaymentId.clear();
+    // Reembolso (aprovação tardia sobre Booking cancelada aciona refundIfPaid):
+    // cada teste começa sem chamadas de refund anteriores nem erro pendente.
+    fakeProvider.refundCalls = [];
+    fakeProvider.nextRefundError = null;
+    fakeProvider.nextRefundResult = { refundId: 'refund-fake-1', status: 'REFUNDED' };
   });
 
   describe('Autorização e validação (itens 17, 26)', () => {
@@ -763,20 +769,30 @@ describe('Pagamentos (e2e)', () => {
         expect(final.status).toBe('PAID');
       });
 
-      it('Booking cancelada DEPOIS da expiração local: a aprovação tardia nunca reabre a reserva, Payment reconcilia pra CANCELLED', async () => {
+      // Decisão desta fase: dinheiro aprovado pelo provider NUNCA é registrado
+      // como "não pago". O Payment vira PAID (verdade financeira) e o webhook
+      // aciona o MESMO refund idempotente do cancelamento de reserva paga.
+      it('Booking cancelada DEPOIS da expiração local + aprovação tardia: o dinheiro nunca é perdido — Payment registrado como PAID e reembolsado UMA vez (REFUNDED); a reserva cancelada nunca é reaberta', async () => {
         const { payment, booking } = await createExpiredPayment(125);
 
         await request(app.getHttpServer())
           .post(`/v1/arenas/${arenaAId}/courts/${courtAId}/bookings/${booking.id}/cancel`)
           .set(...authHeader('token-customer-a'))
           .expect(200);
+        expect(fakeProvider.refundCalls).toHaveLength(0); // EXPIRED não é reembolsável
 
         fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PAID');
         await sendWebhook(payment.providerPaymentId!).expect(200);
 
         const final = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
-        expect(final.status).toBe('CANCELLED'); // nunca PAID — a reserva já não é mais válida
-        expect(final.failureReason).toBe('BOOKING_CANCELLED_BEFORE_PAYMENT');
+        expect(final.status).toBe('REFUNDED');
+        expect(final.paidAt).not.toBeNull(); // o dinheiro entrou de verdade
+        expect(final.refundedAt).not.toBeNull();
+        expect(fakeProvider.refundCalls).toEqual([
+          { providerPaymentId: payment.providerPaymentId, idempotencyKey: `refund:${payment.id}` },
+        ]);
+        const bookingRow = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+        expect(bookingRow.status).toBe('CANCELLED'); // nunca reaberta
       });
 
       it('concorrência: Booking cancelada e o slot ocupado por OUTRA reserva antes da aprovação tardia — o Payment antigo nunca confirma sobre a reserva nova', async () => {
@@ -832,7 +848,15 @@ describe('Pagamentos (e2e)', () => {
         const finalOldPayment = await prisma.payment.findUniqueOrThrow({
           where: { id: payment.id },
         });
-        expect(finalOldPayment.status).toBe('CANCELLED'); // nunca PAID
+        // O Payment antigo recebeu dinheiro real (PAID) e foi reembolsado —
+        // nunca confirmou nada sobre a reserva nova.
+        expect(finalOldPayment.status).toBe('REFUNDED');
+        expect(fakeProvider.refundCalls).toEqual([
+          {
+            providerPaymentId: payment.providerPaymentId,
+            idempotencyKey: `refund:${payment.id}`,
+          },
+        ]);
         const replacementRow = await prisma.booking.findUniqueOrThrow({
           where: { id: replacement.id },
         });
@@ -841,9 +865,11 @@ describe('Pagamentos (e2e)', () => {
           where: { bookingId: replacement.id },
         });
         expect(noPaymentLinkedToReplacement).toBeNull(); // nenhum efeito cruzado entre Bookings
+        const originalRow = await prisma.booking.findUniqueOrThrow({ where: { id: original.id } });
+        expect(originalRow.status).toBe('CANCELLED'); // a reserva cancelada nunca é reaberta
       });
 
-      it('Payment aponta pra Booking já em outro estado (inconsistência): nenhuma transição inválida é aplicada', async () => {
+      it('Payment aponta pra Booking já em outro estado (inconsistência): dinheiro recebido vira PAID e é reembolsado — nenhuma reserva é tocada', async () => {
         const { payment, booking } = await createExpiredPayment(127);
         await prisma.booking.update({ where: { id: booking.id }, data: { status: 'CANCELLED' } });
 
@@ -851,42 +877,318 @@ describe('Pagamentos (e2e)', () => {
         await sendWebhook(payment.providerPaymentId!).expect(200);
 
         const final = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
-        expect(final.status).toBe('CANCELLED');
-        expect(final.status).not.toBe('PAID');
+        expect(final.status).toBe('REFUNDED');
+        expect(final.status).not.toBe('CANCELLED'); // nunca "fingir" que nada foi pago
+        const bookingRow = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+        expect(bookingRow.status).toBe('CANCELLED');
+      });
+
+      it('refund automático FALHA (provider indisponível): o Payment fica REFUNDING (nunca esquecido nem REFUNDED), e repetir o cancelamento (idempotente) conclui com a MESMA idempotency key — nunca dois reembolsos', async () => {
+        const { payment, booking } = await createExpiredPayment(128);
+        const cancelUrl = `/v1/arenas/${arenaAId}/courts/${courtAId}/bookings/${booking.id}/cancel`;
+        await request(app.getHttpServer())
+          .post(cancelUrl)
+          .set(...authHeader('token-customer-a'))
+          .expect(200);
+
+        fakeProvider.nextRefundError = new Error('Mercado Pago indisponível (teste)');
+        fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PAID');
+        await sendWebhook(payment.providerPaymentId!).expect(200);
+
+        // Estado recuperável e identificável: dinheiro registrado (paidAt),
+        // reembolso reivindicado localmente mas NÃO confirmado.
+        const afterFailure = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+        expect(afterFailure.status).toBe('REFUNDING');
+        expect(afterFailure.paidAt).not.toBeNull();
+        expect(afterFailure.refundedAt).toBeNull();
+        expect(afterFailure.refundId).toBeNull();
+        expect(fakeProvider.refundCalls).toHaveLength(1);
+
+        // Visível para o dono da reserva: a Booking cancelada aparece com o
+        // reembolso em andamento, nunca como se nada tivesse sido recebido.
+        const view = await request(app.getHttpServer())
+          .get(paymentUrl(booking.id))
+          .set(...authHeader('token-customer-a'))
+          .expect(200);
+        expect((view.body as PaymentViewBody).status).toBe('REFUNDING');
+
+        // Recuperação: repetir o cancelamento (endpoint idempotente) refaz o
+        // refund com a MESMA idempotency key.
+        await request(app.getHttpServer())
+          .post(cancelUrl)
+          .set(...authHeader('token-customer-a'))
+          .expect(200);
+        const recovered = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+        expect(recovered.status).toBe('REFUNDED');
+        expect(fakeProvider.refundCalls).toHaveLength(2);
+        expect(new Set(fakeProvider.refundCalls.map((call) => call.idempotencyKey))).toEqual(
+          new Set([`refund:${payment.id}`]),
+        );
+
+        // Um terceiro cancelamento é no-op: nunca um segundo reembolso.
+        await request(app.getHttpServer())
+          .post(cancelUrl)
+          .set(...authHeader('token-customer-a'))
+          .expect(200);
+        expect(fakeProvider.refundCalls).toHaveLength(2);
+      });
+
+      it('duas aprovações tardias SIMULTÂNEAS (Promise.all) sobre Booking cancelada: o dinheiro é reembolsado exatamente UMA vez', async () => {
+        const { payment, booking } = await createExpiredPayment(129);
+        await request(app.getHttpServer())
+          .post(`/v1/arenas/${arenaAId}/courts/${courtAId}/bookings/${booking.id}/cancel`)
+          .set(...authHeader('token-customer-a'))
+          .expect(200);
+        fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PAID');
+
+        const [r1, r2] = await Promise.all([
+          sendWebhook(payment.providerPaymentId!),
+          sendWebhook(payment.providerPaymentId!),
+        ]);
+
+        expect([r1.status, r2.status]).toEqual([200, 200]);
+        const final = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+        expect(final.status).toBe('REFUNDED');
+        expect(fakeProvider.refundCalls).toHaveLength(1);
+      });
+    });
+
+    // Invariante de domínio pós EXPIRED -> PAID: "o Payment mais recente" deixou
+    // de ser uma regra válida. Estes testes exercitam o service e o webhook
+    // REAIS contra o Postgres real (índice único parcial, advisory locks, CAS)
+    // — só o provider é o fake.
+    describe('Precedência financeira — múltiplas tentativas (A expira, B é gerado, A é aprovado tardiamente)', () => {
+      // A e B são criados pelo PaymentsService REAL (não inseridos por Prisma);
+      // só o "tempo passando" é simulado (expiresAt de A no passado), e quem
+      // expira A é o próprio createPayment de B (lazy expiry de verdade).
+      async function createAExpiredThenB(hoursFromNow: number) {
+        const booking = await createConfirmedBooking(courtAId, customerAId, hoursFromNow);
+        const paymentsService = app.get(PaymentsService);
+        const viewA = await paymentsService.createPayment(customerAId, booking.id, randomUUID());
+        await prisma.payment.update({
+          where: { id: viewA.id },
+          data: { expiresAt: new Date(Date.now() - 1000) },
+        });
+        const viewB = await paymentsService.createPayment(customerAId, booking.id, randomUUID());
+        const rowA = await prisma.payment.findUniqueOrThrow({ where: { id: viewA.id } });
+        const rowB = await prisma.payment.findUniqueOrThrow({ where: { id: viewB.id } });
+        return { booking, rowA, rowB, paymentsService };
+      }
+
+      it('A=PAID (tardio), B permanece PENDING, a Booking é reconhecida como paga em TODAS as leituras, nenhuma terceira cobrança nasce, e o refund encontra A', async () => {
+        const { booking, rowA, rowB, paymentsService } = await createAExpiredThenB(130);
+        expect(rowA.status).toBe('EXPIRED');
+        expect(rowB.status).toBe('PENDING');
+        expect(rowB.id).not.toBe(rowA.id);
+
+        // O PIX ANTIGO de A é aprovado pelo Mercado Pago depois de B existir.
+        fakeProvider.statusByProviderPaymentId.set(rowA.providerPaymentId!, 'PAID');
+        await sendWebhook(rowA.providerPaymentId!).expect(200);
+
+        const paidA = await prisma.payment.findUniqueOrThrow({ where: { id: rowA.id } });
+        const pendingB = await prisma.payment.findUniqueOrThrow({ where: { id: rowB.id } });
+        expect(paidA.status).toBe('PAID');
+        expect(pendingB.status).toBe('PENDING'); // consistente: segue o ciclo próprio
+        const bookingRow = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+        expect(bookingRow.status).toBe('CONFIRMED');
+
+        // getPaymentForBooking: representa a Booking como PAGA (A), não B.
+        const view = await request(app.getHttpServer())
+          .get(paymentUrl(booking.id))
+          .set(...authHeader('token-customer-a'))
+          .expect(200);
+        expect((view.body as PaymentViewBody).id).toBe(rowA.id);
+        expect((view.body as PaymentViewBody).status).toBe('PAID');
+
+        // getLatestPaymentStatusesForUser ("Minhas reservas"): nunca PENDING.
+        const mine = await request(app.getHttpServer())
+          .get('/v1/users/me/payments')
+          .set(...authHeader('token-customer-a'))
+          .expect(200);
+        expect((mine.body as Record<string, string>)[booking.id]).toBe('PAID');
+
+        // createPayment: contrato existente ("reserva já paga" = 409), sem
+        // nenhuma terceira cobrança e sem chamar o provider.
+        const createCallsBefore = fakeProvider.createCalls.length;
+        await request(app.getHttpServer())
+          .post(paymentsUrl(booking.id))
+          .set(...authHeader('token-customer-a'))
+          .set('Idempotency-Key', randomUUID())
+          .expect(409);
+        // Replay da chave da tentativa B (PENDING) também nunca devolve o PIX de B.
+        await expect(
+          paymentsService.createPayment(customerAId, booking.id, rowB.idempotencyKey),
+        ).rejects.toBeInstanceOf(ConflictException);
+        // ...mas o replay da chave da tentativa PAGA (A) continua idempotente.
+        const replayA = await paymentsService.createPayment(
+          customerAId,
+          booking.id,
+          rowA.idempotencyKey,
+        );
+        expect(replayA.id).toBe(rowA.id);
+        expect(replayA.status).toBe('PAID');
+        expect(await prisma.payment.count({ where: { bookingId: booking.id } })).toBe(2);
+        expect(fakeProvider.createCalls).toHaveLength(createCallsBefore);
+
+        // refundIfPaid encontra A (PAID) — nunca B (PENDING, mais nova).
+        await request(app.getHttpServer())
+          .post(`/v1/arenas/${arenaAId}/courts/${courtAId}/bookings/${booking.id}/cancel`)
+          .set(...authHeader('token-customer-a'))
+          .expect(200);
+        expect(fakeProvider.refundCalls).toEqual([
+          { providerPaymentId: rowA.providerPaymentId, idempotencyKey: `refund:${rowA.id}` },
+        ]);
+        const refundedA = await prisma.payment.findUniqueOrThrow({ where: { id: rowA.id } });
+        const stillPendingB = await prisma.payment.findUniqueOrThrow({ where: { id: rowB.id } });
+        expect(refundedA.status).toBe('REFUNDED');
+        expect(stillPendingB.status).toBe('PENDING'); // nunca tocada pelo refund
+
+        // Cancelar de novo: nenhum segundo reembolso.
+        await request(app.getHttpServer())
+          .post(`/v1/arenas/${arenaAId}/courts/${courtAId}/bookings/${booking.id}/cancel`)
+          .set(...authHeader('token-customer-a'))
+          .expect(200);
+        expect(fakeProvider.refundCalls).toHaveLength(1);
+      });
+
+      it('A expira, B é gerado e PAGO no prazo; depois o PIX antigo de A é aprovado: o índice único parcial barra o segundo PAID — A vira FAILED (DUPLICATE_PAYMENT_FOR_BOOKING) a partir de EXPIRED, B continua PAID (nunca dois PAID)', async () => {
+        const { booking, rowA, rowB } = await createAExpiredThenB(131);
+
+        fakeProvider.statusByProviderPaymentId.set(rowB.providerPaymentId!, 'PAID');
+        await sendWebhook(rowB.providerPaymentId!).expect(200);
+        fakeProvider.statusByProviderPaymentId.set(rowA.providerPaymentId!, 'PAID');
+        await sendWebhook(rowA.providerPaymentId!).expect(200);
+
+        const finalA = await prisma.payment.findUniqueOrThrow({ where: { id: rowA.id } });
+        const finalB = await prisma.payment.findUniqueOrThrow({ where: { id: rowB.id } });
+        expect(finalB.status).toBe('PAID');
+        expect(finalA.status).toBe('FAILED');
+        expect(finalA.failureReason).toBe('DUPLICATE_PAYMENT_FOR_BOOKING');
+        expect(
+          await prisma.payment.count({ where: { bookingId: booking.id, status: 'PAID' } }),
+        ).toBe(1);
+        // A Booking continua paga por B, e a visão financeira a representa por B.
+        const view = await request(app.getHttpServer())
+          .get(paymentUrl(booking.id))
+          .set(...authHeader('token-customer-a'))
+          .expect(200);
+        expect((view.body as PaymentViewBody).id).toBe(rowB.id);
+        expect((view.body as PaymentViewBody).status).toBe('PAID');
+      });
+
+      it('Payment REFUNDING (reembolso em andamento) também tem precedência sobre uma tentativa mais nova', async () => {
+        const { booking, rowA, rowB } = await createAExpiredThenB(132);
+        fakeProvider.statusByProviderPaymentId.set(rowA.providerPaymentId!, 'PAID');
+        await sendWebhook(rowA.providerPaymentId!).expect(200);
+
+        // Reembolso assíncrono do PIX: o provider aceita mas ainda processa.
+        fakeProvider.nextRefundResult = { refundId: 'refund-fake-async', status: 'REFUNDING' };
+        await request(app.getHttpServer())
+          .post(`/v1/arenas/${arenaAId}/courts/${courtAId}/bookings/${booking.id}/cancel`)
+          .set(...authHeader('token-customer-a'))
+          .expect(200);
+
+        const refundingA = await prisma.payment.findUniqueOrThrow({ where: { id: rowA.id } });
+        expect(refundingA.status).toBe('REFUNDING');
+        const view = await request(app.getHttpServer())
+          .get(paymentUrl(booking.id))
+          .set(...authHeader('token-customer-a'))
+          .expect(200);
+        expect((view.body as PaymentViewBody).id).toBe(rowA.id); // nunca B (PENDING)
+        const untouchedB = await prisma.payment.findUniqueOrThrow({ where: { id: rowB.id } });
+        expect(untouchedB.status).toBe('PENDING');
       });
     });
   });
 
   describe('Cancelamento durante o pagamento (itens 12, 12.1)', () => {
-    it('Booking cancelada enquanto o Payment está PENDING: um PAID que chega depois vira CANCELLED, nunca PAID', async () => {
-      const booking = await createConfirmedBooking(courtAId, customerAId, 50);
-      const createResponse = await request(app.getHttpServer())
-        .post(paymentsUrl(booking.id))
-        .set(...authHeader('token-customer-a'))
-        .set('Idempotency-Key', randomUUID())
-        .expect(201);
-      const payment = await prisma.payment.findUniqueOrThrow({
-        where: { id: (createResponse.body as PaymentViewBody).id },
-      });
-
-      await request(app.getHttpServer())
-        .post(`/v1/arenas/${arenaAId}/courts/${courtAId}/bookings/${booking.id}/cancel`)
-        .set(...authHeader('token-customer-a'))
-        .expect(200);
-
-      fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PAID');
+    function sendPaid(providerPaymentId: string, eventId: string = randomUUID()) {
       const ts = String(Math.floor(Date.now() / 1000));
       const requestId = randomUUID();
-      await request(app.getHttpServer())
+      return request(app.getHttpServer())
         .post('/v1/webhooks/payments/mercadopago')
-        .set('x-signature', signWebhook(payment.providerPaymentId!, requestId, ts))
+        .set('x-signature', signWebhook(providerPaymentId, requestId, ts))
         .set('x-request-id', requestId)
-        .send({ id: randomUUID(), type: 'payment', data: { id: payment.providerPaymentId } })
+        .send({ id: eventId, type: 'payment', data: { id: providerPaymentId } });
+    }
+
+    // PENDING real (criado via HTTP) -> Booking cancelada pelo endpoint real ->
+    // provider informa PAID. Mesma política do caminho EXPIRED: dinheiro
+    // recebido é registrado como PAID e devolvido pelo refund idempotente.
+    async function createPendingThenCancel(hoursFromNow: number) {
+      const booking = await createConfirmedBooking(courtAId, customerAId, hoursFromNow);
+      // Via service real (não HTTP) só para preservar o orçamento de 30
+      // POST/min do throttler deste arquivo — sem alterar rate limit.
+      const view = await app
+        .get(PaymentsService)
+        .createPayment(customerAId, booking.id, randomUUID());
+      const payment = await prisma.payment.findUniqueOrThrow({ where: { id: view.id } });
+      const cancelUrl = `/v1/arenas/${arenaAId}/courts/${courtAId}/bookings/${booking.id}/cancel`;
+      await request(app.getHttpServer())
+        .post(cancelUrl)
+        .set(...authHeader('token-customer-a'))
         .expect(200);
+      expect(fakeProvider.refundCalls).toHaveLength(0); // PENDING não é reembolsável
+      return { booking, payment, cancelUrl };
+    }
+
+    it('Booking cancelada enquanto o Payment está PENDING: um PAID que chega depois é registrado como PAID e reembolsado UMA vez (REFUNDED); a reserva continua CANCELLED e nenhuma cobrança nova nasce', async () => {
+      const { booking, payment } = await createPendingThenCancel(50);
+
+      fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PAID');
+      await sendPaid(payment.providerPaymentId!).expect(200);
 
       const final = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
-      expect(final.status).toBe('CANCELLED'); // nunca PAID — nunca finge que houve reembolso, só nunca completa
-      expect(final.failureReason).toBe('BOOKING_CANCELLED_BEFORE_PAYMENT');
+      expect(final.status).toBe('REFUNDED');
+      expect(final.paidAt).not.toBeNull(); // o dinheiro entrou de verdade
+      expect(final.refundedAt).not.toBeNull();
+      expect(final.failureReason).toBeNull();
+      expect(fakeProvider.refundCalls).toEqual([
+        { providerPaymentId: payment.providerPaymentId, idempotencyKey: `refund:${payment.id}` },
+      ]);
+      const bookingRow = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+      expect(bookingRow.status).toBe('CANCELLED'); // nunca reaberta
+      expect(await prisma.payment.count({ where: { bookingId: booking.id } })).toBe(1);
+    });
+
+    it('webhook duplicado (mesmo evento) e novo evento do mesmo pagamento depois do refund: nenhum segundo reembolso', async () => {
+      const { payment } = await createPendingThenCancel(51);
+      fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PAID');
+      const eventId = randomUUID();
+
+      await sendPaid(payment.providerPaymentId!, eventId).expect(200);
+      await sendPaid(payment.providerPaymentId!, eventId).expect(200); // mesmo evento (dedup)
+      await sendPaid(payment.providerPaymentId!).expect(200); // evento novo, Payment já REFUNDED
+
+      const final = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+      expect(final.status).toBe('REFUNDED');
+      expect(fakeProvider.refundCalls).toHaveLength(1);
+    });
+
+    it('refund FALHA: o Payment fica REFUNDING (recuperável, dinheiro registrado), o webhook responde 200, e repetir o cancelamento conclui com a MESMA idempotency key', async () => {
+      const { booking, payment, cancelUrl } = await createPendingThenCancel(52);
+
+      fakeProvider.nextRefundError = new Error('Mercado Pago indisponível (teste)');
+      fakeProvider.statusByProviderPaymentId.set(payment.providerPaymentId!, 'PAID');
+      await sendPaid(payment.providerPaymentId!).expect(200);
+
+      const afterFailure = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+      expect(afterFailure.status).toBe('REFUNDING');
+      expect(afterFailure.paidAt).not.toBeNull();
+      expect(afterFailure.refundId).toBeNull();
+      expect(fakeProvider.refundCalls).toHaveLength(1);
+      const bookingRow = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+      expect(bookingRow.status).toBe('CANCELLED');
+
+      await request(app.getHttpServer())
+        .post(cancelUrl)
+        .set(...authHeader('token-customer-a'))
+        .expect(200);
+      const recovered = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+      expect(recovered.status).toBe('REFUNDED');
+      expect(new Set(fakeProvider.refundCalls.map((call) => call.idempotencyKey))).toEqual(
+        new Set([`refund:${payment.id}`]),
+      );
     });
   });
 

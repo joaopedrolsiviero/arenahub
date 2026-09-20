@@ -17,10 +17,17 @@ function sign(dataId: string, requestId: string, ts: string): string {
 
 describe('PaymentsWebhookService', () => {
   let prisma: { paymentWebhookEvent: { create: jest.Mock; updateMany: jest.Mock } };
-  let paymentsService: { findByProviderPaymentId: jest.Mock; applyProviderStatus: jest.Mock };
+  let paymentsService: {
+    findByProviderPaymentId: jest.Mock;
+    applyProviderStatus: jest.Mock;
+    refundIfPaid: jest.Mock;
+  };
   let paymentProvider: { getPaymentStatus: jest.Mock };
   let pushNotificationsService: { notifyPaymentConfirmed: jest.Mock };
-  let whatsappNotificationsService: { notifyPaymentConfirmed: jest.Mock };
+  let whatsappNotificationsService: {
+    notifyPaymentConfirmed: jest.Mock;
+    notifyRefundConfirmed: jest.Mock;
+  };
   let service: PaymentsWebhookService;
 
   beforeEach(() => {
@@ -36,11 +43,13 @@ describe('PaymentsWebhookService', () => {
       // Default: nenhuma transição real (a maioria dos testes deste arquivo
       // não é sobre notificação) — os testes de M7 abaixo sobrescrevem isto.
       applyProviderStatus: jest.fn().mockResolvedValue({ transitioned: false, status: null }),
+      refundIfPaid: jest.fn().mockResolvedValue({ refunded: false }),
     };
     paymentProvider = { getPaymentStatus: jest.fn().mockResolvedValue({ status: 'PAID' }) };
     pushNotificationsService = { notifyPaymentConfirmed: jest.fn().mockResolvedValue(undefined) };
     whatsappNotificationsService = {
       notifyPaymentConfirmed: jest.fn().mockResolvedValue(undefined),
+      notifyRefundConfirmed: jest.fn().mockResolvedValue(undefined),
     };
 
     service = new PaymentsWebhookService(
@@ -257,6 +266,140 @@ describe('PaymentsWebhookService', () => {
         [{ data: { resultSummary: string } }],
       ];
       expect(updateManyArg.data.resultSummary).toBe('processed: PAID');
+    });
+  });
+
+  describe('handleEvent — reembolso automático de aprovação tardia sobre Booking já cancelada', () => {
+    const cancelledBooking = { id: 'booking-1', userId: 'user-1', status: 'CANCELLED' };
+    const lateOnCancelled = {
+      transitioned: true,
+      status: 'PAID',
+      // Nunca `booking` aqui: não é "pagamento confirmado" de uma reserva viva.
+      refundRequired: { bookingId: 'booking-1', booking: cancelledBooking },
+    };
+
+    it('aciona o refund idempotente (refundIfPaid) UMA vez e NUNCA notifica "pagamento confirmado" (push nem WhatsApp)', async () => {
+      paymentsService.applyProviderStatus.mockResolvedValue(lateOnCancelled);
+      paymentsService.findByProviderPaymentId
+        .mockResolvedValueOnce({ id: 'payment-1' })
+        .mockResolvedValueOnce({ id: 'payment-1', status: 'REFUNDED' });
+      paymentsService.refundIfPaid.mockResolvedValue({ refunded: true });
+
+      await service.handleEvent({ providerEventId: 'evt-1', providerPaymentId: 'mp-123' });
+
+      expect(paymentsService.refundIfPaid).toHaveBeenCalledTimes(1);
+      expect(paymentsService.refundIfPaid).toHaveBeenCalledWith('booking-1');
+      expect(pushNotificationsService.notifyPaymentConfirmed).not.toHaveBeenCalled();
+      expect(whatsappNotificationsService.notifyPaymentConfirmed).not.toHaveBeenCalled();
+    });
+
+    it('reembolso confirmado agora: notifica o reembolso via WhatsApp UMA vez', async () => {
+      paymentsService.applyProviderStatus.mockResolvedValue(lateOnCancelled);
+      paymentsService.findByProviderPaymentId
+        .mockResolvedValueOnce({ id: 'payment-1' })
+        .mockResolvedValueOnce({ id: 'payment-1', status: 'REFUNDED' });
+      paymentsService.refundIfPaid.mockResolvedValue({ refunded: true });
+
+      await service.handleEvent({ providerEventId: 'evt-1', providerPaymentId: 'mp-123' });
+
+      expect(whatsappNotificationsService.notifyRefundConfirmed).toHaveBeenCalledTimes(1);
+      expect(whatsappNotificationsService.notifyRefundConfirmed).toHaveBeenCalledWith(
+        cancelledBooking,
+      );
+    });
+
+    it('refund que NÃO concluiu (Payment continua PAID): loga em nível error com tag operacional, nunca notifica, e o evento é marcado como processado', async () => {
+      const errorSpy = jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
+      paymentsService.applyProviderStatus.mockResolvedValue(lateOnCancelled);
+      paymentsService.findByProviderPaymentId
+        .mockResolvedValueOnce({ id: 'payment-1' })
+        .mockResolvedValueOnce({ id: 'payment-1', status: 'PAID' });
+      paymentsService.refundIfPaid.mockResolvedValue({ refunded: false });
+
+      await service.handleEvent({ providerEventId: 'evt-1', providerPaymentId: 'mp-123' });
+
+      const logged = errorSpy.mock.calls.map((call) => String(call[0])).join('\n');
+      expect(logged).toContain('[late-approval][ACAO-OPERACIONAL]');
+      expect(logged).toContain('payment=payment-1');
+      expect(logged).toContain('booking=booking-1');
+      expect(whatsappNotificationsService.notifyRefundConfirmed).not.toHaveBeenCalled();
+      const [[updateManyArg]] = prisma.paymentWebhookEvent.updateMany.mock.calls as [
+        [{ data: { resultSummary: string } }],
+      ];
+      expect(updateManyArg.data.resultSummary).toBe('processed: PAID');
+      errorSpy.mockRestore();
+    });
+
+    it('REFUNDING COM refundId (provider aceitou, processando) é só um aviso — nunca o alarme operacional', async () => {
+      const errorSpy = jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
+      paymentsService.applyProviderStatus.mockResolvedValue(lateOnCancelled);
+      paymentsService.findByProviderPaymentId
+        .mockResolvedValueOnce({ id: 'payment-1' })
+        .mockResolvedValueOnce({ id: 'payment-1', status: 'REFUNDING', refundId: 'refund-1' });
+      paymentsService.refundIfPaid.mockResolvedValue({ refunded: false });
+
+      await service.handleEvent({ providerEventId: 'evt-1', providerPaymentId: 'mp-123' });
+
+      expect(errorSpy).not.toHaveBeenCalled();
+      errorSpy.mockRestore();
+    });
+
+    it('REFUNDING SEM refundId (a chamada ao provider falhou) continua sendo alarme operacional — nada foi confirmado pelo provider', async () => {
+      const errorSpy = jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
+      paymentsService.applyProviderStatus.mockResolvedValue(lateOnCancelled);
+      paymentsService.findByProviderPaymentId
+        .mockResolvedValueOnce({ id: 'payment-1' })
+        .mockResolvedValueOnce({ id: 'payment-1', status: 'REFUNDING', refundId: null });
+      paymentsService.refundIfPaid.mockResolvedValue({ refunded: false });
+
+      await service.handleEvent({ providerEventId: 'evt-1', providerPaymentId: 'mp-123' });
+
+      const logged = errorSpy.mock.calls.map((call) => String(call[0])).join('\n');
+      expect(logged).toContain('[late-approval][ACAO-OPERACIONAL]');
+      expect(logged).toContain('sem refundId');
+      errorSpy.mockRestore();
+    });
+
+    it('refundIfPaid lançando (nunca deveria) jamais propaga: o evento continua marcado como processado', async () => {
+      paymentsService.applyProviderStatus.mockResolvedValue(lateOnCancelled);
+      paymentsService.refundIfPaid.mockRejectedValue(new Error('provider fora do ar'));
+
+      await expect(
+        service.handleEvent({ providerEventId: 'evt-1', providerPaymentId: 'mp-123' }),
+      ).resolves.toBeUndefined();
+
+      const [[updateManyArg]] = prisma.paymentWebhookEvent.updateMany.mock.calls as [
+        [{ data: { resultSummary: string } }],
+      ];
+      expect(updateManyArg.data.resultSummary).toBe('processed: PAID');
+    });
+
+    it('reembolso confirmado mas Booking inexistente (booking null): nunca tenta notificar', async () => {
+      paymentsService.applyProviderStatus.mockResolvedValue({
+        transitioned: true,
+        status: 'PAID',
+        refundRequired: { bookingId: 'booking-1', booking: null },
+      });
+      paymentsService.findByProviderPaymentId
+        .mockResolvedValueOnce({ id: 'payment-1' })
+        .mockResolvedValueOnce({ id: 'payment-1', status: 'REFUNDED' });
+      paymentsService.refundIfPaid.mockResolvedValue({ refunded: true });
+
+      await service.handleEvent({ providerEventId: 'evt-1', providerPaymentId: 'mp-123' });
+
+      expect(whatsappNotificationsService.notifyRefundConfirmed).not.toHaveBeenCalled();
+    });
+
+    it('sem refundRequired (evento comum, ou corrida perdida) NUNCA aciona refund', async () => {
+      paymentsService.applyProviderStatus.mockResolvedValue({
+        transitioned: false,
+        status: 'PAID',
+        refundRequired: { bookingId: 'booking-1', booking: cancelledBooking },
+      });
+
+      await service.handleEvent({ providerEventId: 'evt-1', providerPaymentId: 'mp-123' });
+
+      expect(paymentsService.refundIfPaid).not.toHaveBeenCalled();
     });
   });
 });

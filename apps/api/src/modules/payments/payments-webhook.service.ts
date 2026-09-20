@@ -1,7 +1,8 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Injectable, Logger } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Booking, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { RequestContext } from '../../common/request-context';
 import { PaymentsService } from './payments.service';
 import { PaymentProvider } from './providers/payment-provider';
 import { PushNotificationsService } from '../notifications/push-notifications.service';
@@ -181,6 +182,20 @@ export class PaymentsWebhookService {
         }
       }
 
+      // Aprovação tardia sobre uma Booking JÁ cancelada: o provider recebeu
+      // dinheiro real e o Payment ficou PAID (ver `applyProviderStatus`).
+      // Aciona o MESMO refund idempotente de qualquer cancelamento de
+      // reserva paga (`refundIfPaid`: advisory lock + CAS + idempotency key
+      // estável no provider) — nunca dentro da transação do Payment, e nunca
+      // uma notificação de "pagamento confirmado" (a reserva não existe mais).
+      if (applyResult.transitioned && applyResult.refundRequired) {
+        await this.refundLateApproval(
+          payment.id,
+          notification.providerPaymentId,
+          applyResult.refundRequired,
+        );
+      }
+
       await this.markEvent(notification.providerEventId, `processed: ${providerResult.status}`);
     } catch (error) {
       this.logger.error(
@@ -189,6 +204,69 @@ export class PaymentsWebhookService {
         }`,
       );
       await this.markEvent(notification.providerEventId, 'error');
+    }
+  }
+
+  /**
+   * Reembolso automático de um pagamento aprovado tardiamente para uma
+   * Booking já cancelada. Nunca lança (o webhook já está confirmado) e nunca
+   * deixa o dinheiro "esquecido": o Payment permanece PAID/REFUNDING (visível
+   * em `getPaymentForBooking`) e cada desfecho é logado com paymentId,
+   * bookingId e requestId. Falha = estado recuperável — `refundIfPaid` é
+   * idempotente (mesma idempotency key `refund:${paymentId}` no provider),
+   * então repetir o cancelamento da Booking (POST .../cancel, idempotente)
+   * refaz a tentativa sem risco de segundo reembolso.
+   */
+  private async refundLateApproval(
+    paymentId: string,
+    providerPaymentId: string,
+    required: { bookingId: string; booking: Booking | null },
+  ): Promise<void> {
+    const context = `payment=${paymentId} booking=${required.bookingId} requestId=${
+      RequestContext.getRequestId() ?? 'n/a'
+    }`;
+    let refunded = false;
+    try {
+      refunded = (await this.paymentsService.refundIfPaid(required.bookingId)).refunded;
+    } catch (error) {
+      this.logger.error(
+        `[late-approval][ACAO-OPERACIONAL] ${context}: falha inesperada ao solicitar o reembolso automático: ${
+          error instanceof Error ? error.message : 'erro desconhecido'
+        }`,
+      );
+    }
+
+    const current = await this.paymentsService.findByProviderPaymentId(providerPaymentId);
+    if (current?.status === 'REFUNDED') {
+      this.logger.warn(`[late-approval] ${context}: reembolso automático confirmado.`);
+    } else if (current?.status === 'REFUNDING' && current.refundId) {
+      // Só um REFUNDING COM `refundId` significa "o provider aceitou o pedido
+      // e ainda está processando" (reconciliado lazily na próxima leitura).
+      this.logger.warn(
+        `[late-approval] ${context}: reembolso automático solicitado, aguardando confirmação do provider (reconciliado na próxima leitura do Payment).`,
+      );
+    } else {
+      // PAID, ou REFUNDING SEM `refundId` (reivindicado localmente mas a
+      // chamada ao provider falhou/deu timeout): nada foi confirmado. O
+      // estado é recuperável e o Payment segue visível para a Booking.
+      this.logger.error(
+        `[late-approval][ACAO-OPERACIONAL] ${context}: reembolso automático NÃO concluído — o Payment permanece ${
+          current?.status ?? 'desconhecido'
+        }${current?.status === 'REFUNDING' ? ' (sem refundId: o pedido ao provider não foi confirmado)' : ''}. ` +
+          `Repita o cancelamento da reserva (idempotente, mesma idempotency key no provider) ou reembolse manualmente.`,
+      );
+    }
+
+    if (refunded && required.booking) {
+      try {
+        await this.whatsappNotificationsService.notifyRefundConfirmed(required.booking);
+      } catch (error) {
+        this.logger.error(
+          `Falha ao notificar reembolso via WhatsApp da Booking ${required.bookingId}: ${
+            error instanceof Error ? error.message : 'erro desconhecido'
+          }`,
+        );
+      }
     }
   }
 
