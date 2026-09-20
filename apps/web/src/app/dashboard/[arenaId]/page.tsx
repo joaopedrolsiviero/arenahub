@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, use, useEffect } from 'react';
+import { Suspense, use, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useArena, useDashboard, useMyAdminArenas } from '@/hooks/use-api';
@@ -15,6 +15,8 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { RequireAuth } from '@/components/require-auth';
 import { ApiError } from '@/lib/api';
+import { formatTimeInZone } from '@/lib/format';
+import type { DashboardBookingItem } from '@/lib/types';
 
 export function DashboardOverview({ arenaId }: { arenaId: string }) {
   const router = useRouter();
@@ -24,6 +26,7 @@ export function DashboardOverview({ arenaId }: { arenaId: string }) {
   const { data: adminArenas } = useMyAdminArenas();
   const { data: dashboard, isPending, isError, error } = useDashboard(arenaId, dateParam);
   const { data: arena } = useArena(arenaId);
+  const [cancelNotice, setCancelNotice] = useState<string | null>(null);
 
   // Sem ?date na URL: o backend já resolveu "hoje no timezone da arena"
   // (item 14 da Fase 7) — só refletimos essa escolha na URL depois,
@@ -71,6 +74,15 @@ export function DashboardOverview({ arenaId }: { arenaId: string }) {
 
   const isClosedToday = dashboard.operatingHours.length === 0;
 
+  function handleBookingCancelled(booking: DashboardBookingItem) {
+    const who = booking.user?.name ?? booking.user?.email ?? 'cliente';
+    const wasPaid = booking.paymentStatus === 'PAID' || booking.paymentStatus === 'REFUNDING';
+    setCancelNotice(
+      `${booking.courtName} às ${formatTimeInZone(booking.startsAt, dashboard!.arena.timezone)} (${who}) foi cancelada e o horário foi liberado.` +
+        (wasPaid ? ' O reembolso foi solicitado — acompanhe o status do pagamento.' : ''),
+    );
+  }
+
   return (
     <>
       <DashboardHeader
@@ -107,6 +119,13 @@ export function DashboardOverview({ arenaId }: { arenaId: string }) {
           </Alert>
         ) : null}
 
+        {cancelNotice ? (
+          <Alert role="status" className="border-brand/30 bg-brand/8">
+            <AlertTitle>Reserva cancelada</AlertTitle>
+            <AlertDescription>{cancelNotice}</AlertDescription>
+          </Alert>
+        ) : null}
+
         <DashboardSummaryCards summary={dashboard.summary} />
 
         {/* Ocupação por quadra é a informação prioritária (item 20-21) — vem
@@ -127,16 +146,23 @@ export function DashboardOverview({ arenaId }: { arenaId: string }) {
               {dashboard.courts.map((court) => (
                 <BookingTimelineCard
                   key={court.id}
+                  arenaId={arenaId}
                   court={court}
                   operatingHours={dashboard.operatingHours}
                   timezone={dashboard.arena.timezone}
+                  onBookingCancelled={handleBookingCancelled}
                 />
               ))}
             </div>
           )}
         </div>
 
-        <UpcomingBookings bookings={dashboard.upcomingBookings} timezone={dashboard.arena.timezone} />
+        <UpcomingBookings
+          arenaId={arenaId}
+          bookings={dashboard.upcomingBookings}
+          timezone={dashboard.arena.timezone}
+          onBookingCancelled={handleBookingCancelled}
+        />
       </div>
     </>
   );

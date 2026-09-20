@@ -1,7 +1,11 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { BookingStatus, BookingType, Prisma } from '@prisma/client';
+import { BookingStatus, BookingType, PaymentStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ListCustomersQueryDto } from './dto/list-customers-query.dto';
+import {
+  paymentDisplaySelect,
+  resolveAdminPaymentStatus,
+} from '../payments/payment-display-status';
 
 // Fase 14: "cliente da arena" — usuário que possui ou possuiu pelo menos uma
 // Booking type=CUSTOMER numa quadra desta arena. Nunca uma entidade nova no
@@ -35,6 +39,8 @@ export interface CustomerBookingItem {
   endsAt: Date;
   total: Prisma.Decimal;
   court: { id: string; name: string };
+  // Status do pagamento (só leitura); `null` = sem Payment.
+  paymentStatus: PaymentStatus | null;
 }
 
 interface StatusAggregate {
@@ -219,6 +225,7 @@ export class CustomersService {
         endsAt: true,
         total: true,
         court: { select: { id: true, name: true } },
+        payments: { select: paymentDisplaySelect },
       },
       orderBy: { startsAt: 'desc' },
     });
@@ -227,7 +234,10 @@ export class CustomersService {
       throw new NotFoundException('Cliente não encontrado nesta arena.');
     }
 
-    return bookings;
+    return bookings.map(({ payments, ...booking }) => ({
+      ...booking,
+      paymentStatus: resolveAdminPaymentStatus(payments),
+    }));
   }
 
   private groupStatusAggregates(

@@ -43,6 +43,7 @@ const BOOKING = {
   endsAt: '2026-08-24T23:00:00.000Z',
   total: '75',
   court: { id: 'court-1', name: 'Quadra 2' },
+  paymentStatus: null,
 };
 
 function renderPage() {
@@ -92,6 +93,23 @@ describe('CustomerDetail', () => {
     expect(await screen.findByText('Quadra 2')).toBeInTheDocument();
     expect(screen.getByText('R$ 75,00')).toBeInTheDocument();
     expect(screen.getByText('Confirmada')).toBeInTheDocument();
+  });
+
+  it('mostra o status do pagamento de cada reserva do histórico (e nada quando não há Payment)', async () => {
+    mockedUseArenaCustomer.mockReturnValue({ data: CUSTOMER, isPending: false, isError: false });
+    mockedUseArenaCustomerBookings.mockReturnValue({
+      data: [
+        { ...BOOKING, id: 'b-paid', paymentStatus: 'PAID' },
+        { ...BOOKING, id: 'b-refunded', paymentStatus: 'REFUNDED' },
+        { ...BOOKING, id: 'b-none', paymentStatus: null },
+      ],
+      isPending: false,
+    });
+    renderPage();
+
+    expect(await screen.findByText(/^pago$/i)).toBeInTheDocument();
+    expect(screen.getByText(/reembolsado/i)).toBeInTheDocument();
+    expect(screen.queryByText(/aguardando pagamento/i)).not.toBeInTheDocument();
   });
 
   it('mostra estado vazio quando o histórico não tem reservas', async () => {

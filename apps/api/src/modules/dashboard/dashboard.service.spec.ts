@@ -40,6 +40,7 @@ describe('DashboardService', () => {
       reason: null,
       court: { name: 'Quadra 1' },
       user: { id: 'user-1', name: 'Cliente', email: 'cliente@example.com' },
+      payments: [],
       ...overrides,
     };
   }
@@ -179,6 +180,46 @@ describe('DashboardService', () => {
     const result = await service.getDashboard('arena-1', '2026-08-20');
 
     expect(result.operatingHours).toEqual([]);
+  });
+
+  it('expõe paymentStatus derivado dos Payment reais: null sem Payment, PAID tem precedência sobre tentativa mais nova, PENDING vencido aparece EXPIRED', async () => {
+    const past = new Date(Date.now() - 60_000);
+    const future = new Date(Date.now() + 60 * 60_000);
+    prisma.booking.findMany.mockResolvedValue([
+      booking({ id: 'sem-pagamento', payments: [] }),
+      booking({
+        id: 'pago-e-pendente-novo',
+        payments: [
+          { status: 'PAID', expiresAt: past, createdAt: new Date('2026-08-20T10:00:00Z') },
+          { status: 'PENDING', expiresAt: future, createdAt: new Date('2026-08-20T11:00:00Z') },
+        ],
+      }),
+      booking({
+        id: 'pix-abandonado',
+        payments: [{ status: 'PENDING', expiresAt: past, createdAt: new Date() }],
+      }),
+      booking({
+        id: 'pix-no-prazo',
+        payments: [{ status: 'PENDING', expiresAt: future, createdAt: new Date() }],
+      }),
+      booking({
+        id: 'reembolsando',
+        payments: [{ status: 'REFUNDING', expiresAt: null, createdAt: new Date() }],
+      }),
+    ]);
+
+    const result = await service.getDashboard('arena-1', '2026-08-20');
+
+    const byId = Object.fromEntries(result.upcomingBookings.map((b) => [b.id, b.paymentStatus]));
+    expect(byId).toEqual({
+      'sem-pagamento': null,
+      'pago-e-pendente-novo': 'PAID',
+      'pix-abandonado': 'EXPIRED',
+      'pix-no-prazo': 'PENDING',
+      reembolsando: 'REFUNDING',
+    });
+    // Nunca vaza a lista crua de Payment (nem providerPaymentId etc.).
+    expect(result.upcomingBookings[0]).not.toHaveProperty('payments');
   });
 
   it('upcomingBookings inclui todos os tipos CONFIRMED do dia, ordenados', async () => {

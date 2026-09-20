@@ -1,10 +1,14 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { BookingStatus, BookingType, Prisma, Sport } from '@prisma/client';
+import { BookingStatus, BookingType, PaymentStatus, Prisma, Sport } from '@prisma/client';
 import { DateTime } from 'luxon';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CourtsService } from '../courts/courts.service';
 import { OperatingHoursService } from '../operating-hours/operating-hours.service';
 import { OperatingIntervalView, weekdayFromIso } from '../operating-hours/operating-hours.util';
+import {
+  paymentDisplaySelect,
+  resolveAdminPaymentStatus,
+} from '../payments/payment-display-status';
 
 // Item minimamente necessário para operar o dia — nunca a entidade Prisma
 // crua (item 60 da Fase 7). `user`/`reason` seguem o mesmo padrão de
@@ -22,6 +26,9 @@ export interface DashboardBookingItem {
   total: Prisma.Decimal;
   reason: string | null;
   user: { id: string; name: string | null; email: string } | null;
+  // Status do pagamento (só leitura, derivado dos Payment reais). `null` =
+  // sem Payment (arena presencial, BLOCK/MAINTENANCE ou PIX ainda não gerado).
+  paymentStatus: PaymentStatus | null;
 }
 
 export interface DashboardCourt {
@@ -66,6 +73,7 @@ const bookingSelect = {
   reason: true,
   court: { select: { name: true } },
   user: { select: { id: true, name: true, email: true } },
+  payments: { select: paymentDisplaySelect },
 } satisfies Prisma.BookingSelect;
 
 type RawBooking = Prisma.BookingGetPayload<{ select: typeof bookingSelect }>;
@@ -82,6 +90,7 @@ function toDashboardBookingItem(booking: RawBooking): DashboardBookingItem {
     total: booking.total,
     reason: booking.reason,
     user: booking.user,
+    paymentStatus: resolveAdminPaymentStatus(booking.payments),
   };
 }
 

@@ -1,6 +1,11 @@
 import { render, screen } from '@testing-library/react';
 import { DashboardOverview } from './page';
-import { useArena, useDashboard, useMyAdminArenas } from '../../../hooks/use-api';
+import {
+  useArena,
+  useCancelBooking,
+  useDashboard,
+  useMyAdminArenas,
+} from '../../../hooks/use-api';
 import { ApiError } from '../../../lib/api';
 import type { DashboardResponse } from '../../../lib/types';
 
@@ -18,11 +23,13 @@ jest.mock('../../../hooks/use-api', () => ({
   useDashboard: jest.fn(),
   useMyAdminArenas: jest.fn(),
   useArena: jest.fn(),
+  useCancelBooking: jest.fn(),
 }));
 
 const mockedUseDashboard = useDashboard as jest.Mock;
 const mockedUseMyAdminArenas = useMyAdminArenas as jest.Mock;
 const mockedUseArena = useArena as jest.Mock;
+const mockedUseCancelBooking = useCancelBooking as jest.Mock;
 
 const baseDashboard: DashboardResponse = {
   arena: { id: 'arena-1', name: 'Arena Central', timezone: 'America/Sao_Paulo' },
@@ -47,6 +54,7 @@ const baseDashboard: DashboardResponse = {
           total: '100',
           reason: null,
           user: { id: 'user-1', name: 'Cliente Teste', email: 'cliente@example.com' },
+          paymentStatus: 'PENDING',
         },
       ],
     },
@@ -70,6 +78,7 @@ const baseDashboard: DashboardResponse = {
       total: '100',
       reason: null,
       user: { id: 'user-1', name: 'Cliente Teste', email: 'cliente@example.com' },
+      paymentStatus: 'PENDING',
     },
   ],
 };
@@ -80,6 +89,7 @@ describe('DashboardOverview', () => {
     searchParamsValue = new URLSearchParams({ date: '2026-08-20' });
     mockedUseMyAdminArenas.mockReturnValue({ data: [] });
     mockedUseArena.mockReturnValue({ data: undefined });
+    mockedUseCancelBooking.mockReturnValue({ isPending: false, mutateAsync: jest.fn() });
   });
 
   it('mostra o estado de carregamento', () => {
@@ -125,6 +135,30 @@ describe('DashboardOverview', () => {
 
     // 13:00 UTC = 10:00 em America/Sao_Paulo (UTC-3).
     expect(screen.getAllByText('10:00').length).toBeGreaterThan(0);
+  });
+
+  it('a agenda mostra o status de pagamento de cada reserva de cliente (na ocupação da quadra e em próximas reservas); reserva sem Payment é identificada', () => {
+    const withStatus = (id: string, paymentStatus: DashboardResponse['upcomingBookings'][0]['paymentStatus']) => ({
+      ...baseDashboard.upcomingBookings[0]!,
+      id,
+      paymentStatus,
+    });
+    const items = [withStatus('b-paid', 'PAID'), withStatus('b-exp', 'EXPIRED')];
+    mockedUseDashboard.mockReturnValue({
+      data: {
+        ...baseDashboard,
+        courts: [{ ...baseDashboard.courts[0]!, occupancy: items }],
+        upcomingBookings: [...items, withStatus('b-none', null)],
+      },
+      isPending: false,
+      isError: false,
+    });
+    render(<DashboardOverview arenaId="arena-1" />);
+
+    // PAID e EXPIRED aparecem na agenda por quadra E na lista de próximas reservas.
+    expect(screen.getAllByText(/^pago$/i)).toHaveLength(2);
+    expect(screen.getAllByText(/expirado/i)).toHaveLength(2);
+    expect(screen.getAllByText(/sem pagamento online/i)).toHaveLength(1);
   });
 
   it('mostra "Arena fechada" quando não há operatingHours para o dia', () => {

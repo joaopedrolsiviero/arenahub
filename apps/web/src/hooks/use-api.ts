@@ -431,6 +431,15 @@ export function useCancelBooking() {
       // esperar o próximo poll (que só existe enquanto PENDING/REFUNDING).
       await queryClient.invalidateQueries({ queryKey: ['booking-payment', variables.bookingId] });
     },
+    // Painel administrativo (OWNER/ADMIN cancelando reserva de cliente):
+    // refaz a agenda e o histórico do cliente mesmo quando o backend recusou
+    // (400/404/409 = estado já mudou), pra o operador ver o estado real.
+    onSettled: async (_result, _error, variables) => {
+      await queryClient.invalidateQueries({ queryKey: ['dashboard', variables.arenaId] });
+      await queryClient.invalidateQueries({
+        queryKey: ['arena-customer-bookings', variables.arenaId],
+      });
+    },
   });
 }
 

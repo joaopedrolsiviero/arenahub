@@ -214,6 +214,7 @@ describe('CustomersService', () => {
           endsAt: new Date(),
           total: 75,
           court: { id: 'court-1', name: 'Quadra 1' },
+          payments: [],
         },
       ]);
 
@@ -225,6 +226,28 @@ describe('CustomersService', () => {
           orderBy: { startsAt: 'desc' },
         }),
       );
+    });
+
+    it('devolve paymentStatus por reserva (null sem Payment) sem expor a lista de Payment', async () => {
+      const base = { status: BookingStatus.CONFIRMED, startsAt: new Date(), endsAt: new Date() };
+      prisma.booking.findMany.mockResolvedValue([
+        { ...base, id: 'b1', total: 75, court: { id: 'c', name: 'Q' }, payments: [] },
+        {
+          ...base,
+          id: 'b2',
+          total: 75,
+          court: { id: 'c', name: 'Q' },
+          payments: [{ status: 'REFUNDED', expiresAt: null, createdAt: new Date() }],
+        },
+      ]);
+
+      const result = await service.getCustomerBookings('arena-1', 'user-1');
+
+      expect(result.map((b) => [b.id, b.paymentStatus])).toEqual([
+        ['b1', null],
+        ['b2', 'REFUNDED'],
+      ]);
+      expect(result[0]).not.toHaveProperty('payments');
     });
 
     it('lança NotFoundException quando o cliente não tem reservas nesta arena', async () => {

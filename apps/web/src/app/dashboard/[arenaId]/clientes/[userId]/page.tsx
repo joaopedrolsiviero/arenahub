@@ -7,6 +7,7 @@ import { DashboardHeader } from '@/components/dashboard-header';
 import { LoadingState, ErrorState, EmptyState } from '@/components/async-state';
 import { RequireAuth } from '@/components/require-auth';
 import { BookingStatusBadge } from '@/components/booking-status-badge';
+import { PaymentStatusBadge } from '@/components/payment-status-badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
@@ -102,11 +103,14 @@ export function CustomerDetail({ arenaId, userId }: { arenaId: string; userId: s
                         </span>
                         <span className="text-xs text-muted-foreground">{booking.court.name}</span>
                       </div>
-                      <div className="flex items-center gap-2.5">
+                      <div className="flex flex-wrap items-center justify-end gap-2.5">
                         <span className="tabular text-sm font-semibold">
                           {formatCurrencyBRL(booking.total)}
                         </span>
                         <BookingStatusBadge status={booking.status} />
+                        {booking.paymentStatus ? (
+                          <PaymentStatusBadge status={booking.paymentStatus} />
+                        ) : null}
                       </div>
                     </div>
                   </div>

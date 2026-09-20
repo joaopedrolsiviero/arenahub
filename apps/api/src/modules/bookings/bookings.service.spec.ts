@@ -471,6 +471,26 @@ describe('BookingsService', () => {
       expect(call.select.userId).toBe(true);
       expect(call.select.user).toBeDefined();
     });
+
+    it('inclui paymentStatus derivado do Payment (null sem Payment) e nunca a lista crua', async () => {
+      const row = { id: 'b', status: 'CONFIRMED', type: 'CUSTOMER' };
+      prisma.booking.findMany.mockResolvedValue([
+        { ...row, id: 'b1', payments: [] },
+        {
+          ...row,
+          id: 'b2',
+          payments: [{ status: 'FAILED', expiresAt: null, createdAt: new Date() }],
+        },
+      ]);
+
+      const result = await service.findManyAdmin('arena-1', 'court-1', from, to);
+
+      expect(result.map((b) => [b.id, b.paymentStatus])).toEqual([
+        ['b1', null],
+        ['b2', 'FAILED'],
+      ]);
+      expect(result[0]).not.toHaveProperty('payments');
+    });
   });
 
   describe('findMyBookings', () => {

@@ -5,7 +5,19 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { ArenaRole, BookingStatus, BookingType, PaymentMode, Prisma, Sport } from '@prisma/client';
+import {
+  ArenaRole,
+  BookingStatus,
+  BookingType,
+  PaymentMode,
+  PaymentStatus,
+  Prisma,
+  Sport,
+} from '@prisma/client';
+import {
+  paymentDisplaySelect,
+  resolveAdminPaymentStatus,
+} from '../payments/payment-display-status';
 import type { Booking, Court } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CourtsService } from '../courts/courts.service';
@@ -38,6 +50,8 @@ export interface BookingDetailed extends BookingOccupancy {
   cancelledByUserId: string | null;
   createdAt: Date;
   user: { id: string; name: string | null; email: string } | null;
+  // Status do pagamento (só leitura); `null` = sem Payment.
+  paymentStatus: PaymentStatus | null;
 }
 
 // "Minhas reservas" (Fase 6) — enriquecido com court/arena (nome, sport,
@@ -285,7 +299,7 @@ export class BookingsService {
     await this.courtsService.findOne(arenaId, courtId);
     this.assertValidWindow(from, to);
 
-    return this.prisma.booking.findMany({
+    const rows = await this.prisma.booking.findMany({
       where: { courtId, startsAt: { lt: to }, endsAt: { gt: from } },
       select: {
         id: true,
@@ -301,9 +315,14 @@ export class BookingsService {
         cancelledByUserId: true,
         createdAt: true,
         user: { select: { id: true, name: true, email: true } },
+        payments: { select: paymentDisplaySelect },
       },
       orderBy: { startsAt: 'asc' },
     });
+    return rows.map(({ payments, ...booking }) => ({
+      ...booking,
+      paymentStatus: resolveAdminPaymentStatus(payments),
+    }));
   }
 
   // "Minhas reservas" (Fase 6, item 56-57): filtra por userId NO BANCO

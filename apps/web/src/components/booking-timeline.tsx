@@ -2,10 +2,11 @@ import { DateTime } from 'luxon';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle, CardAction } from '@/components/ui/card';
 import { BookingTypeBadge } from '@/components/booking-type-badge';
+import { AdminBookingActions } from '@/components/admin-booking-actions';
 import { EmptyState } from '@/components/async-state';
 import { formatCurrencyBRL, formatTimeInZone } from '@/lib/format';
 import { cn } from '@/lib/utils';
-import type { DashboardCourt, OperatingInterval } from '@/lib/types';
+import type { DashboardBookingItem, DashboardCourt, OperatingInterval } from '@/lib/types';
 
 function minutesInZone(iso: string, timezone: string): number {
   const dt = DateTime.fromISO(iso, { zone: 'utc' }).setZone(timezone);
@@ -96,13 +97,17 @@ function CourtOccupancyBar({
 }
 
 export function BookingTimelineCard({
+  arenaId,
   court,
   operatingHours,
   timezone,
+  onBookingCancelled,
 }: {
+  arenaId: string;
   court: DashboardCourt;
   operatingHours: OperatingInterval[];
   timezone: string;
+  onBookingCancelled?: (booking: DashboardBookingItem) => void;
 }) {
   return (
     <Card className={!court.isActive ? 'opacity-70' : undefined}>
@@ -122,21 +127,29 @@ export function BookingTimelineCard({
             {court.occupancy.map((item) => (
               <li
                 key={item.id}
-                className="flex items-center justify-between gap-2 rounded-md border border-border px-2.5 py-1.5 text-sm"
+                className="flex flex-col gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-sm"
               >
-                <span className="tabular font-semibold">
-                  {formatTimeInZone(item.startsAt, timezone)}–
-                  {formatTimeInZone(item.endsAt, timezone)}
-                </span>
-                <span className="flex-1 truncate text-muted-foreground">
-                  {item.type === 'CUSTOMER'
-                    ? (item.user?.name ?? item.user?.email ?? 'Cliente')
-                    : (item.reason ?? '—')}
-                </span>
-                <BookingTypeBadge type={item.type} />
-                {item.type === 'CUSTOMER' ? (
-                  <span className="tabular text-sm font-semibold">{formatCurrencyBRL(item.total)}</span>
-                ) : null}
+                <div className="flex items-center justify-between gap-2">
+                  <span className="tabular font-semibold">
+                    {formatTimeInZone(item.startsAt, timezone)}–
+                    {formatTimeInZone(item.endsAt, timezone)}
+                  </span>
+                  <span className="flex-1 truncate text-muted-foreground">
+                    {item.type === 'CUSTOMER'
+                      ? (item.user?.name ?? item.user?.email ?? 'Cliente')
+                      : (item.reason ?? '—')}
+                  </span>
+                  <BookingTypeBadge type={item.type} />
+                  {item.type === 'CUSTOMER' ? (
+                    <span className="tabular text-sm font-semibold">{formatCurrencyBRL(item.total)}</span>
+                  ) : null}
+                </div>
+                <AdminBookingActions
+                  booking={item}
+                  arenaId={arenaId}
+                  timezone={timezone}
+                  onCancelled={onBookingCancelled}
+                />
               </li>
             ))}
           </ul>

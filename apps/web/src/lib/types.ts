@@ -194,6 +194,8 @@ export interface DashboardBookingItem {
   total: string;
   reason: string | null;
   user: { id: string; name: string | null; email: string } | null;
+  // Status do pagamento (só leitura); null = sem Payment (presencial, BLOCK/MAINTENANCE ou PIX ainda não gerado).
+  paymentStatus: PaymentStatus | null;
 }
 
 export interface DashboardCourt {
@@ -310,6 +312,7 @@ export interface CustomerBookingItem {
   endsAt: string;
   total: string;
   court: { id: string; name: string };
+  paymentStatus: PaymentStatus | null;
 }
 
 // Fase 15: relatórios operacionais — só leitura, camada de apresentação

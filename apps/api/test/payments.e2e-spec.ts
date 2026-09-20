@@ -106,6 +106,7 @@ const CUSTOMER_A = { clerkId: 'user_e2e_pay_customer_a', email: 'pay-e2e-custome
 const CUSTOMER_C = { clerkId: 'user_e2e_pay_customer_c', email: 'pay-e2e-customer-c@example.com' };
 const OWNER_B = { clerkId: 'user_e2e_pay_owner_b', email: 'pay-e2e-owner-b@example.com' };
 const CUSTOMER_B = { clerkId: 'user_e2e_pay_customer_b', email: 'pay-e2e-customer-b@example.com' };
+const ADMIN_A = { clerkId: 'user_e2e_pay_admin_a', email: 'pay-e2e-admin-a@example.com' };
 
 const TOKENS: Record<string, string> = {
   'token-owner-a': OWNER_A.clerkId,
@@ -113,6 +114,7 @@ const TOKENS: Record<string, string> = {
   'token-customer-c': CUSTOMER_C.clerkId,
   'token-owner-b': OWNER_B.clerkId,
   'token-customer-b': CUSTOMER_B.clerkId,
+  'token-admin-a': ADMIN_A.clerkId,
 };
 
 function authHeader(token: keyof typeof TOKENS): [string, string] {
@@ -192,6 +194,7 @@ describe('Pagamentos (e2e)', () => {
     const ownerB = await prisma.user.create({ data: OWNER_B });
     const customerB = await prisma.user.create({ data: CUSTOMER_B });
     customerBId = customerB.id;
+    const adminA = await prisma.user.create({ data: ADMIN_A });
 
     const arenaA = await prisma.arena.create({
       data: { name: 'Arena Pagamentos A', slug: 'pay-e2e-arena-a', timezone: 'America/Sao_Paulo' },
@@ -199,6 +202,9 @@ describe('Pagamentos (e2e)', () => {
     arenaAId = arenaA.id;
     await prisma.arenaMember.create({
       data: { arenaId: arenaAId, userId: ownerA.id, role: ArenaRole.OWNER },
+    });
+    await prisma.arenaMember.create({
+      data: { arenaId: arenaAId, userId: adminA.id, role: ArenaRole.ADMIN },
     });
     const courtA = await prisma.court.create({
       data: {
@@ -1264,6 +1270,226 @@ describe('Pagamentos (e2e)', () => {
         .expect(200);
 
       expect((response.body as Record<string, string>)[bookingSemPagamento.id]).toBeUndefined();
+    });
+  });
+  // Fase "blocker operacional primeira venda ONLINE": o painel administrativo
+  // passa a mostrar o status do Payment e a cancelar reservas de cliente pelo
+  // MESMO endpoint de sempre. Payment criado pelo PaymentsService real (não
+  // HTTP, só p/ preservar o orçamento de 30 POST/min do throttler) e PAID via
+  // webhook real; o único fake é o provider.
+  describe('Painel administrativo — status de pagamento e cancelamento por OWNER/ADMIN', () => {
+    function dayInArenaTz(date: Date): string {
+      return date.toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+    }
+    function dashboardUrl(arenaId: string, date: Date) {
+      return `/v1/arenas/${arenaId}/dashboard?date=${dayInArenaTz(date)}`;
+    }
+    function cancelUrl(booking: { id: string; courtId: string }, arenaId = arenaAId) {
+      return `/v1/arenas/${arenaId}/courts/${booking.courtId}/bookings/${booking.id}/cancel`;
+    }
+    async function payViaWebhook(providerPaymentId: string) {
+      fakeProvider.statusByProviderPaymentId.set(providerPaymentId, 'PAID');
+      const ts = String(Math.floor(Date.now() / 1000));
+      const requestId = randomUUID();
+      await request(app.getHttpServer())
+        .post('/v1/webhooks/payments/mercadopago')
+        .set('x-signature', signWebhook(providerPaymentId, requestId, ts))
+        .set('x-request-id', requestId)
+        .send({ id: randomUUID(), type: 'payment', data: { id: providerPaymentId } })
+        .expect(200);
+    }
+    async function bookingWithPayment(hoursFromNow: number) {
+      const booking = await createConfirmedBooking(courtAId, customerAId, hoursFromNow);
+      const view = await app
+        .get(PaymentsService)
+        .createPayment(customerAId, booking.id, randomUUID());
+      const payment = await prisma.payment.findUniqueOrThrow({ where: { id: view.id } });
+      return { booking, payment };
+    }
+    type DashboardItem = { id: string; paymentStatus: string | null };
+    async function dashboardItems(arenaId: string, date: Date, token: keyof typeof TOKENS) {
+      const response = await request(app.getHttpServer())
+        .get(dashboardUrl(arenaId, date))
+        .set(...authHeader(token))
+        .expect(200);
+      const body = response.body as { upcomingBookings: DashboardItem[] };
+      return Object.fromEntries(body.upcomingBookings.map((b) => [b.id, b.paymentStatus]));
+    }
+
+    it('dashboard mostra o status real de cada reserva: sem Payment=null, PENDING, PENDING vencido=EXPIRED (sem escrever no banco) e PAID', async () => {
+      const semPagamento = await createConfirmedBooking(courtAId, customerAId, 200);
+      const pendente = await bookingWithPayment(202);
+      const abandonado = await bookingWithPayment(204);
+      await prisma.payment.update({
+        where: { id: abandonado.payment.id },
+        data: { expiresAt: new Date(Date.now() - 60_000) },
+      });
+      const pago = await bookingWithPayment(206);
+      await payViaWebhook(pago.payment.providerPaymentId!);
+
+      const items = {
+        ...(await dashboardItems(arenaAId, semPagamento.startsAt, 'token-owner-a')),
+        ...(await dashboardItems(arenaAId, pendente.booking.startsAt, 'token-owner-a')),
+        ...(await dashboardItems(arenaAId, abandonado.booking.startsAt, 'token-owner-a')),
+        ...(await dashboardItems(arenaAId, pago.booking.startsAt, 'token-owner-a')),
+      };
+
+      expect(items[semPagamento.id]).toBeNull();
+      expect(items[pendente.booking.id]).toBe('PENDING');
+      expect(items[abandonado.booking.id]).toBe('EXPIRED');
+      expect(items[pago.booking.id]).toBe('PAID');
+      // EXPIRED é só apresentação: a expiração real continua lazy do lado do cliente.
+      const untouched = await prisma.payment.findUniqueOrThrow({
+        where: { id: abandonado.payment.id },
+      });
+      expect(untouched.status).toBe('PENDING');
+    });
+
+    it('ADMIN também vê o status; OWNER de outra arena e CUSTOMER não acessam o dashboard (403)', async () => {
+      const { booking } = await bookingWithPayment(208);
+
+      const asAdmin = await dashboardItems(arenaAId, booking.startsAt, 'token-admin-a');
+      expect(asAdmin[booking.id]).toBe('PENDING');
+      await request(app.getHttpServer())
+        .get(dashboardUrl(arenaAId, booking.startsAt))
+        .set(...authHeader('token-owner-b'))
+        .expect(403);
+      await request(app.getHttpServer())
+        .get(dashboardUrl(arenaAId, booking.startsAt))
+        .set(...authHeader('token-customer-a'))
+        .expect(403);
+    });
+
+    it('A expirou, B foi gerado e A foi pago tardiamente: o painel mostra PAID (precedência), nunca o PENDING de B', async () => {
+      const booking = await createConfirmedBooking(courtAId, customerAId, 210);
+      const service = app.get(PaymentsService);
+      const viewA = await service.createPayment(customerAId, booking.id, randomUUID());
+      await prisma.payment.update({
+        where: { id: viewA.id },
+        data: { expiresAt: new Date(Date.now() - 1000) },
+      });
+      await service.createPayment(customerAId, booking.id, randomUUID()); // B (expira A lazy)
+      const rowA = await prisma.payment.findUniqueOrThrow({ where: { id: viewA.id } });
+      await payViaWebhook(rowA.providerPaymentId!);
+
+      const items = await dashboardItems(arenaAId, booking.startsAt, 'token-owner-a');
+      expect(items[booking.id]).toBe('PAID');
+    });
+
+    it('GET bookings/admin e GET customers/:userId/bookings expõem paymentStatus (null sem Payment) e respeitam a arena', async () => {
+      const semPagamento = await createConfirmedBooking(courtAId, customerAId, 212);
+      const pago = await bookingWithPayment(214);
+      await payViaWebhook(pago.payment.providerPaymentId!);
+
+      const from = new Date(Date.now() + 211 * 3_600_000).toISOString();
+      const to = new Date(Date.now() + 216 * 3_600_000).toISOString();
+      const admin = await request(app.getHttpServer())
+        .get(`/v1/arenas/${arenaAId}/courts/${courtAId}/bookings/admin`)
+        .query({ from, to })
+        .set(...authHeader('token-owner-a'))
+        .expect(200);
+      const adminById = Object.fromEntries(
+        (admin.body as DashboardItem[]).map((b) => [b.id, b.paymentStatus]),
+      );
+      expect(adminById[semPagamento.id]).toBeNull();
+      expect(adminById[pago.booking.id]).toBe('PAID');
+
+      const customers = await request(app.getHttpServer())
+        .get(`/v1/arenas/${arenaAId}/customers/${customerAId}/bookings`)
+        .set(...authHeader('token-admin-a'))
+        .expect(200);
+      const byId = Object.fromEntries(
+        (customers.body as DashboardItem[]).map((b) => [b.id, b.paymentStatus]),
+      );
+      expect(byId[semPagamento.id]).toBeNull();
+      expect(byId[pago.booking.id]).toBe('PAID');
+      expect(JSON.stringify(customers.body)).not.toContain(pago.payment.providerPaymentId!);
+
+      await request(app.getHttpServer())
+        .get(`/v1/arenas/${arenaAId}/customers/${customerAId}/bookings`)
+        .set(...authHeader('token-owner-b'))
+        .expect(403);
+    });
+
+    it('OWNER cancela reserva PAGA do cliente pelo endpoint existente: Booking CANCELLED, Payment REFUNDED (uma vez) e a reserva some da agenda', async () => {
+      const { booking, payment } = await bookingWithPayment(220);
+      await payViaWebhook(payment.providerPaymentId!);
+
+      await request(app.getHttpServer())
+        .post(cancelUrl(booking))
+        .set(...authHeader('token-owner-a'))
+        .expect(200);
+
+      const bookingRow = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+      expect(bookingRow.status).toBe('CANCELLED');
+      expect(bookingRow.cancelledByUserId).toBe(ownerAId);
+      const paymentRow = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+      expect(paymentRow.status).toBe('REFUNDED');
+      expect(fakeProvider.refundCalls).toEqual([
+        { providerPaymentId: payment.providerPaymentId, idempotencyKey: `refund:${payment.id}` },
+      ]);
+      const items = await dashboardItems(arenaAId, booking.startsAt, 'token-owner-a');
+      expect(items[booking.id]).toBeUndefined();
+
+      // Idempotente: repetir (duplo clique/retry) nunca gera segundo refund.
+      await request(app.getHttpServer())
+        .post(cancelUrl(booking))
+        .set(...authHeader('token-owner-a'))
+        .expect(200);
+      expect(fakeProvider.refundCalls).toHaveLength(1);
+    });
+
+    it('ADMIN cancela reserva com PIX pendente/abandonado: horário liberado, sem refund (nada foi pago)', async () => {
+      const { booking, payment } = await bookingWithPayment(222);
+
+      await request(app.getHttpServer())
+        .post(cancelUrl(booking))
+        .set(...authHeader('token-admin-a'))
+        .expect(200);
+
+      const bookingRow = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+      expect(bookingRow.status).toBe('CANCELLED');
+      expect(fakeProvider.refundCalls).toHaveLength(0);
+      const paymentRow = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+      expect(paymentRow.status).toBe('PENDING'); // Payment não é reescrito pelo cancelamento
+    });
+
+    it('isolamento e autorização: OWNER de outra arena e outro CUSTOMER não cancelam (403); reserva inexistente 404; booking de outra arena por courtId trocado 404', async () => {
+      const { booking } = await bookingWithPayment(224);
+
+      await request(app.getHttpServer())
+        .post(cancelUrl(booking))
+        .set(...authHeader('token-owner-b'))
+        .expect(403);
+      await request(app.getHttpServer())
+        .post(cancelUrl(booking))
+        .set(...authHeader('token-customer-c'))
+        .expect(403);
+      await request(app.getHttpServer())
+        .post(cancelUrl({ id: 'inexistente', courtId: courtAId }))
+        .set(...authHeader('token-owner-a'))
+        .expect(404);
+      // arenaId da arena B com a quadra/reserva da arena A: nunca escapa do isolamento.
+      const cross = await request(app.getHttpServer())
+        .post(cancelUrl(booking, arenaBId))
+        .set(...authHeader('token-owner-b'));
+      expect([403, 404]).toContain(cross.status);
+
+      const bookingRow = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+      expect(bookingRow.status).toBe('CONFIRMED'); // nenhuma das tentativas cancelou
+    });
+
+    it('reserva que já começou não é cancelada nem por OWNER (400) e nada é reembolsado', async () => {
+      const started = await createConfirmedBooking(courtAId, customerAId, -0.5);
+
+      await request(app.getHttpServer())
+        .post(cancelUrl(started))
+        .set(...authHeader('token-owner-a'))
+        .expect(400);
+
+      const row = await prisma.booking.findUniqueOrThrow({ where: { id: started.id } });
+      expect(row.status).toBe('CONFIRMED');
+      expect(fakeProvider.refundCalls).toHaveLength(0);
     });
   });
 });
