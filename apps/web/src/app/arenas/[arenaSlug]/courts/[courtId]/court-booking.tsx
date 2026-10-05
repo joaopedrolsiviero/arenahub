@@ -93,16 +93,17 @@ export function CourtBooking({ arenaId, courtId }: { arenaId: string; courtId: s
   // mandado pro login volta pra cá com a MESMA seleção, sem escolher de novo.
   function handleToggleSlot(slot: AvailabilitySlot) {
     setConflictMessage(null);
-    setSelectedStartTimes((current) => {
-      const next = new Set(current);
-      if (next.has(slot.startsAt)) {
-        next.delete(slot.startsAt);
-      } else {
-        next.add(slot.startsAt);
-      }
-      updateSlotsParam(next);
-      return next;
-    });
+    // Calculado fora do updater do setState: o updater roda durante o render
+    // e precisa ser puro — chamar router.replace lá dentro atualiza o Router
+    // no meio do render do CourtBooking.
+    const next = new Set(selectedStartTimes);
+    if (next.has(slot.startsAt)) {
+      next.delete(slot.startsAt);
+    } else {
+      next.add(slot.startsAt);
+    }
+    setSelectedStartTimes(next);
+    updateSlotsParam(next);
     setIdempotencyKey(crypto.randomUUID());
   }
 
