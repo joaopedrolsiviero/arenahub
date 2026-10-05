@@ -1,6 +1,6 @@
 # ArenaHub
 
-[![CI](https://github.com/fraagelo/arenahub/actions/workflows/ci.yml/badge.svg)](https://github.com/fraagelo/arenahub/actions/workflows/ci.yml)
+[![CI](https://github.com/joaopedrolsiviero/arenahub/actions/workflows/ci.yml/badge.svg)](https://github.com/joaopedrolsiviero/arenahub/actions/workflows/ci.yml)
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
 ![NestJS](https://img.shields.io/badge/NestJS-E0234E?logo=nestjs&logoColor=white)
 ![Next.js](https://img.shields.io/badge/Next.js-000000?logo=nextdotjs&logoColor=white)
@@ -163,7 +163,7 @@ Meta). O banco, as constraints e os locks rodam de verdade.
 **Pré-requisitos:** Node.js 20+ (desenvolvido em Node 24), pnpm (`corepack enable`) e Docker.
 
 ```bash
-git clone https://github.com/fraagelo/arenahub.git
+git clone https://github.com/joaopedrolsiviero/arenahub.git
 cd arenahub
 pnpm install
 
@@ -235,4 +235,4 @@ da conta Meta Business, que está em andamento. O código e os testes desse cana
 **João Pedro Lopes Siviero**
 
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-0A66C2?logo=linkedin&logoColor=white)](https://www.linkedin.com/in/jo%C3%A3o-pedro-lopes-siviero-a22634364/)
-[![GitHub](https://img.shields.io/badge/GitHub-fraagelo-181717?logo=github&logoColor=white)](https://github.com/fraagelo)
+[![GitHub](https://img.shields.io/badge/GitHub-joaopedrolsiviero-181717?logo=github&logoColor=white)](https://github.com/joaopedrolsiviero)
