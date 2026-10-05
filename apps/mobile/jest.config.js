@@ -10,4 +10,7 @@ module.exports = {
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1',
   },
+  // O primeiro teste de cada suíte monta uma tela RN inteira; no CI, com
+  // api/web/mobile rodando em paralelo, isso passava dos 5s padrão do Jest.
+  testTimeout: 20000,
 };
