@@ -62,7 +62,11 @@ describe('Production hardening — Fase 18 (e2e)', () => {
     app.useGlobalPipes(
       new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
     );
-    await app.init();
+    // listen() em vez de só init(): com o servidor sem porta, o supertest abre
+    // uma na primeira requisição e a FECHA quando ela termina — com várias
+    // requisições simultâneas (testes de rate limit abaixo), isso derruba as
+    // conexões das outras em andamento (ECONNRESET).
+    await app.listen(0, '127.0.0.1');
 
     const created = await request(app.getHttpServer())
       .post(`/v1/arenas/${arenaId}/invitations`)

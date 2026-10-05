@@ -254,7 +254,8 @@ describe('Assistente de IA operacional (e2e)', () => {
     app.useGlobalPipes(
       new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
     );
-    await app.init();
+    // listen(), não init(): ver production-hardening.e2e-spec.ts (ECONNRESET).
+    await app.listen(0, '127.0.0.1');
   });
 
   afterAll(async () => {
