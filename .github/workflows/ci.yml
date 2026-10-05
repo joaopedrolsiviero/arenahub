@@ -81,3 +81,10 @@ jobs:
 
       - name: Build
         run: pnpm turbo run build
+        env:
+          # O `expo export` do mobile renderiza as rotas estaticamente e
+          # `src/lib/env.ts` lança se estas faltarem. Valores fictícios: a chave
+          # só precisa ter o formato válido de publishable key do Clerk
+          # (pk_test_ + base64 de "<dominio>$"), nunca uma credencial real.
+          EXPO_PUBLIC_API_URL: "http://localhost:3001/v1"
+          EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY: "pk_test_Y2xlcmsuZXhhbXBsZS5jb20k"
